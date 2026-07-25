@@ -1,0 +1,6 @@
+node_modules/
+.env
+uploads/
+
+# Firebase service account — contains a private key, never commit
+gossips-app-firebase-adminsdk-*.json

@@ -1,0 +1,605 @@
+import mongoose from "mongoose";
+import Message from "../models/Message.js";
+import User from "../models/User.js";
+import Post from "../models/Post.js";
+import Comment from "../models/Comment.js";
+import Group from "../models/Group.js";
+import GroupMember from "../models/GroupMember.js";
+import Follow from "../models/Follow.js";
+import UserRelation from "../models/UserRelation.js";
+import UserSettings from "../models/UserSettings.js";
+import { escapeRegex } from "../utils/respond.js";
+import { getIO, getUserSocket } from "../config/socket.js";
+import { loadVisibleContent } from "../utils/contentVisibility.js";
+import { attachSharedContent, stripSharedSnapshot } from "../utils/resolveSharedContent.js";
+
+const USER_CARD = "_id username name profilePic isVerified isPrivate";
+
+// Matches the rest of the app (userController's ACTIVE_ACCOUNT_FILTER). An
+// equality check on "active" would silently drop every account created before
+// `accountStatus` existed, since $nin also matches a missing field.
+const ACTIVE_ACCOUNT = {
+  accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Permission helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Ids the caller has blocked, or who have blocked the caller. Both directions. */
+const blockedIdSet = async (userId, otherIds) => {
+  if (!otherIds.length) return new Set();
+  const rows = await UserRelation.find({
+    kind: "block",
+    $or: [
+      { from: userId, to: { $in: otherIds } },
+      { from: { $in: otherIds }, to: userId },
+    ],
+  })
+    .select("from to")
+    .lean();
+
+  const blocked = new Set();
+  for (const row of rows) {
+    const from = row.from.toString();
+    blocked.add(from === userId.toString() ? row.to.toString() : from);
+  }
+  return blocked;
+};
+
+/** Accounts the caller has hidden from their message-suggestion lists. */
+const hiddenSuggestionIds = async (userId) => {
+  const rows = await UserRelation.find({ from: userId, kind: "hide_suggestion" })
+    .select("to")
+    .lean();
+  return new Set(rows.map((r) => r.to.toString()));
+};
+
+/**
+ * Which of `recipientIds` will accept a DM from `senderId`, honouring
+ * `privacy.whoCanMessage`. Batched — the socket handler does this one user at
+ * a time, which is fine for a single send but not for a share to twenty.
+ */
+const messageableIdSet = async (senderId, recipientIds) => {
+  if (!recipientIds.length) return new Set();
+
+  const settings = await UserSettings.find({ user: { $in: recipientIds } })
+    .select("user privacy.whoCanMessage")
+    .lean();
+
+  const policyByUser = new Map(
+    settings.map((s) => [s.user.toString(), s.privacy?.whoCanMessage || "everyone"])
+  );
+
+  // Only resolve follow edges if some recipient actually restricts messaging.
+  const restricted = recipientIds.filter((id) => {
+    const policy = policyByUser.get(id.toString()) || "everyone";
+    return policy === "followers" || policy === "followers_following";
+  });
+
+  let recipientFollowsSender = new Set();
+  let senderFollowsRecipient = new Set();
+
+  if (restricted.length) {
+    const [inbound, outbound] = await Promise.all([
+      Follow.find({
+        follower: { $in: restricted },
+        following: senderId,
+        status: "accepted",
+      })
+        .select("follower")
+        .lean(),
+      Follow.find({
+        follower: senderId,
+        following: { $in: restricted },
+        status: "accepted",
+      })
+        .select("following")
+        .lean(),
+    ]);
+    recipientFollowsSender = new Set(inbound.map((f) => f.follower.toString()));
+    senderFollowsRecipient = new Set(outbound.map((f) => f.following.toString()));
+  }
+
+  const allowed = new Set();
+  for (const id of recipientIds) {
+    const key = id.toString();
+    switch (policyByUser.get(key) || "everyone") {
+      case "none":
+        break;
+      case "followers":
+        if (recipientFollowsSender.has(key)) allowed.add(key);
+        break;
+      case "followers_following":
+        if (recipientFollowsSender.has(key) || senderFollowsRecipient.has(key)) {
+          allowed.add(key);
+        }
+        break;
+      default:
+        allowed.add(key);
+    }
+  }
+  return allowed;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /chats/share-targets
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * People to offer in the share sheet, ranked the way Instagram does it:
+ * accounts you actually talk to first (by volume, then recency), then people
+ * you follow, then suggestions. Blocked accounts in either direction are
+ * dropped at every stage.
+ */
+export const getShareTargets = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const search = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 30, 1), 50);
+
+    // ── Searching: one flat, ranked list ────────────────────────────────────
+    if (search) {
+      const rx = new RegExp(escapeRegex(search), "i");
+      const candidates = await User.find({
+        _id: { $ne: userId },
+        ...ACTIVE_ACCOUNT,
+        $or: [{ username: rx }, { name: rx }],
+      })
+        .select(USER_CARD)
+        .limit(limit * 2)
+        .lean();
+
+      const [blocked, hidden] = await Promise.all([
+        blockedIdSet(userId, candidates.map((c) => c._id)),
+        hiddenSuggestionIds(userId),
+      ]);
+
+      return res.status(200).json({
+        targets: candidates
+          .filter((c) => !blocked.has(c._id.toString()) && !hidden.has(c._id.toString()))
+          .slice(0, limit)
+          .map((user) => ({ user, reason: "search" })),
+        groups: await searchableGroups(userId, rx),
+      });
+    }
+
+    // ── Default: most-interacted → following → suggested ────────────────────
+    const conversationKeys = await Message.aggregate([
+      {
+        $match: {
+          isGroupMessage: { $ne: true },
+          isDeleted: { $ne: true },
+          // Bounded window: without it this scans the whole message history
+          // every time the share sheet opens.
+          createdAt: { $gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+          $or: [{ sender: userId }, { receiver: userId }],
+        },
+      },
+      {
+        $group: {
+          _id: { $cond: [{ $eq: ["$sender", userId] }, "$receiver", "$sender"] },
+          messages: { $sum: 1 },
+          lastAt: { $max: "$createdAt" },
+        },
+      },
+      { $sort: { messages: -1, lastAt: -1 } },
+      { $limit: limit },
+    ]);
+
+    const interactedIds = conversationKeys.map((c) => c._id).filter(Boolean);
+
+    const followingRows = await Follow.find({ follower: userId, status: "accepted" })
+      .select("following")
+      .sort({ createdAt: -1 })
+      .limit(limit * 2)
+      .lean();
+    const followingIds = followingRows.map((f) => f.following);
+
+    // Suggestions only need to fill whatever's left.
+    const seen = new Set([...interactedIds, ...followingIds].map((id) => id.toString()));
+    let suggestedIds = [];
+    if (seen.size < limit) {
+      const suggestions = await User.find({
+        _id: { $ne: userId, $nin: [...seen] },
+        ...ACTIVE_ACCOUNT,
+      })
+        .select("_id")
+        .sort({ isVerified: -1, "counts.followers": -1 })
+        .limit(limit - seen.size)
+        .lean();
+      suggestedIds = suggestions.map((s) => s._id);
+    }
+
+    const allIds = [...interactedIds, ...followingIds, ...suggestedIds];
+    const [blocked, hidden] = await Promise.all([
+      blockedIdSet(userId, allIds),
+      hiddenSuggestionIds(userId),
+    ]);
+
+    const users = await User.find({
+      _id: { $in: allIds },
+      ...ACTIVE_ACCOUNT,
+    })
+      .select(USER_CARD)
+      .lean();
+    const byId = new Map(users.map((u) => [u._id.toString(), u]));
+
+    const reasonFor = new Map();
+    interactedIds.forEach((id) => reasonFor.set(id.toString(), "frequent"));
+    followingIds.forEach((id) => {
+      if (!reasonFor.has(id.toString())) reasonFor.set(id.toString(), "following");
+    });
+    suggestedIds.forEach((id) => {
+      if (!reasonFor.has(id.toString())) reasonFor.set(id.toString(), "suggested");
+    });
+
+    // Order is the concatenation order, deduplicated — ranking is already baked in.
+    const targets = [];
+    const emitted = new Set();
+    for (const id of allIds) {
+      const key = id.toString();
+      if (emitted.has(key) || blocked.has(key) || hidden.has(key) || !byId.has(key)) continue;
+      emitted.add(key);
+      targets.push({ user: byId.get(key), reason: reasonFor.get(key) });
+      if (targets.length >= limit) break;
+    }
+
+    return res.status(200).json({
+      targets,
+      groups: await searchableGroups(userId, null),
+    });
+  } catch (error) {
+    console.error("getShareTargets error:", error);
+    return res.status(500).json({ error: "Failed to load share targets" });
+  }
+};
+
+/** Groups the caller can post into, optionally filtered by name. */
+const searchableGroups = async (userId, nameRegex) => {
+  const memberships = await GroupMember.find({ user: userId, isBanned: { $ne: true } })
+    .select("group")
+    .lean();
+  if (!memberships.length) return [];
+
+  const query = {
+    _id: { $in: memberships.map((m) => m.group) },
+    isActive: { $ne: false },
+    isDeleted: { $ne: true },
+  };
+  if (nameRegex) query.name = nameRegex;
+
+  return Group.find(query).select("_id name avatar counts.members").limit(20).lean();
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /chats/share
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Loads the post/comment being shared and freezes a fallback snapshot.
+ *
+ * Gated on the sharer's own visibility — without that check this endpoint
+ * would happily read any private post by id and write its full text into a
+ * message document, which is a read-anything primitive.
+ */
+const loadShareTarget = async (viewerId, targetType, targetId) => {
+  if (!["post", "comment"].includes(targetType)) return { error: "Unknown content type" };
+  if (!mongoose.isValidObjectId(targetId)) return { error: "Invalid content id" };
+
+  const { doc, error } = await loadVisibleContent(viewerId, targetType, targetId);
+  if (error) return { error };
+
+  return {
+    doc,
+    sharedContent: {
+      kind: targetType,
+      post: targetType === "post" ? doc._id : undefined,
+      comment: targetType === "comment" ? doc._id : undefined,
+      snapshot: {
+        authorId: doc.author?._id || null,
+        authorUsername: doc.author?.username || "",
+        authorName: doc.author?.name || "",
+        authorPic: doc.author?.profilePic || "",
+        content: doc.content || "",
+        media: Array.isArray(doc.media) ? doc.media.slice(0, 4) : [],
+        createdAt: doc.createdAt,
+      },
+    },
+  };
+};
+
+const MAX_RECIPIENTS = 25;
+
+export const shareContent = async (req, res) => {
+  try {
+    const userId = req.user._id;
+    const {
+      targetType,
+      targetId,
+      recipientIds = [],
+      groupIds = [],
+      newGroupMemberIds = [],
+      groupName,
+      note,
+    } = req.body;
+
+    const target = await loadShareTarget(userId, targetType, targetId);
+    if (target.error) return res.status(404).json({ error: target.error });
+
+    const cleanIds = (ids) =>
+      (Array.isArray(ids) ? ids : [])
+        .filter((id) => mongoose.isValidObjectId(id))
+        .map((id) => id.toString())
+        .filter((id) => id !== userId.toString());
+
+    const recipients = [...new Set(cleanIds(recipientIds))];
+    const groups = [...new Set((Array.isArray(groupIds) ? groupIds : []).filter((id) =>
+      mongoose.isValidObjectId(id)
+    ))];
+    const newGroupMembers = [...new Set(cleanIds(newGroupMemberIds))];
+
+    if (!recipients.length && !groups.length && !newGroupMembers.length) {
+      return res.status(400).json({ error: "Pick someone to send this to" });
+    }
+    // A "group" of one isn't a group. Without this the request would succeed
+    // having done nothing at all, and the client would show no feedback.
+    if (newGroupMembers.length === 1 && !recipients.length && !groups.length) {
+      return res.status(400).json({ error: "Pick at least two people for a group" });
+    }
+    if (recipients.length + groups.length + newGroupMembers.length > MAX_RECIPIENTS) {
+      return res.status(400).json({ error: `You can share with up to ${MAX_RECIPIENTS} at once` });
+    }
+
+    const text = typeof note === "string" ? note.trim().slice(0, 1000) : "";
+    const io = getIO();
+    const results = { sent: [], failed: [] };
+
+    // ── Optional: spin up a group from the selected people ──────────────────
+    let createdGroup = null;
+    if (newGroupMembers.length >= 2) {
+      const members = await User.find({
+        _id: { $in: newGroupMembers },
+        ...ACTIVE_ACCOUNT,
+      })
+        .select("username name")
+        .lean();
+
+      const blocked = await blockedIdSet(userId, members.map((m) => m._id));
+      // A group must not become a way around whoCanMessage: someone who won't
+      // accept your DM shouldn't be pulled into a thread with you either.
+      const messageable = await messageableIdSet(userId, members.map((m) => m._id));
+      const usable = members.filter(
+        (m) => !blocked.has(m._id.toString()) && messageable.has(m._id.toString())
+      );
+
+      if (usable.length < 2) {
+        return res.status(400).json({ error: "Not enough people available for a group" });
+      }
+
+      // Group.name is required, so build one the way Instagram labels a new
+      // thread. The group can be renamed afterwards.
+      const names = usable.map((m) => m.name?.split(" ")[0] || m.username);
+      const label =
+        names.length <= 3
+          ? names.join(", ")
+          : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+
+      // A name typed in the sheet wins; otherwise fall back to member names.
+      const chosenName =
+        typeof groupName === "string" && groupName.trim()
+          ? groupName.trim().slice(0, 100)
+          : `${req.user.name?.split(" ")[0] || req.user.username}, ${label}`.slice(0, 100);
+
+      const group = await Group.create({
+        name: chosenName,
+        type: "private",
+        createdBy: userId,
+      });
+
+      await GroupMember.insertMany([
+        { group: group._id, user: userId, role: "super_admin", addedBy: userId },
+        ...usable.map((m) => ({
+          group: group._id,
+          user: m._id,
+          role: "member",
+          addedBy: userId,
+        })),
+      ]);
+      await Group.updateOne(
+        { _id: group._id },
+        { $set: { "counts.members": usable.length + 1 } }
+      );
+
+      createdGroup = { _id: group._id, name: group.name, avatar: group.avatar };
+      groups.push(group._id.toString());
+
+      // Pull everyone online into the room, the sender included — otherwise
+      // io.to(group) skips them and their own share never appears.
+      for (const m of [...usable, { _id: userId }]) {
+        const sockets = getUserSocket(m._id.toString());
+        if (sockets) {
+          for (const socketId of sockets) {
+            io.sockets.sockets.get(socketId)?.join(group._id.toString());
+            if (!m._id.equals?.(userId)) {
+              io.to(socketId).emit("addedToGroup", { group: createdGroup, addedBy: userId });
+            }
+          }
+        }
+      }
+    }
+
+    // ── Direct messages ─────────────────────────────────────────────────────
+    if (recipients.length) {
+      const objectIds = recipients.map((id) => new mongoose.Types.ObjectId(id));
+
+      const [existing, blocked, messageable] = await Promise.all([
+        User.find({ _id: { $in: objectIds }, ...ACTIVE_ACCOUNT })
+          .select("_id username name profilePic isVerified")
+          .lean(),
+        blockedIdSet(userId, objectIds),
+        messageableIdSet(userId, objectIds),
+      ]);
+      const byId = new Map(existing.map((u) => [u._id.toString(), u]));
+
+      for (const id of recipients) {
+        const user = byId.get(id);
+        if (!user) {
+          results.failed.push({ id, reason: "Account unavailable" });
+          continue;
+        }
+        if (blocked.has(id)) {
+          results.failed.push({ id, username: user.username, reason: "Can't message this account" });
+          continue;
+        }
+        if (!messageable.has(id)) {
+          results.failed.push({
+            id,
+            username: user.username,
+            reason: "They don't accept messages from you",
+          });
+          continue;
+        }
+
+        const message = await Message.create({
+          sender: userId,
+          receiver: user._id,
+          conversation: Message.dmConversationKey(userId, user._id),
+          content: text,
+          messageType: "post_share",
+          sharedContent: target.sharedContent,
+          status: "sent",
+        });
+
+        const populated = await Message.findById(message._id)
+          .populate("sender", "username name profilePic isVerified")
+          .populate("receiver", "username name profilePic isVerified")
+          .lean();
+
+        // Resolved for *this* recipient before it leaves the server, so a
+        // private post they can't see arrives locked rather than in the clear.
+        const forRecipient = JSON.parse(JSON.stringify(populated));
+        await attachSharedContent([forRecipient], user._id);
+
+        const sockets = getUserSocket(user._id.toString());
+        if (sockets) {
+          for (const socketId of sockets) {
+            io.to(socketId).emit("receiveMessage", { ...forRecipient, isOwn: false });
+            // Deep copy: a shallow spread shares the same `sharedContent`
+            // object, so stripping it here would also strip `resolved` off the
+            // message emitted above — the card would arrive with no media.
+            io.to(socketId).emit("chatUpdated", {
+              user: { _id: userId, username: req.user.username },
+              latestMessage: stripSharedSnapshot(JSON.parse(JSON.stringify(forRecipient))),
+              unreadCount: 1,
+            });
+          }
+        }
+
+        // Echo to the sender's own sockets — otherwise sharing into a thread
+        // you already have open shows nothing until you reload.
+        const senderSockets = getUserSocket(userId.toString());
+        if (senderSockets) {
+          const forSender = JSON.parse(JSON.stringify(populated));
+          await attachSharedContent([forSender], userId);
+          for (const socketId of senderSockets) {
+            io.to(socketId).emit("receiveMessage", { ...forSender, isOwn: true });
+          }
+        }
+
+        results.sent.push({ id, username: user.username });
+      }
+    }
+
+    // ── Groups ──────────────────────────────────────────────────────────────
+    for (const groupId of groups) {
+      const [membership, groupDoc] = await Promise.all([
+        GroupMember.findOne({ group: groupId, user: userId, isBanned: { $ne: true } }),
+        Group.findById(groupId).select("isActive isDeleted").lean(),
+      ]);
+
+      if (!membership) {
+        results.failed.push({ id: groupId, reason: "You're not in that group" });
+        continue;
+      }
+      if (!groupDoc || groupDoc.isDeleted || groupDoc.isActive === false) {
+        results.failed.push({ id: groupId, reason: "That group is no longer active" });
+        continue;
+      }
+      // Same permission the socket group-send path enforces.
+      if (!membership.getPermissions().sendMessages) {
+        results.failed.push({ id: groupId, reason: "You can't post in that group" });
+        continue;
+      }
+
+      const message = await Message.create({
+        sender: userId,
+        group: groupId,
+        isGroupMessage: true,
+        conversation: Message.groupConversationKey(groupId),
+        content: text,
+        messageType: "post_share",
+        sharedContent: target.sharedContent,
+        status: "sent",
+      });
+
+      const populated = await Message.findById(message._id)
+        .populate("sender", "username name profilePic isVerified")
+        .lean();
+
+      // One emit reaches every member, so it can't be resolved per reader.
+      // Strip it to a marker; each client gets the real card, evaluated
+      // against them, on its next thread fetch.
+      io.to(groupId.toString()).emit("receiveGroupMessage", stripSharedSnapshot(populated));
+      await Group.updateOne({ _id: groupId }, { $inc: { "counts.messagesTotal": 1 } });
+
+      results.sent.push({ id: groupId, isGroup: true });
+    }
+
+    return res.status(200).json({
+      message: results.sent.length
+        ? `Sent to ${results.sent.length}`
+        : "Couldn't send to anyone",
+      ...results,
+      createdGroup,
+    });
+  } catch (error) {
+    console.error("shareContent error:", error);
+    return res.status(500).json({ error: "Failed to share" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /chats/share-targets/hide
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * "Don't suggest this person again." Recorded as a UserRelation so it survives
+ * across devices, and deliberately separate from mute/block — it only removes
+ * them from suggestion lists, nothing else changes.
+ */
+export const hideShareSuggestion = async (req, res) => {
+  try {
+    const { userId: targetId } = req.body;
+    if (!mongoose.isValidObjectId(targetId)) {
+      return res.status(400).json({ error: "Invalid account" });
+    }
+    if (targetId.toString() === req.user._id.toString()) {
+      return res.status(400).json({ error: "Invalid account" });
+    }
+
+    const target = await User.findById(targetId).select("username").lean();
+    if (!target) return res.status(404).json({ error: "Account not found" });
+
+    await UserRelation.updateOne(
+      { from: req.user._id, to: targetId, kind: "hide_suggestion" },
+      { $setOnInsert: { from: req.user._id, to: targetId, kind: "hide_suggestion" } },
+      { upsert: true }
+    );
+
+    return res.status(200).json({ message: `@${target.username} hidden from suggestions` });
+  } catch (error) {
+    console.error("hideShareSuggestion error:", error);
+    return res.status(500).json({ error: "Failed to hide suggestion" });
+  }
+};

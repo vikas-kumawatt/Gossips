@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Gossips app icon">
+  <rect width="512" height="512" rx="116" fill="#0a0a0a" />
+  <clipPath id="rounded">
+    <rect width="512" height="512" rx="116" />
+  </clipPath>
+  <image
+    href="/images/logo2.jpg"
+    width="512"
+    height="512"
+    preserveAspectRatio="xMidYMid slice"
+    clip-path="url(#rounded)"
+  />
+</svg>

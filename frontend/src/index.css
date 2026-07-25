@@ -1,0 +1,50 @@
+@import "tailwindcss";
+@import "@flaticon/flaticon-uicons/css/all/all";
+
+:root {
+  background: #0a0a0a;
+  color: #fff;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none; /* Chrome, Safari and Opera */
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px; 
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent; 
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #555; 
+  border-radius: 8px; 
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #777; 
+}
+
+.custom-scrollbar {
+  scrollbar-width: thin; 
+  scrollbar-color: #555 transparent; 
+}
+
+.no-scroll {
+  overflow: hidden;
+  touch-action: none; 
+}
+
+@utility input-box {
+  @apply w-[100%] rounded-xl p-4 text-white bg-neutral-800 border border-transparent placeholder:text-neutral-500 outline-0 focus:ring-0 focus:border-neutral-500 caret-white;
+}
+
+@utility input-icon {
+  @apply absolute left-4 top-1/2 -translate-y-1/2 text-white opacity-50 justify-center items-center;
+}
