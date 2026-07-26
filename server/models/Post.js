@@ -1,4 +1,89 @@
 import { Schema, model } from "mongoose";
+import { MEDIA_TYPES } from "../utils/mediaTypes.js";
+
+/**
+ * A single attachment. Typed rather than a bare URL string, because audio
+ * can't be recognised from its extension reliably and needs a duration and a
+ * waveform to render a scrubber before the file has loaded.
+ *
+ * Legacy rows still hold plain strings; `normalizeMedia` upgrades them on read,
+ * so nothing had to be migrated. `strict: false` isn't needed — Mongoose casts
+ * a stored string to `{}` and drops it, which is why every read path must go
+ * through the normaliser rather than trusting the hydrated document.
+ */
+const mediaItemSchema = new Schema(
+  {
+    url:       { type: String, required: true },
+    type:      { type: String, enum: MEDIA_TYPES, default: "image" },
+    thumbnail: { type: String },
+    // Seconds. Audio and video only.
+    duration:  { type: Number, min: 0 },
+    // Normalised 0-1 amplitude samples, captured while recording. Lets the
+    // player draw the waveform immediately instead of decoding the file first.
+    waveform:  { type: [Number], default: undefined },
+    width:     { type: Number, min: 0 },
+    height:    { type: Number, min: 0 },
+  },
+  { _id: false }
+);
+
+/**
+ * A poll attached to a post or comment. X's rules: 2-4 options, one choice,
+ * 5 minutes to 7 days.
+ *
+ * Only the counts live here. Who voted for what is a separate PollVote
+ * collection, for the same reason likes and reposts were moved out of Post: an
+ * embedded voter array on something that goes viral grows without bound, ships
+ * every voter to every reader, and eventually hits the 16MB document ceiling.
+ */
+const pollSchema = new Schema(
+  {
+    question: { type: String, required: true, maxlength: 200, trim: true },
+    options: {
+      type: [
+        {
+          _id: false,
+          // Stable across edits and reorderings — votes reference this, not
+          // the array index.
+          id:    { type: String, required: true },
+          text:  { type: String, required: true, maxlength: 60, trim: true },
+          votes: { type: Number, default: 0, min: 0 },
+        },
+      ],
+      validate: {
+        validator: (v) => v.length >= 2 && v.length <= 4,
+        message: "A poll needs between 2 and 4 options",
+      },
+    },
+    totalVotes: { type: Number, default: 0, min: 0 },
+    // Set when the post goes public, not when it's composed — a poll scheduled
+    // for tomorrow shouldn't have been running overnight. See the scheduler.
+    closesAt:   { type: Date, default: null },
+    // The chosen length, kept so the publisher can start the clock later.
+    durationMinutes: { type: Number, required: true, min: 5, max: 7 * 24 * 60 },
+  },
+  { _id: false }
+);
+
+/**
+ * Where a post was tagged. Coordinates come from Nominatim (OpenStreetMap) or
+ * the device, and are stored as plain numbers rather than GeoJSON because
+ * nothing queries by proximity — this is a label, not a search index. If
+ * "posts near me" ever ships, this wants to become a 2dsphere point.
+ */
+const locationSchema = new Schema(
+  {
+    name:    { type: String, required: true, maxlength: 120, trim: true },
+    address: { type: String, maxlength: 300, trim: true },
+    lat:     { type: Number, min: -90,  max: 90 },
+    lng:     { type: Number, min: -180, max: 180 },
+    // Nominatim's id for the place, so repeat picks dedupe.
+    placeId: { type: String },
+  },
+  { _id: false }
+);
+
+export { mediaItemSchema, pollSchema, locationSchema };
 
 /**
  * Post — slim, count-cached.
@@ -33,7 +118,14 @@ const postSchema = new Schema(
 
     content: { type: String, maxlength: 500 },
     icon:    { type: String, default: "" },
-    media:   { type: [String], default: [] },
+    // Typed since the GIF/audio work; legacy rows hold bare URL strings and are
+    // upgraded on read by normalizeMedia. Never render this field directly.
+    media:   { type: [mediaItemSchema], default: [] },
+
+    // At most one of poll / media is set — see ATTACHMENT_KINDS. Location is
+    // independent and can accompany either.
+    poll:     { type: pollSchema,     default: null },
+    location: { type: locationSchema, default: null },
 
     // Quote / reply relationships
     parentGossip:   { type: Schema.Types.ObjectId, ref: "Post",    default: null },

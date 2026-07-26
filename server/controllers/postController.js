@@ -8,6 +8,7 @@ import Like from "../models/Like.js";
 import Repost from "../models/Repost.js";
 import PostView from "../models/PostView.js";
 import Saved from "../models/Saved.js";
+import PollVote from "../models/PollVote.js";
 import Follow from "../models/Follow.js";
 import NotInterested from "../models/NotInterested.js";
 import UserRelation from "../models/UserRelation.js";
@@ -19,7 +20,9 @@ import {
   parseCursorLimit,
 } from "../utils/cursorPagination.js";
 import { sendNotification } from "../utils/notifications.js";
-import { uploadFiles } from "../utils/uploadFiles.js";
+import { uploadMedia } from "../utils/uploadFiles.js";
+import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
+import { normalizeMedia } from "../utils/mediaTypes.js";
 import { getOrSet, del, CacheKeys } from "../utils/cache.js";
 import { resolveMentions } from "../utils/mentions.js";
 import { parseHashtags } from "../utils/hashtags.js";
@@ -60,6 +63,50 @@ const populatePost = (postId) =>
     })
     .lean();
 
+/**
+ * Reuses selected media from the caller's own saved draft. The client sends
+ * URLs only as an allow-listed selection; the database remains the source of
+ * the actual typed media payload, so this cannot be used to attach someone
+ * else's or an arbitrary remote asset.
+ */
+const loadDraftMedia = async ({ sourceDraftId, sourceDraftMedia, userId }) => {
+  if (!sourceDraftId) return { media: [] };
+  if (!mongoose.isValidObjectId(sourceDraftId)) {
+    return { error: "That draft isn't valid", status: StatusCodes.BAD_REQUEST };
+  }
+
+  let requestedUrls;
+  try {
+    requestedUrls = typeof sourceDraftMedia === "string"
+      ? JSON.parse(sourceDraftMedia)
+      : sourceDraftMedia;
+  } catch {
+    return { error: "That draft media isn't valid", status: StatusCodes.BAD_REQUEST };
+  }
+  if (!Array.isArray(requestedUrls) || !requestedUrls.length || requestedUrls.length > 5 ||
+      requestedUrls.some((url) => typeof url !== "string" || !url)) {
+    return { error: "That draft media isn't valid", status: StatusCodes.BAD_REQUEST };
+  }
+
+  const sourceDraft = await Post.findOne({
+    _id: sourceDraftId,
+    author: userId,
+    isDraft: true,
+    scheduleStatus: null,
+  })
+    .select("media")
+    .lean();
+  if (!sourceDraft) return { error: "That draft isn't available", status: StatusCodes.NOT_FOUND };
+
+  const available = normalizeMedia(sourceDraft.media);
+  const requested = new Set(requestedUrls);
+  const media = available.filter((item) => requested.has(item.url));
+  if (media.length !== requested.size || media.length !== requestedUrls.length) {
+    return { error: "That draft media isn't available", status: StatusCodes.BAD_REQUEST };
+  }
+  return { media };
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Create / Save-draft / Drafts
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,6 +125,8 @@ export const createPost = async (req, res) => {
       whoCanReply,
       isAiGenerated,
       scheduledFor,
+      sourceDraftId,
+      sourceDraftMedia,
     } = req.body;
     const userId = req.user.id;
 
@@ -149,6 +198,24 @@ export const createPost = async (req, res) => {
       }
     }
 
+    // Uploads, GIF, poll and location, with the one-attachment rule applied.
+    const attached = await parseAttachments({
+      files: req.files || [],
+      body: req.body,
+      uploader: uploadMedia,
+    });
+    if (attached.error) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: attached.error });
+    }
+
+    const reused = !attached.media.length && !attached.poll
+      ? await loadDraftMedia({ sourceDraftId, sourceDraftMedia, userId })
+      : { media: [] };
+    if (reused.error) {
+      return res.status(reused.status).json({ success: false, message: reused.error });
+    }
+    const media = attached.media.length ? attached.media : reused.media;
+
     const newPost = {
       author: userId,
       content: content || "",
@@ -161,6 +228,12 @@ export const createPost = async (req, res) => {
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
       isAiGenerated: parseBooleanFlag(isAiGenerated),
+      media,
+      location: attached.location,
+      // The poll's clock starts when the post goes public, so a scheduled poll
+      // isn't already half over by the time anyone can see it. Immediate posts
+      // start it right here; the publisher does it for scheduled ones.
+      poll: attached.poll && !scheduleAt ? openPollClock(attached.poll) : attached.poll,
       // Enough for the scheduled-post card to render a preview. The version
       // that counts is re-captured at publish time, since that's when the
       // quote actually goes public.
@@ -172,14 +245,14 @@ export const createPost = async (req, res) => {
       scheduleStatus: scheduleAt ? "pending" : null,
     };
 
-    if (req.files?.length) {
-      newPost.media = await uploadFiles(req.files);
-    }
-
-    if (!content && !newPost.media?.length && !quotedComment && !quotedPost) {
+    // A poll or a location tag is content in its own right — a poll with no
+    // caption is perfectly normal.
+    const hasSomething =
+      content || newPost.media.length || newPost.poll || newPost.location || quotedComment || quotedPost;
+    if (!hasSomething) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         success: false,
-        message: "Post must have content, media, or a quote",
+        message: "Post must have content, media, a poll or a quote",
       });
     }
 
@@ -192,7 +265,7 @@ export const createPost = async (req, res) => {
         success: true,
         scheduled: true,
         message: "Post scheduled",
-        post: await populatePost(post._id),
+        post: await decorateContent(await populatePost(post._id), userId),
       });
     }
 
@@ -203,7 +276,7 @@ export const createPost = async (req, res) => {
     res.status(StatusCodes.CREATED).json({
       success: true,
       message: "Post created successfully",
-      post: await populatePost(post._id),
+      post: await decorateContent(await populatePost(post._id), userId),
     });
   } catch (error) {
     console.error("createPost error:", error);
@@ -221,8 +294,27 @@ export const saveDraft = async (req, res) => {
       isQuoteComment,
       whoCanReply,
       isAiGenerated,
+      sourceDraftId,
+      sourceDraftMedia,
     } = req.body;
     const userId = req.user.id;
+
+    const attached = await parseAttachments({
+      files: req.files || [],
+      body: req.body,
+      uploader: uploadMedia,
+    });
+    if (attached.error) {
+      return res.status(StatusCodes.BAD_REQUEST).json({ success: false, message: attached.error });
+    }
+
+    const reused = !attached.media.length && !attached.poll
+      ? await loadDraftMedia({ sourceDraftId, sourceDraftMedia, userId })
+      : { media: [] };
+    if (reused.error) {
+      return res.status(reused.status).json({ success: false, message: reused.error });
+    }
+    const media = attached.media.length ? attached.media : reused.media;
 
     const newDraft = {
       author: userId,
@@ -233,6 +325,11 @@ export const saveDraft = async (req, res) => {
       isQuoteComment: isQuoteComment || false,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
+      media,
+      location: attached.location,
+      // Left unopened — a draft's poll starts counting down when it's posted,
+      // however long it sits here first.
+      poll: attached.poll,
       // So the draft card renders the version that was quoted. The published
       // post gets a fresh snapshot in createPost, since that's when the quote
       // actually goes public.
@@ -241,14 +338,12 @@ export const saveDraft = async (req, res) => {
       isDraft: true,
     };
 
-    if (req.files?.length) {
-      newDraft.media = await uploadFiles(req.files);
-    }
-
-    if (!content && !newDraft.media?.length && !quotedPost && !quotedComment) {
+    const hasSomething =
+      content || newDraft.media.length || newDraft.poll || newDraft.location || quotedPost || quotedComment;
+    if (!hasSomething) {
       return res.status(StatusCodes.BAD_REQUEST).json({
         success: false,
-        message: "Draft must have content, media, or a quote",
+        message: "Draft must have content, media, a poll or a quote",
       });
     }
 
@@ -291,7 +386,8 @@ export const getDrafts = async (req, res) => {
       .lean();
 
     const { items: drafts, pageInfo } = buildCursorPageInfo(draftsRaw, limitNum);
-    res.status(200).json({ drafts, pageInfo });
+    // Your own drafts, so the poll projection always reveals — you're the author.
+    res.status(200).json({ drafts: await decorateContent(drafts, req.user.id), pageInfo });
   } catch (error) {
     console.error("getDrafts error:", error);
     res.status(500).json({ error: "Failed to fetch drafts" });
@@ -507,7 +603,8 @@ export const getHomeFeed = async (req, res) => {
         : postsWithViewer;
 
     res.status(200).json({
-      posts: rankedPosts,
+      // Typed media, and poll results reduced to what this reader may see.
+      posts: await decorateContent(rankedPosts, userId),
       pageInfo: {
         hasNextPage,
         nextCursor: hasNextPage ? encodeCursor(cursorSource) : null,
@@ -574,6 +671,13 @@ export const getUserPosts = async (req, res) => {
       : await fetchPage();
 
     if (!result) return res.status(404).json({ error: "User not found" });
+
+    /*
+     * Decorated after the cache, never inside it. The cached page is shared by
+     * every reader, so a poll projection baked into it would show one person's
+     * "you voted for B" to everyone else.
+     */
+    result.posts = await decorateContent(result.posts, req.user?._id);
 
     // Attach viewer like/repost/save status
     const viewerId = req.user?._id;
@@ -691,7 +795,14 @@ export const getPost = async (req, res) => {
 
     const viewerCanReply = userId ? await canUserReplyToTarget(userId, post) : true;
 
-    res.status(200).json({ ...post, viewerHasLiked, viewerHasReposted, viewerHasSaved, viewerIsFollowingAuthor, viewerCanReply });
+    res.status(200).json({
+      ...(await decorateContent(post, userId)),
+      viewerHasLiked,
+      viewerHasReposted,
+      viewerHasSaved,
+      viewerIsFollowingAuthor,
+      viewerCanReply,
+    });
   } catch (error) {
     console.error("getPost error:", error);
     res.status(500).json({ error: "Server error" });
@@ -792,6 +903,9 @@ export const deletePost = async (req, res) => {
 
     await Comment.deleteMany({ post: { $in: relatedPostIds } });
     await Notification.deleteMany({ entity: { $in: relatedPostIds }, entityType: "Post" });
+    // Votes outlive the post otherwise, and the unique index would then stop
+    // anyone voting again if the id were ever reused.
+    await PollVote.deleteMany({ target: { $in: relatedPostIds } });
 
     // Only published posts were ever counted. Decrementing for a draft or a
     // still-pending scheduled post would push the author's total below what
@@ -1221,7 +1335,7 @@ export const editPost = async (req, res) => {
     return res.status(StatusCodes.OK).json({
       success: true,
       message: "Post updated",
-      post: await populatePost(id),
+      post: await decorateContent(await populatePost(id), req.user.id),
     });
   } catch (error) {
     console.error("editPost error:", error);
@@ -1387,7 +1501,7 @@ export const getSavedPosts = async (req, res) => {
       viewerIsFollowingAuthor: followedAuthorSet.has((p.author?._id ?? p.author)?.toString()),
     }));
 
-    res.status(200).json({ posts: postsWithViewer, pageInfo });
+    res.status(200).json({ posts: await decorateContent(postsWithViewer, userId), pageInfo });
   } catch (error) {
     console.error("getSavedPosts error:", error);
     res.status(500).json({ error: "Server error" });
@@ -1460,7 +1574,7 @@ export const getLikedPosts = async (req, res) => {
       viewerIsFollowingAuthor: followingIds.has((p.author?._id ?? p.author)?.toString()),
     }));
 
-    res.status(200).json({ posts: postsWithViewer, pageInfo });
+    res.status(200).json({ posts: await decorateContent(postsWithViewer, userId), pageInfo });
   } catch (error) {
     console.error("getLikedPosts error:", error);
     res.status(500).json({ error: "Server error" });

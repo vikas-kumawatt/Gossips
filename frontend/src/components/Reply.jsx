@@ -7,6 +7,12 @@ import axios from "axios";
 import { Toaster, toast } from "react-hot-toast";
 import SchedulePickerSheet from "./SchedulePickerSheet";
 import { formatScheduleLabel } from "../lib/schedule";
+import {
+  ComposerPreviews,
+  ComposerSheets,
+  ComposerToolbar,
+} from "./ComposerAttachments";
+import useComposerAttachments from "../hooks/useComposerAttachments";
 import { REPLY_RESTRICTED_TEXT } from "../lib/replyAudience";
 
 const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdded }) => {
@@ -23,6 +29,12 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
   // When set, the reply is queued instead of posted. A Date in local time.
   const [scheduledFor, setScheduledFor] = useState(null);
   const [isSchedulePickerOpen, setIsSchedulePickerOpen] = useState(false);
+  // GIF, audio, poll and location — one implementation shared by all three
+  // composers. Photos stay in this component's own mediaFiles state.
+  const attachments = useComposerAttachments({
+    mediaCount: mediaFiles.length,
+    clearMedia: () => setMediaFiles([]),
+  });
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
@@ -34,7 +46,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
     const handleOutsideClick = (event) => {
       // The picker is a portal at document.body, so clicks inside it look
       // "outside" this card and would otherwise close the composer.
-      if (isSchedulePickerOpen) return;
+      if (isSchedulePickerOpen || attachments.openSheet) return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
         onClose();
       } else {
@@ -51,7 +63,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
       document.addEventListener("mousedown", handleOutsideClick);
     }
     return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [isOpen, onClose, isSchedulePickerOpen]);
+  }, [isOpen, onClose, isSchedulePickerOpen, attachments.openSheet]);
 
   useEffect(() => {
     if (isOpen && textareaRef.current) {
@@ -68,6 +80,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
     setReplyText("Anyone can reply & quote");
     setScheduledFor(null);
     setIsSchedulePickerOpen(false);
+    attachments.reset();
   };
 
   if (!isOpen) return null;
@@ -103,8 +116,8 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
   };
 
   const handleSubmit = async () => {
-    if (!content.trim() && mediaFiles.length === 0) {
-      setError("Comment must have content or media");
+    if (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment) {
+      setError("Comment must have content, media or a poll");
       return;
     }
 
@@ -118,6 +131,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
       if (commentId) formData.append("commentId", commentId);
       if (parentId) formData.append("parentId", parentId);
       formData.append("isAiGenerated", String(isAiGenerated));
+      attachments.appendTo(formData);
       if (scheduledFor) formData.append("scheduledFor", scheduledFor.toISOString());
       mediaFiles.forEach(file => formData.append("media", file));
 
@@ -271,6 +285,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                   ))}
                 </div>
               )}
+              <ComposerPreviews attachments={attachments} />
               {scheduledFor && (
                 <div className="mt-3 flex items-center gap-2 rounded-xl border border-neutral-700 bg-neutral-800/60 px-3 py-2">
                   <Clock className="h-4 w-4 shrink-0 text-neutral-400" />
@@ -304,23 +319,13 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                 onChange={handleFileSelect}
               />
               <div className="flex items-center gap-4 mt-4">
-                <button
-                  className="text-neutral-500 hover:text-blue-500 transition-colors"
-                  onClick={handleImageButtonClick}
-                >
-                  <Icons.image className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.gif className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
+                <ComposerToolbar
+                  attachments={attachments}
+                  onPickImage={handleImageButtonClick}
+                  mediaCount={mediaFiles.length}
+                />
+                <button className="text-neutral-500">
                   <Icons.hashtag className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.poll className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.location className="h-5 w-5" />
                 </button>
                 {content.length > 0 && (
                   <span className="text-sm text-gray-500 ml-auto">
@@ -372,12 +377,12 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                 </div>
                 <button
                   className={`px-4 py-2 rounded-full font-medium ${
-                    isLoading || (!content.trim() && mediaFiles.length === 0)
+                    isLoading || (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment)
                       ? "bg-gray-600 text-gray-400 cursor-not-allowed"
                       : "bg-white text-black hover:bg-gray-200 transition-colors"
                   }`}
                   onClick={handleSubmit}
-                  disabled={isLoading || (!content.trim() && mediaFiles.length === 0)}
+                  disabled={isLoading || (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment)}
                 >
                   {isLoading
                     ? scheduledFor
@@ -392,6 +397,8 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
           </div>
         </div>
       </div>
+
+      <ComposerSheets attachments={attachments} />
 
       {isSchedulePickerOpen && (
         <SchedulePickerSheet

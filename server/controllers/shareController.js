@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { normalizeMedia } from "../utils/mediaTypes.js";
 import Message from "../models/Message.js";
 import User from "../models/User.js";
 import Post from "../models/Post.js";
@@ -302,7 +303,13 @@ const loadShareTarget = async (viewerId, targetType, targetId) => {
         authorName: doc.author?.name || "",
         authorPic: doc.author?.profilePic || "",
         content: doc.content || "",
-        media: Array.isArray(doc.media) ? doc.media.slice(0, 4) : [],
+        // The snapshot stays plain URLs — it's a frozen thumbnail strip for a
+        // chat bubble, not a player. Typed items are normalised down to their
+        // URLs so a share made today still renders if the original is later
+        // deleted and only this copy remains.
+        media: normalizeMedia(doc.media)
+          .slice(0, 4)
+          .map((m) => m.url),
         createdAt: doc.createdAt,
       },
     },

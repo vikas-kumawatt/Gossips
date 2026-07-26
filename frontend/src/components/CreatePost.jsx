@@ -14,6 +14,13 @@ import { toast } from "react-hot-toast";
 import PostCard from "./PostCard";
 import SchedulePickerSheet from "./SchedulePickerSheet";
 import { formatScheduleLabel } from "../lib/schedule";
+import { normalizeMedia } from "../lib/mediaTypes";
+import {
+  ComposerPreviews,
+  ComposerSheets,
+  ComposerToolbar,
+} from "./ComposerAttachments";
+import useComposerAttachments from "../hooks/useComposerAttachments";
 import {
   REPLY_AUDIENCE_OPTIONS,
   getReplyTriggerText,
@@ -42,6 +49,9 @@ const CreatePost = ({
   const quotedAuthor = quotedAuthorProp || draftQuote?.author || null;
   const [content, setContent] = useState("");
   const [mediaFiles, setMediaFiles] = useState([]);
+  // Saved uploads are remote assets, not File objects. Keep their draft and
+  // URL selection separately so publishing can reuse only media we own.
+  const [sourceDraftMedia, setSourceDraftMedia] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [showSaveDraftDialog, setShowSaveDraftDialog] = useState(false);
@@ -60,6 +70,15 @@ const CreatePost = ({
   // When set, the post is queued instead of published. A Date in local time.
   const [scheduledFor, setScheduledFor] = useState(null);
   const [isSchedulePickerOpen, setIsSchedulePickerOpen] = useState(false);
+  // GIF, audio, poll and location — one implementation shared by all three
+  // composers. Photos stay in this component's own mediaFiles state.
+  const attachments = useComposerAttachments({
+    mediaCount: mediaFiles.length,
+    clearMedia: () => {
+      setMediaFiles([]);
+      setSourceDraftMedia(null);
+    },
+  });
   const fileInputRef = useRef(null);
   const textareaRef = useRef(null);
   const cardRef = useRef(null);
@@ -71,9 +90,9 @@ const CreatePost = ({
     const handleOutsideClick = (event) => {
       // The picker is a portal at document.body, so every click inside it
       // looks "outside" the card and would otherwise close the composer.
-      if (isSchedulePickerOpen) return;
+      if (isSchedulePickerOpen || attachments.openSheet) return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
-        if (content.trim() || mediaFiles.length > 0) {
+        if (content.trim() || mediaFiles.length > 0 || attachments.hasAttachment) {
           setShowSaveDraftDialog(true);
         } else {
           onClose();
@@ -100,12 +119,15 @@ const CreatePost = ({
     return () => {
       document.removeEventListener("mousedown", handleOutsideClick);
     };
-  }, [onClose, content, mediaFiles, isSchedulePickerOpen]);
+  }, [onClose, content, mediaFiles, isSchedulePickerOpen, attachments.hasAttachment, attachments.openSheet]);
 
   useEffect(() => {
     if (isOpen) {
       resetForm();
     }
+    // Resetting on every `resetForm` identity change would discard an open
+    // composition. This effect intentionally reacts only to opening the modal.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
   useEffect(() => {
@@ -127,6 +149,7 @@ const CreatePost = ({
   const resetForm = () => {
     setContent("");
     setMediaFiles([]);
+    setSourceDraftMedia(null);
     setError("");
     setDrafts([]);
     setDraftsCursor(null);
@@ -139,6 +162,7 @@ const CreatePost = ({
     setIsAiGenerated(false);
     setScheduledFor(null);
     setIsSchedulePickerOpen(false);
+    attachments.reset();
   };
 
   const fetchDrafts = async () => {
@@ -211,19 +235,36 @@ const CreatePost = ({
     if (validFiles.length !== files.length) {
       setError("Only images and videos are allowed");
     }
-    setMediaFiles([...mediaFiles, ...validFiles]);
+    if (!validFiles.length) return;
+    // A fresh upload replaces restored draft media. The server cannot safely
+    // merge an arbitrary client-selected subset with a remote draft asset.
+    setSourceDraftMedia(null);
+    setMediaFiles(validFiles);
     setError("");
   };
 
   const removeFile = (index) => {
     const newFiles = [...mediaFiles];
-    newFiles.splice(index, 1);
+    const [removed] = newFiles.splice(index, 1);
     setMediaFiles(newFiles);
+    if (removed?.existing) {
+      setSourceDraftMedia((current) => {
+        if (!current) return null;
+        const urls = current.urls.filter((url) => url !== removed.url);
+        return urls.length ? { ...current, urls } : null;
+      });
+    }
   };
 
   const handleSubmit = async () => {
-    if (!content.trim() && mediaFiles.length === 0 && !quotedPost && !quotedComment) {
-      setError("Post must have content, media, or a quote");
+    if (
+      !content.trim() &&
+      mediaFiles.length === 0 &&
+      !attachments.hasAttachment &&
+      !quotedPost &&
+      !quotedComment
+    ) {
+      setError("Post must have content, media, a poll or a quote");
       return;
     }
     setIsLoading(true);
@@ -234,6 +275,11 @@ const CreatePost = ({
       formData.append("isDraft", "false");
       formData.append("whoCanReply", whoCanReply);
       formData.append("isAiGenerated", String(isAiGenerated));
+      attachments.appendTo(formData);
+      if (sourceDraftMedia) {
+        formData.append("sourceDraftId", sourceDraftMedia.id);
+        formData.append("sourceDraftMedia", JSON.stringify(sourceDraftMedia.urls));
+      }
       if (scheduledFor) {
         formData.append("scheduledFor", scheduledFor.toISOString());
       }
@@ -245,7 +291,7 @@ const CreatePost = ({
         formData.append("quotedComment", quotedComment._id);
         formData.append("isQuoteComment", true);
       }
-      mediaFiles.forEach((file) => {
+      mediaFiles.filter((file) => !file.existing).forEach((file) => {
         formData.append("media", file);
       });
       const response = await axios.post(
@@ -283,8 +329,14 @@ const CreatePost = ({
   };
 
   const handleSaveToDraft = async () => {
-    if (!content.trim() && mediaFiles.length === 0 && !quotedPost && !quotedComment) {
-      setError("Draft must have content, media, or a quote");
+    if (
+      !content.trim() &&
+      mediaFiles.length === 0 &&
+      !attachments.hasAttachment &&
+      !quotedPost &&
+      !quotedComment
+    ) {
+      setError("Draft must have content, media, a poll or a quote");
       return;
     }
     setIsSavingDraft(true);
@@ -295,6 +347,11 @@ const CreatePost = ({
       formData.append("isDraft", "true");
       formData.append("whoCanReply", whoCanReply);
       formData.append("isAiGenerated", String(isAiGenerated));
+      attachments.appendTo(formData);
+      if (sourceDraftMedia) {
+        formData.append("sourceDraftId", sourceDraftMedia.id);
+        formData.append("sourceDraftMedia", JSON.stringify(sourceDraftMedia.urls));
+      }
       if (quotedPost) {
         formData.append("quotedPost", quotedPost._id);
         formData.append("isQuoteRepost", true);
@@ -303,7 +360,7 @@ const CreatePost = ({
         formData.append("quotedComment", quotedComment._id);
         formData.append("isQuoteComment", true);
       }
-      mediaFiles.forEach((file) => {
+      mediaFiles.filter((file) => !file.existing).forEach((file) => {
         formData.append("media", file);
       });
       await axios.post(
@@ -341,23 +398,25 @@ const CreatePost = ({
           }
         : null
     );
-    const mediaWithTypes = draft.media
-      ? draft.media.map((url) => ({
-          url,
-          type:
-            url.endsWith(".mp4") ||
-            url.endsWith(".webm") ||
-            url.endsWith(".ogg")
-              ? "video/*"
-              : url.endsWith(".jpg") ||
-                url.endsWith(".jpeg") ||
-                url.endsWith(".png") ||
-                url.endsWith(".gif")
-              ? "image/*"
-              : "unknown",
-        }))
-      : [];
-    setMediaFiles(mediaWithTypes);
+    attachments.reset();
+    const restoredMedia = normalizeMedia(draft.media);
+    const audio = restoredMedia.find((item) => item.type === "audio");
+    if (audio) {
+      attachments.chooseAudio({ ...audio, existing: true });
+    } else {
+      setMediaFiles(restoredMedia.map((item) => ({ ...item, existing: true })));
+    }
+    if (restoredMedia.length) {
+      setSourceDraftMedia({ id: draft._id, urls: restoredMedia.map((item) => item.url) });
+    }
+    if (draft.poll?.question) {
+      attachments.choosePoll({
+        question: draft.poll.question,
+        options: draft.poll.options.map((option) => option.text ?? option),
+        durationMinutes: draft.poll.durationMinutes,
+      });
+    }
+    if (draft.location) attachments.setLocation(draft.location);
     setShowDraftPostsDialog(false);
   };
 
@@ -497,7 +556,7 @@ const CreatePost = ({
         <div className="flex items-center justify-between p-4">
           <button
             onClick={() => {
-              if (content.trim() || mediaFiles.length > 0) {
+              if (content.trim() || mediaFiles.length > 0 || attachments.hasAttachment) {
                 setShowSaveDraftDialog(true);
               } else {
                 onClose();
@@ -701,6 +760,7 @@ const CreatePost = ({
                   ))}
                 </div>
               )}
+              <ComposerPreviews attachments={attachments} />
               {scheduledFor && (
                 <div className="mt-3 flex items-center gap-2 rounded-xl border border-neutral-700 bg-neutral-800/60 px-3 py-2">
                   <Clock className="h-4 w-4 shrink-0 text-neutral-400" />
@@ -734,23 +794,13 @@ const CreatePost = ({
                 onChange={handleFileSelect}
               />
               <div className="flex items-center gap-4 mt-4">
-                <button
-                  className="text-neutral-500 hover:text-blue-500 transition-colors cursor-pointer"
-                  onClick={handleImageButtonClick}
-                >
-                  <Icons.image className="h-5 w-5" />
-                </button>
-                <button className="text-neutral-500">
-                  <Icons.gif className="h-5 w-5" />
-                </button>
+                <ComposerToolbar
+                  attachments={attachments}
+                  onPickImage={handleImageButtonClick}
+                  mediaCount={mediaFiles.length}
+                />
                 <button className="text-neutral-500">
                   <Icons.hashtag className="h-5 w-5" />
-                </button>
-                <button className="text-neutral-500">
-                  <Icons.poll className="h-5 w-5" />
-                </button>
-                <button className="text-neutral-500">
-                  <Icons.location className="h-5 w-5" />
                 </button>
                 {content.length > 0 && (
                   <span className="text-sm text-neutral-500 ml-auto">
@@ -790,13 +840,23 @@ const CreatePost = ({
                 </div>
                 <button
                   className={`px-4 py-1.5 rounded-2xl font-medium ${
-                    isLoading || (!content.trim() && mediaFiles.length === 0 && !quotedPost && !quotedComment)
+                    isLoading ||
+                    (!content.trim() &&
+                      mediaFiles.length === 0 &&
+                      !attachments.hasAttachment &&
+                      !quotedPost &&
+                      !quotedComment)
                       ? "border text-neutral-600 cursor-not-allowed"
                       : "bg-white text-black hover:bg-gray-200 transition-colors"
                   }`}
                   onClick={handleSubmit}
                   disabled={
-                    isLoading || (!content.trim() && mediaFiles.length === 0 && !quotedPost && !quotedComment)
+                    isLoading ||
+                    (!content.trim() &&
+                      mediaFiles.length === 0 &&
+                      !attachments.hasAttachment &&
+                      !quotedPost &&
+                      !quotedComment)
                   }
                 >
                   {isLoading
@@ -812,6 +872,8 @@ const CreatePost = ({
           </div>
         </div>
       </div>
+
+      <ComposerSheets attachments={attachments} />
 
       {isSchedulePickerOpen && (
         <SchedulePickerSheet

@@ -4,6 +4,12 @@ import { UserContext } from "../contexts/UserContext";
 import axios from "axios";
 import { Toaster, toast } from "react-hot-toast";
 import { REPLY_RESTRICTED_TEXT } from "../lib/replyAudience";
+import {
+  ComposerPreviews,
+  ComposerSheets,
+  ComposerToolbar,
+} from "./ComposerAttachments";
+import useComposerAttachments from "../hooks/useComposerAttachments";
 
 const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
   const { userAuth, userAuth: {token} } = useContext(UserContext);
@@ -15,8 +21,17 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
   const textareaRef = useRef(null);
   const cardRef = useRef(null);
 
+  // GIF, audio, poll and location — shared with the other two composers.
+  const attachments = useComposerAttachments({
+    mediaCount: mediaFiles.length,
+    clearMedia: () => setMediaFiles([]),
+  });
+
   useEffect(() => {
     const handleOutsideClick = (event) => {
+      // Attachment sheets are portals at document.body, so a click inside one
+      // looks "outside" this card and would otherwise close the composer.
+      if (attachments.openSheet) return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
         onClose();
       }
@@ -26,7 +41,7 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
     return () => {
       document.removeEventListener("mousedown", handleOutsideClick);
     };
-  }, [onClose]);
+  }, [onClose, attachments.openSheet]);
 
   useEffect(() => {
     if (isOpen && textareaRef.current) {
@@ -77,8 +92,8 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
   };
 
   const handleSubmit = async () => {
-    if (!content.trim() && mediaFiles.length === 0) {
-      setError("Comment must have content or media");
+    if (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment) {
+      setError("Comment must have content, media or a poll");
       return;
     }
 
@@ -89,6 +104,7 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
       const formData = new FormData();
       formData.append("content", content);
       formData.append("commentId", commentId);
+      attachments.appendTo(formData);
       
       if (parentId) {
         formData.append("parentId", parentId);
@@ -207,6 +223,7 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
                 </div>
               )}
 
+              <ComposerPreviews attachments={attachments} />
               {error && (
                 <p className="text-red-500 text-sm mt-2">{error}</p>
               )}
@@ -221,23 +238,13 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
               />
 
               <div className="flex items-center gap-4 mt-4">
-                <button 
-                  className="text-neutral-500 hover:text-blue-500 transition-colors"
-                  onClick={handleImageButtonClick}
-                >
-                  <Icons.image className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.gif className="h-5 w-5" />
-                </button>
+                <ComposerToolbar
+                  attachments={attachments}
+                  onPickImage={handleImageButtonClick}
+                  mediaCount={mediaFiles.length}
+                />
                 <button className="text-gray-500">
                   <Icons.hashtag className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.poll className="h-5 w-5" />
-                </button>
-                <button className="text-gray-500">
-                  <Icons.location className="h-5 w-5" />
                 </button>
                 {content.length > 0 && (
                   <span className="text-sm text-gray-500 ml-auto">
@@ -251,12 +258,12 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
                 </p>
                 <button 
                   className={`px-4 py-2 rounded-full font-medium ${
-                    isLoading || (!content.trim() && mediaFiles.length === 0)
+                    isLoading || (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment)
                       ? "bg-gray-600 text-gray-400 cursor-not-allowed" 
                       : "bg-white text-black hover:bg-gray-200 transition-colors"
                   }`}
                   onClick={handleSubmit}
-                  disabled={isLoading || (!content.trim() && mediaFiles.length === 0)}
+                  disabled={isLoading || (!content.trim() && mediaFiles.length === 0 && !attachments.hasAttachment)}
                 >
                   {isLoading ? "Posting..." : "Post"}
                 </button>
@@ -265,6 +272,8 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
           </div>
         </div>
       </div>
+
+      <ComposerSheets attachments={attachments} />
     </div>
   );
 };

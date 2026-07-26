@@ -12,6 +12,8 @@ import axios from "axios";
 import PostHeader from "./PostHeader";
 import PostContent from "./PostContent";
 import PostMedia from "./PostMedia";
+import PollCard from "./PollCard";
+import LocationChip from "./LocationChip";
 import PostActions from "./PostActions";
 import MediaModal from "./MediaModal";
 import Reply from "./Reply";
@@ -1183,7 +1185,16 @@ const PostCard = ({
                 />
               </div>
               <div className="mt-1">
+                {data?.location && <LocationChip location={data.location} />}
                 <PostContent content={content} />
+                {data?.poll?.question && (
+                  <PollCard
+                    type={isComment ? "comment" : "post"}
+                    id={data._id}
+                    poll={data.poll}
+                    isAuthor={isPostAuthor}
+                  />
+                )}
                 <PostMedia
                   mediaArray={mediaArray}
                   videoRefs={videoRefs}
@@ -1330,7 +1341,16 @@ const PostCard = ({
                     </span>
                   </div>
                 )}
+                {data?.location && <LocationChip location={data.location} />}
                 <PostContent content={content} />
+                {data?.poll?.question && (
+                  <PollCard
+                    type={isComment ? "comment" : "post"}
+                    id={data._id}
+                    poll={data.poll}
+                    isAuthor={isPostAuthor}
+                  />
+                )}
                 <PostMedia
                   mediaArray={mediaArray}
                   videoRefs={videoRefs}

@@ -1,5 +1,6 @@
 import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
+import PollVote from "../models/PollVote.js";
 import { ok, fail, serverError } from "../utils/respond.js";
 import { parseScheduledFor } from "../utils/publishing.js";
 import { publishNow } from "../utils/scheduler.js";
@@ -60,7 +61,7 @@ export const getScheduled = async (req, res) => {
     const [posts, comments] = await Promise.all([
       Post.find(filter)
         .select(
-          "content media icon scheduledFor scheduleStatus scheduleError isAiGenerated " +
+          "content media poll location icon scheduledFor scheduleStatus scheduleError isAiGenerated " +
             "whoCanReply quotedPost quotedComment quotedSnapshot isQuoteRepost isQuoteComment createdAt"
         )
         .populate("author", AUTHOR_SELECT)
@@ -69,7 +70,7 @@ export const getScheduled = async (req, res) => {
         .sort({ scheduledFor: 1 })
         .lean(),
       Comment.find(filter)
-        .select("content media scheduledFor scheduleStatus scheduleError isAiGenerated whoCanReply post parent createdAt")
+        .select("content media poll location scheduledFor scheduleStatus scheduleError isAiGenerated whoCanReply post parent createdAt")
         .populate("author", AUTHOR_SELECT)
         .populate({ path: "post", select: "content author", populate: { path: "author", select: AUTHOR_SELECT } })
         .sort({ scheduledFor: 1 })
@@ -141,6 +142,7 @@ export const cancelScheduled = async (req, res) => {
     // re-checked in the delete filter because the publisher may have claimed
     // it in the moment since loadOwned looked.
     const result = await Model.deleteOne({ _id: doc._id, scheduleStatus: { $ne: "publishing" } });
+    if (result.deletedCount === 1) await PollVote.deleteMany({ target: doc._id });
     if (result.deletedCount !== 1) {
       return fail(res, "This is being posted right now", 409);
     }

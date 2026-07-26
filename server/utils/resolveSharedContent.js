@@ -2,6 +2,7 @@ import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
+import { normalizeMedia } from "./mediaTypes.js";
 
 /**
  * Hydrates `post_share` messages with the live post/comment, evaluated for the
@@ -50,8 +51,10 @@ export const attachSharedContent = async (messages, viewerId) => {
   ]);
 
   const liveById = new Map();
-  posts.forEach((p) => liveById.set(p._id.toString(), p));
-  comments.forEach((c) => liveById.set(c._id.toString(), c));
+  // Typed, so the chat card can tell a video thumbnail from an audio clip
+  // without sniffing the extension.
+  posts.forEach((p) => liveById.set(p._id.toString(), { ...p, media: normalizeMedia(p.media) }));
+  comments.forEach((c) => liveById.set(c._id.toString(), { ...c, media: normalizeMedia(c.media) }));
 
   // Work out visibility once per distinct author rather than per message.
   const authorIds = [...new Set([...posts, ...comments].map((d) => d.author?._id?.toString()).filter(Boolean))];

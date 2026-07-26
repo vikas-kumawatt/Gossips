@@ -6,13 +6,17 @@ import { Icons } from "../components/icons";
 import SchedulePickerSheet from "../components/SchedulePickerSheet";
 import { scheduleAPI } from "../services/api";
 import { formatScheduleLabel, formatTimeUntil } from "../lib/schedule";
-
-const isVideo = (url) => /\.(mp4|webm|ogg|mov)(\?|$)/i.test(url || "");
+import { normalizeMedia } from "../lib/mediaTypes";
+import AudioPlayer from "../components/AudioPlayer";
+import LocationChip from "../components/LocationChip";
 
 /** Stable key across the two collections — ids only collide across types. */
 const keyOf = (item) => `${item.type}:${item._id}`;
 
 const ScheduledItem = ({ item, busy, onReschedule, onPublishNow, onCancel }) => {
+  const mediaItems = normalizeMedia(item.media);
+  const audioItem = mediaItems.find((m) => m.type === "audio");
+  const visualItems = mediaItems.filter((m) => m.type !== "audio");
   const failed = item.scheduleStatus === "failed";
   const publishing = item.scheduleStatus === "publishing";
 
@@ -46,24 +50,54 @@ const ScheduledItem = ({ item, busy, onReschedule, onPublishNow, onCancel }) => 
         </p>
       )}
 
-      {item.media?.length > 0 && (
-        <div className="mt-3 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
-          {item.media.map((url) =>
-            isVideo(url) ? (
-              <video
-                key={url}
-                src={url}
-                preload="metadata"
-                className="h-24 w-24 shrink-0 rounded-lg object-cover"
-              />
-            ) : (
-              <img
-                key={url}
-                src={url}
-                alt=""
-                className="h-24 w-24 shrink-0 rounded-lg object-cover"
-              />
-            )
+      {item.location && (
+        <div className="mt-2">
+          <LocationChip location={item.location} />
+        </div>
+      )}
+
+      {/* The poll hasn't started — its clock begins when the post goes out —
+          so this is a preview of the question, not a live ballot. */}
+      {item.poll?.question && (
+        <div className="mt-3 rounded-xl border border-neutral-800 p-3">
+          <p className="text-[15px] font-medium text-white">{item.poll.question}</p>
+          <div className="mt-2 flex flex-col gap-1.5">
+            {item.poll.options?.map((option) => (
+              <div
+                key={option.id || option.text}
+                className="rounded-lg border border-neutral-700 px-3 py-1.5 text-[14px] text-neutral-300"
+              >
+                {option.text}
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-[12px] text-neutral-500">Starts counting down once posted</p>
+        </div>
+      )}
+
+      {mediaItems.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2">
+          {audioItem && <AudioPlayer item={audioItem} />}
+          {visualItems.length > 0 && (
+            <div className="flex flex-row gap-2 overflow-x-auto scrollbar-hide">
+              {visualItems.map((m) =>
+                m.type === "video" ? (
+                  <video
+                    key={m.url}
+                    src={m.url}
+                    preload="metadata"
+                    className="h-24 w-24 shrink-0 rounded-lg object-cover"
+                  />
+                ) : (
+                  <img
+                    key={m.url}
+                    src={m.url}
+                    alt=""
+                    className="h-24 w-24 shrink-0 rounded-lg object-cover"
+                  />
+                )
+              )}
+            </div>
           )}
         </div>
       )}

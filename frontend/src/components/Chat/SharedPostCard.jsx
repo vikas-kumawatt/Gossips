@@ -2,11 +2,8 @@ import { useNavigate } from "react-router-dom";
 import { Lock, Play } from "lucide-react";
 import { Icons } from "../icons";
 import AiLabel from "../AiLabel";
-
-// Post.media is a plain URL array, so type is inferred from the extension —
-// the same check PostMedia uses in the feed.
-const isVideo = (url) =>
-  typeof url === "string" && /\.(mp4|webm|ogg|mov|m4v)(\?|$)/i.test(url);
+import AudioPlayer from "../AudioPlayer";
+import { normalizeMedia } from "../../lib/mediaTypes";
 
 /**
  * A post or comment shared into a chat.
@@ -81,7 +78,10 @@ const SharedPostCard = ({ sharedContent }) => {
     );
   }
 
-  const firstMedia = view.media?.[0];
+  // Legacy shares stored plain URLs; live ones carry typed items. The
+  // normaliser flattens both, so the thumbnail knows what it's showing.
+  const mediaItems = normalizeMedia(view.media);
+  const firstMedia = mediaItems[0];
 
   return (
     /* A div, not a button: AiLabel is itself a button and nesting them is
@@ -112,12 +112,16 @@ const SharedPostCard = ({ sharedContent }) => {
 
       {firstMedia && (
         <div className="relative">
-          {isVideo(firstMedia) ? (
+          {firstMedia.type === "audio" ? (
+            <div className="px-3 pb-2">
+              <AudioPlayer item={firstMedia} />
+            </div>
+          ) : firstMedia.type === "video" ? (
             // A video URL in an <img> renders nothing. `preload="metadata"`
             // gets the first frame without pulling the whole file.
             <>
               <video
-                src={firstMedia}
+                src={firstMedia.url}
                 muted
                 playsInline
                 preload="metadata"
@@ -131,14 +135,19 @@ const SharedPostCard = ({ sharedContent }) => {
             </>
           ) : (
             <img
-              src={firstMedia}
+              src={firstMedia.url}
               alt=""
               className="w-full h-[150px] object-cover bg-neutral-800"
             />
           )}
-          {view.media.length > 1 && (
+          {firstMedia.type === "gif" && (
+            <span className="absolute bottom-2 left-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-bold tracking-wide text-white">
+              GIF
+            </span>
+          )}
+          {mediaItems.length > 1 && (
             <span className="absolute top-2 right-2 text-[10px] font-semibold bg-black/70 text-white rounded-full px-1.5 py-0.5">
-              1/{view.media.length}
+              1/{mediaItems.length}
             </span>
           )}
         </div>

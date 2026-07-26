@@ -1,12 +1,11 @@
 import React from "react";
+import { guessMediaType } from "../lib/mediaTypes";
 
 const MediaModal = ({ selectedImage, closeModal }) => {
-  const isVideo = (url) => {
-    return (
-      url &&
-      (url.endsWith(".mp4") || url.endsWith(".webm") || url.endsWith(".ogg"))
-    );
-  };
+  // The lightbox is opened with a bare URL from the media strip, so the type
+  // has to be guessed here rather than passed through. The shared guess is at
+  // least the same one every other renderer uses.
+  const isVideo = (url) => guessMediaType(url) === "video";
 
   return (
     <div

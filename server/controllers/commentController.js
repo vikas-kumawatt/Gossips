@@ -4,8 +4,8 @@ import Notification from "../models/Notification.js";
 import Like from "../models/Like.js";
 import Repost from "../models/Repost.js";
 import UserRelation from "../models/UserRelation.js";
+import PollVote from "../models/PollVote.js";
 import { sendNotification } from "../utils/notifications.js";
-import { uploadFiles } from "../utils/uploadFiles.js";
 import { resolveMentions } from "../utils/mentions.js";
 import { MAX_CONTENT_LENGTH, buildVersionList } from "../utils/editHistory.js";
 import { parseBooleanFlag } from "../utils/booleanFlag.js";
@@ -21,6 +21,8 @@ import {
   parseCursorLimit,
 } from "../utils/cursorPagination.js";
 import { applyCommentPublishEffects, parseScheduledFor } from "../utils/publishing.js";
+import { uploadMedia } from "../utils/uploadFiles.js";
+import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
 
 const AUTHOR_SELECT = "username name bio profilePic isVerified verificationBadge isPrivate";
 
@@ -41,13 +43,24 @@ export const replyOnPost = async (req, res) => {
     const { content, postId, parentId, whoCanReply, isAiGenerated, scheduledFor } = req.body;
     const userId = req.user._id;
 
-    if ((!content || !content.trim()) && (!req.files || !req.files.length)) {
-      return res.status(400).json({ error: "Comment must have content or media" });
-    }
     if (!postId) return res.status(400).json({ error: "Post ID is required" });
 
     const { at: scheduleAt, error: scheduleError } = parseScheduledFor(scheduledFor);
     if (scheduleError) return res.status(400).json({ error: scheduleError, message: scheduleError });
+
+    const attached = await parseAttachments({
+      files: req.files || [],
+      body: req.body,
+      uploader: uploadMedia,
+    });
+    if (attached.error) {
+      return res.status(400).json({ error: attached.error, message: attached.error });
+    }
+
+    // Checked after parsing so a poll-only or GIF-only reply is allowed.
+    if (!content?.trim() && !attached.media.length && !attached.poll && !attached.location) {
+      return res.status(400).json({ error: "Comment must have content, media or a poll" });
+    }
 
     // Enforce the audience setting of whatever is being replied to:
     // the parent comment if this is a nested reply, otherwise the post.
@@ -70,11 +83,14 @@ export const replyOnPost = async (req, res) => {
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
       isAiGenerated: parseBooleanFlag(isAiGenerated),
+      media: attached.media,
+      location: attached.location,
+      // The clock starts when the reply appears, not when it was written.
+      poll: attached.poll && !scheduleAt ? openPollClock(attached.poll) : attached.poll,
       isScheduled: Boolean(scheduleAt),
       scheduledFor: scheduleAt,
       scheduleStatus: scheduleAt ? "pending" : null,
     };
-    if (req.files?.length) newComment.media = await uploadFiles(req.files);
 
     const comment = await Comment.create(newComment);
 
@@ -85,7 +101,10 @@ export const replyOnPost = async (req, res) => {
       .populate("author", AUTHOR_SELECT)
       .lean();
 
-    res.status(201).json({ comment: populated, scheduled: Boolean(scheduleAt) });
+    res.status(201).json({
+      comment: await decorateContent(populated, userId),
+      scheduled: Boolean(scheduleAt),
+    });
   } catch (error) {
     console.error("replyOnPost error:", error);
     res.status(500).json({ error: "Server error" });
@@ -97,13 +116,23 @@ export const createNestedComment = async (req, res) => {
     const { content, commentId, parentId, whoCanReply, isAiGenerated, scheduledFor } = req.body;
     const userId = req.user._id;
 
-    if ((!content || !content.trim()) && (!req.files || !req.files.length)) {
-      return res.status(400).json({ error: "Comment must have content or media" });
-    }
     if (!commentId) return res.status(400).json({ error: "Comment ID is required" });
 
     const { at: scheduleAt, error: scheduleError } = parseScheduledFor(scheduledFor);
     if (scheduleError) return res.status(400).json({ error: scheduleError, message: scheduleError });
+
+    const attached = await parseAttachments({
+      files: req.files || [],
+      body: req.body,
+      uploader: uploadMedia,
+    });
+    if (attached.error) {
+      return res.status(400).json({ error: attached.error, message: attached.error });
+    }
+
+    if (!content?.trim() && !attached.media.length && !attached.poll && !attached.location) {
+      return res.status(400).json({ error: "Comment must have content, media or a poll" });
+    }
 
     const originalComment = await Comment.findById(commentId)
       .select("post author parent whoCanReply mentions")
@@ -130,11 +159,13 @@ export const createNestedComment = async (req, res) => {
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
       isAiGenerated: parseBooleanFlag(isAiGenerated),
+      media: attached.media,
+      location: attached.location,
+      poll: attached.poll && !scheduleAt ? openPollClock(attached.poll) : attached.poll,
       isScheduled: Boolean(scheduleAt),
       scheduledFor: scheduleAt,
       scheduleStatus: scheduleAt ? "pending" : null,
     };
-    if (req.files?.length) newComment.media = await uploadFiles(req.files);
 
     const comment = await Comment.create(newComment);
 
@@ -149,7 +180,10 @@ export const createNestedComment = async (req, res) => {
       })
       .lean();
 
-    res.status(201).json({ comment: populated, scheduled: Boolean(scheduleAt) });
+    res.status(201).json({
+      comment: await decorateContent(populated, userId),
+      scheduled: Boolean(scheduleAt),
+    });
   } catch (error) {
     console.error("createNestedComment error:", error);
     res.status(500).json({ error: "Server error" });
@@ -202,7 +236,10 @@ export const getCommentsWithReplies = async (req, res) => {
     );
 
     const { items: pagedComments, pageInfo } = buildCursorPageInfo(commentsWithReplies, limitNum);
-    res.status(200).json({ comments: pagedComments, pageInfo });
+    res.status(200).json({
+      comments: await decorateContent(pagedComments, viewerId),
+      pageInfo,
+    });
   } catch (error) {
     console.error("getCommentsWithReplies error:", error);
     res.status(500).json({ error: "Server error" });
@@ -238,7 +275,10 @@ export const getRepliesForComment = async (req, res) => {
     );
 
     const { items: pagedComments, pageInfo } = buildCursorPageInfo(withViewer, limitNum);
-    res.status(200).json({ comments: pagedComments, pageInfo });
+    res.status(200).json({
+      comments: await decorateContent(pagedComments, viewerId),
+      pageInfo,
+    });
   } catch (error) {
     console.error("getRepliesForComment error:", error);
     res.status(500).json({ error: "Server error" });
@@ -274,7 +314,10 @@ export const getComments = async (req, res) => {
     );
 
     const { items: pagedComments, pageInfo } = buildCursorPageInfo(withViewer, limitNum);
-    res.status(200).json({ comments: pagedComments, pageInfo });
+    res.status(200).json({
+      comments: await decorateContent(pagedComments, viewerId),
+      pageInfo,
+    });
   } catch (error) {
     console.error("getComments error:", error);
     res.status(500).json({ error: "Server error" });
@@ -296,7 +339,7 @@ export const getComment = async (req, res) => {
     if (!comment) return res.status(404).json({ error: "Comment not found" });
     const viewerId = req.user?._id;
     const viewerCanReply = viewerId ? await canUserReplyToTarget(viewerId, comment) : true;
-    res.status(200).json({ ...comment, viewerCanReply });
+    res.status(200).json({ ...(await decorateContent(comment, viewerId)), viewerCanReply });
   } catch (error) {
     console.error("getComment error:", error);
     res.status(500).json({ error: "Server error" });
@@ -558,6 +601,7 @@ export const deleteComment = async (req, res) => {
 
     await Comment.deleteMany({ _id: { $in: allIds } });
     await Notification.deleteMany({ entity: { $in: allIds }, entityType: "Comment" });
+    await PollVote.deleteMany({ target: { $in: allIds } });
 
     // Decrement reply counts on post and parent comment
     if (totalDeleted > 0) {

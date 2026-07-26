@@ -1,4 +1,7 @@
 import { Schema, model } from "mongoose";
+// Defined alongside Post so the two stay identical — a reply carries exactly
+// the same attachments a post does.
+import { mediaItemSchema, pollSchema, locationSchema } from "./Post.js";
 
 /**
  * Comment — slim, count-cached.
@@ -10,7 +13,11 @@ import { Schema, model } from "mongoose";
 const commentSchema = new Schema(
   {
     content: { type: String, maxlength: 500 },
-    media:   { type: [String], default: [] },
+    // Typed, same as Post.media. Read it through normalizeMedia.
+    media:   { type: [mediaItemSchema], default: [] },
+
+    poll:     { type: pollSchema,     default: null },
+    location: { type: locationSchema, default: null },
 
     post:   { type: Schema.Types.ObjectId, ref: "Post",    required: true },
     author: { type: Schema.Types.ObjectId, ref: "User",    required: true },

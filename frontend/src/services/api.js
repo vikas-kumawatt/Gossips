@@ -400,6 +400,28 @@ export const postAPI = {
 };
 
 /**
+ * Poll voting and place search. `type` is "post" or "comment".
+ *
+ * Poll reads skip the GET cache: results change as people vote and a stale
+ * copy would show a tally that's already moved on.
+ */
+export const attachmentAPI = {
+  vote: (type, id, optionId) =>
+    api.post(`/attachments/polls/${type}/${id}/vote`, { optionId }).then((r) => r.data),
+
+  getPoll: (type, id) =>
+    api
+      .get(`/attachments/polls/${type}/${id}`, { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  // Cached by the interceptor and again on the server — place names are stable
+  // and the upstream geocoder is rate limited.
+  searchPlaces: (q) => cachedGet("/attachments/places/search", { params: { q } }),
+
+  reverseGeocode: (lat, lng) => cachedGet("/attachments/places/reverse", { params: { lat, lng } }),
+};
+
+/**
  * Scheduled posts and replies. Every read here skips the GET cache — the list
  * changes on its own as the publisher works through it, so a 60-second stale
  * copy would show things that have already gone out.

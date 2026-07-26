@@ -11,6 +11,7 @@ import groupRoutes from "./routes/groupRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import scheduleRoutes from "./routes/scheduleRoutes.js";
+import attachmentRoutes from "./routes/attachmentRoutes.js";
 import { maintenanceGate } from "./middleware/maintenanceMiddleware.js";
 import { sanitizeMongo } from "./middleware/sanitizeMongo.js";
 import { backfillRoles } from "./utils/roles.js";
@@ -83,6 +84,8 @@ app.use("/chats", messageRoutes);
 app.use("/groups", groupRoutes);
 app.use("/reports", reportRoutes);
 app.use("/schedule", scheduleRoutes);
+// Poll voting and place search — shared by the composer and the feed.
+app.use("/attachments", attachmentRoutes);
 
 app.get("/", (req, res) => {
   res.send("Server is running");

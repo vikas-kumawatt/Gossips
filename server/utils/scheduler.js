@@ -36,6 +36,9 @@ const BATCH_PER_TICK = 25;
 let timer = null;
 let running = false;
 
+/** When a poll attached to a just-published item should close. */
+const pollClosesAt = (poll) => new Date(Date.now() + poll.durationMinutes * 60 * 1000);
+
 const fail = async (Model, doc, reason) => {
   const attempts = (doc.scheduleAttempts || 0) + 1;
   const giveUp = attempts >= MAX_ATTEMPTS;
@@ -148,6 +151,10 @@ const publishPost = async (post) => {
         // Publishing is the moment it enters the feed, so this is its
         // chronological position — not when it was composed.
         createdAt: new Date(),
+        // A poll's clock starts now too. Setting it at compose time would mean
+        // a poll scheduled for tomorrow had already been running overnight and
+        // might close the instant it appeared.
+        ...(post.poll?.question ? { "poll.closesAt": pollClosesAt(post.poll) } : {}),
       },
     }
   );
@@ -208,6 +215,7 @@ const publishComment = async (comment) => {
         scheduleStatus: "published",
         scheduleError: null,
         createdAt: new Date(),
+        ...(comment.poll?.question ? { "poll.closesAt": pollClosesAt(comment.poll) } : {}),
       },
     }
   );
