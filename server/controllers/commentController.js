@@ -21,6 +21,7 @@ import {
   parseCursorLimit,
 } from "../utils/cursorPagination.js";
 import { applyCommentPublishEffects, parseScheduledFor } from "../utils/publishing.js";
+import { resolveReplyThread } from "../utils/replyThreading.js";
 import { uploadMedia } from "../utils/uploadFiles.js";
 import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
 
@@ -65,8 +66,11 @@ export const replyOnPost = async (req, res) => {
     // Enforce the audience setting of whatever is being replied to:
     // the parent comment if this is a nested reply, otherwise the post.
     const replyTarget = parentId
-      ? await Comment.findById(parentId).select("author whoCanReply mentions").lean()
+      ? await Comment.findById(parentId).select("author whoCanReply mentions parent").lean()
       : await Post.findById(postId).select("author whoCanReply mentions").lean();
+    if (parentId && !replyTarget) {
+      return res.status(404).json({ error: "Comment not found" });
+    }
     if (replyTarget && !(await canUserReplyToTarget(userId, replyTarget))) {
       return res.status(403).json({
         success: false,
@@ -75,11 +79,18 @@ export const replyOnPost = async (req, res) => {
       });
     }
 
+    // A reply flattens to two levels just like the nested-comment path: anchor
+    // under the top-level comment, remember the comment answered. Deriving this
+    // from the fetched target (not the raw body) keeps the thread two-deep and
+    // stops a client anchoring under an arbitrary comment.
+    const thread = parentId ? resolveReplyThread(replyTarget, parentId) : { parent: null, replyTo: null };
+
     const newComment = {
       content: content || "",
       post: postId,
       author: userId,
-      parent: parentId || null,
+      parent: thread.parent,
+      replyTo: thread.replyTo,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
       isAiGenerated: parseBooleanFlag(isAiGenerated),
@@ -99,6 +110,11 @@ export const replyOnPost = async (req, res) => {
 
     const populated = await Comment.findById(comment._id)
       .populate("author", AUTHOR_SELECT)
+      .populate({
+        path: "replyTo",
+        select: "_id content author",
+        populate: { path: "author", select: AUTHOR_SELECT },
+      })
       .lean();
 
     res.status(201).json({
@@ -113,7 +129,10 @@ export const replyOnPost = async (req, res) => {
 
 export const createNestedComment = async (req, res) => {
   try {
-    const { content, commentId, parentId, whoCanReply, isAiGenerated, scheduledFor } = req.body;
+    // `parentId` is intentionally not read from the body: the structural parent
+    // is derived server-side (see resolveReplyThread) so a client can't anchor a
+    // reply under an arbitrary comment.
+    const { content, commentId, whoCanReply, isAiGenerated, scheduledFor } = req.body;
     const userId = req.user._id;
 
     if (!commentId) return res.status(400).json({ error: "Comment ID is required" });
@@ -149,13 +168,16 @@ export const createNestedComment = async (req, res) => {
     }
 
     const postId = originalComment.post;
-    const effectiveParent = parentId || commentId;
+    // Flatten to two levels: anchor under the top-level comment, remember the
+    // comment actually answered.
+    const { parent: effectiveParent, replyTo } = resolveReplyThread(originalComment, commentId);
 
     const newComment = {
       content: content || "",
       post: postId,
       author: userId,
       parent: effectiveParent,
+      replyTo,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
       mentions: await resolveMentions(content || ""),
       isAiGenerated: parseBooleanFlag(isAiGenerated),
@@ -174,7 +196,7 @@ export const createNestedComment = async (req, res) => {
     const populated = await Comment.findById(comment._id)
       .populate("author", AUTHOR_SELECT)
       .populate({
-        path: "parent",
+        path: "replyTo",
         select: "_id content author",
         populate: { path: "author", select: AUTHOR_SELECT },
       })
@@ -205,34 +227,21 @@ export const getCommentsWithReplies = async (req, res) => {
     if (!postId) return res.status(400).json({ error: "Post ID is required" });
 
     const topLevel = await Comment.find({ post: postId, parent: null, ...LIVE_COMMENT, ...cursorQuery })
-      .sort({ createdAt: -1 })
+      // `_id` tiebreaker keeps cursor pagination stable across equal timestamps.
+      .sort({ createdAt: -1, _id: -1 })
       .limit(limitNum + 1)
       .populate("author", AUTHOR_SELECT)
       .lean();
 
+    // Replies are loaded lazily and paginated by the client (getRepliesForComment),
+    // so top-level comments carry only their cached `counts.replies` here — no
+    // per-comment reply sub-query. `counts.replies` counts the whole flat thread.
     const viewerId = req.user?._id;
     const commentsWithReplies = await Promise.all(
-      topLevel.map(async (comment) => {
-        const replies = await Comment.find({ parent: comment._id, ...LIVE_COMMENT })
-          .sort({ createdAt: 1 })
-          .limit(5)
-          .populate("author", AUTHOR_SELECT)
-          .lean();
-
-        const repliesWithViewer = await Promise.all(
-          replies.map(async (r) => ({
-            ...r,
-            viewerCanReply: await canUserReplyToTarget(viewerId, r),
-          }))
-        );
-
-        return {
-          ...comment,
-          replies: repliesWithViewer,
-          hasMoreReplies: (comment.counts?.replies ?? 0) > replies.length,
-          viewerCanReply: await canUserReplyToTarget(viewerId, comment),
-        };
-      })
+      topLevel.map(async (comment) => ({
+        ...comment,
+        viewerCanReply: await canUserReplyToTarget(viewerId, comment),
+      }))
     );
 
     const { items: pagedComments, pageInfo } = buildCursorPageInfo(commentsWithReplies, limitNum);
@@ -252,7 +261,9 @@ export const getRepliesForComment = async (req, res) => {
     const { cursor, limit = 10 } = req.query;
     const limitNum = parseCursorLimit(limit, 10);
     const parsedCursor = decodeCursor(cursor);
-    const cursorQuery = buildCursorQuery(parsedCursor);
+    // Replies read oldest-first (conversational order), so the cursor pages
+    // forward with `$gt` — the sort direction and cursor must agree.
+    const cursorQuery = buildCursorQuery(parsedCursor, "asc");
 
     if (!commentId) return res.status(400).json({ error: "Comment ID is required" });
 
@@ -261,9 +272,17 @@ export const getRepliesForComment = async (req, res) => {
       ...LIVE_COMMENT,
       ...cursorQuery,
     })
-      .sort({ createdAt: 1 })
+      // `_id` is the tiebreaker the cursor uses, so the sort must include it or
+      // replies sharing a `createdAt` paginate inconsistently (rows repeat or
+      // vanish across pages).
+      .sort({ createdAt: 1, _id: 1 })
       .limit(limitNum + 1)
       .populate("author", AUTHOR_SELECT)
+      .populate({
+        path: "replyTo",
+        select: "_id author",
+        populate: { path: "author", select: "username" },
+      })
       .lean();
 
     const viewerId = req.user?._id;
@@ -301,7 +320,8 @@ export const getComments = async (req, res) => {
 
     const comments = await Comment.find({ ...query, ...cursorQuery })
       .populate("author", AUTHOR_SELECT)
-      .sort({ createdAt: -1 })
+      // `_id` tiebreaker keeps cursor pagination stable across equal timestamps.
+      .sort({ createdAt: -1, _id: -1 })
       .limit(limitNum + 1)
       .lean();
 

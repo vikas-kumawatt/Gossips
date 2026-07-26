@@ -161,6 +161,10 @@ const PostCard = ({
   removeOnUnlike = false,
   removeOnUnrepost = false,
   onNewPost,
+  // Called by a rendered reply when the viewer replies to it, so the new reply
+  // is appended to this (top-level) comment's flat list rather than nested
+  // under the reply. Undefined on a top-level comment, which handles its own.
+  onReplyPosted,
 }) => {
   const [data, setData] = useState(item || {});
   const {
@@ -195,6 +199,9 @@ const PostCard = ({
   const [isRepliesLoaded, setIsRepliesLoaded] = useState(false);
   const [isLoadingReplies, setIsLoadingReplies] = useState(false);
   const [showReplies, setShowReplies] = useState(false);
+  // Cursor pagination for the flat reply list under a top-level comment.
+  const [repliesCursor, setRepliesCursor] = useState(null);
+  const [repliesHasMore, setRepliesHasMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isAuthorFavorite, setIsAuthorFavorite] = useState(null);
@@ -592,22 +599,33 @@ const PostCard = ({
     return true;
   };
 
+  // Fetch one page of replies (10 by default). `cursor` null = first page.
+  // Replies come back oldest-first and are kept in that order; each page is
+  // appended, so "Show more replies" walks the thread to the end.
+  const fetchRepliesPage = useCallback(
+    async (cursor) => {
+      const response = await axios.get(
+        `${import.meta.env.VITE_SERVER}/reply/comments/replies/${id}`,
+        {
+          headers: { Authorization: `Bearer ${userAuth?.token}` },
+          params: { limit: 10, ...(cursor ? { cursor } : {}) },
+        }
+      );
+      return response.data;
+    },
+    [id, userAuth?.token]
+  );
+
   const loadReplies = useCallback(async () => {
-    if (
-      disableNestedReplies ||
-      isRepliesLoaded ||
-      isLoadingReplies ||
-      replyCount === 0
-    )
+    if (disableNestedReplies || isRepliesLoaded || isLoadingReplies || replyCount === 0)
       return;
 
     setIsLoadingReplies(true);
     try {
-      const response = await axios.get(
-        `${import.meta.env.VITE_SERVER}/reply/comments/replies/${id}`,
-        { headers: { Authorization: `Bearer ${userAuth?.token}` } }
-      );
-      setNestedReplies(response.data.comments || []);
+      const data = await fetchRepliesPage(null);
+      setNestedReplies(data.comments || []);
+      setRepliesCursor(data.pageInfo?.nextCursor || null);
+      setRepliesHasMore(data.pageInfo?.hasNextPage ?? false);
       setIsRepliesLoaded(true);
       setShowReplies(true);
     } catch (error) {
@@ -616,19 +634,68 @@ const PostCard = ({
       setIsLoadingReplies(false);
     }
   }, [
-    id,
-    userAuth?.token,
+    fetchRepliesPage,
     disableNestedReplies,
     isRepliesLoaded,
     isLoadingReplies,
     replyCount,
   ]);
 
+  const loadMoreReplies = useCallback(async () => {
+    if (isLoadingReplies || !repliesHasMore || !repliesCursor) return;
+    setIsLoadingReplies(true);
+    try {
+      const data = await fetchRepliesPage(repliesCursor);
+      setNestedReplies((prev) => {
+        const seen = new Set(prev.map((r) => r._id));
+        return [...prev, ...(data.comments || []).filter((r) => !seen.has(r._id))];
+      });
+      setRepliesCursor(data.pageInfo?.nextCursor || null);
+      setRepliesHasMore(data.pageInfo?.hasNextPage ?? false);
+    } catch (error) {
+      console.error("Error loading more replies:", error);
+    } finally {
+      setIsLoadingReplies(false);
+    }
+  }, [fetchRepliesPage, isLoadingReplies, repliesHasMore, repliesCursor]);
+
   const toggleReplies = (e) => {
     e.stopPropagation();
     if (disableNestedReplies) return;
     !isRepliesLoaded ? loadReplies() : setShowReplies(!showReplies);
   };
+
+  // Add a freshly posted reply to this comment's flat list and bump the count.
+  // Used both when the viewer replies to this top-level comment directly and,
+  // via onReplyPosted, when they reply to one of its rendered replies.
+  const addReplyLocally = useCallback(
+    (newReply) => {
+      const newReplyCount = replyCount + 1;
+      updateInteraction(id, { replyCount: newReplyCount });
+      const updatedData = {
+        ...data,
+        counts: { ...(data.counts || {}), replies: newReplyCount },
+      };
+      setData(updatedData);
+      if (onUpdate) onUpdate(updatedData);
+      if (isRepliesLoaded) {
+        // Already showing the list — append in place.
+        setNestedReplies((prev) =>
+          prev.some((r) => r._id === newReply._id) ? prev : [...prev, newReply]
+        );
+        setShowReplies(true);
+      } else if (replyCount === 0) {
+        // The first reply: nothing older is hidden, so show it immediately
+        // instead of behind a "Show 1 reply" button.
+        setNestedReplies([newReply]);
+        setRepliesHasMore(false);
+        setIsRepliesLoaded(true);
+        setShowReplies(true);
+      }
+      // Otherwise leave it for the "Show N replies" button to fetch in order.
+    },
+    [id, data, replyCount, isRepliesLoaded, updateInteraction, onUpdate]
+  );
 
   const toggleMute = (e, mediaUrl) => {
     e.stopPropagation();
@@ -1452,17 +1519,41 @@ const PostCard = ({
                     item={reply}
                     author={reply.author}
                     isReply={true}
-                    depth={depth + 1}
-                    parentAuthor={author}
-                    disableNestedReplies={disableNestedReplies}
+                    // Fixed one level deep — the thread is flat. A reply shows
+                    // "Replying to @user" (whoever it answered) but renders no
+                    // replies of its own.
+                    depth={1}
+                    parentAuthor={reply.replyTo?.author || author}
+                    disableNestedReplies={true}
                     postId={propPostId}
                     onDelete={onDelete}
                     isComment={true}
                     hideActionsHeader={hideActionsHeader}
                     hideActions={hideActions}
                     removeOnUnsave={removeOnUnsave}
+                    // Replying to a reply appends to this comment's flat list.
+                    onReplyPosted={addReplyLocally}
                   />
                 ))}
+                {repliesHasMore && (() => {
+                  // Exact number still hidden = total on the comment minus what's
+                  // already shown. Falls back to a generic label if the cached
+                  // count is momentarily behind the loaded rows.
+                  const remaining = Math.max(0, replyCount - nestedReplies.length);
+                  return (
+                    <button
+                      onClick={loadMoreReplies}
+                      disabled={isLoadingReplies}
+                      className="text-blue-500 text-sm mt-2 ml-10 hover:underline flex items-center disabled:opacity-60"
+                    >
+                      {isLoadingReplies
+                        ? "Loading..."
+                        : remaining > 0
+                          ? `Show ${remaining} more ${remaining === 1 ? "reply" : "replies"}`
+                          : "Show more replies"}
+                    </button>
+                  );
+                })()}
               </div>
             )}
         </div>
@@ -1474,19 +1565,11 @@ const PostCard = ({
           onClose={() => setIsReplyOpen(false)}
           postId={isComment ? propPostId : id}
           commentId={isComment ? id : null}
-          parentId={isComment ? id : null}
           onReplyAdded={(newReply) => {
-            setNestedReplies((prev) => [newReply, ...prev]);
-            setShowReplies(true);
-            setIsRepliesLoaded(true);
-            const newReplyCount = replyCount + 1;
-            updateInteraction(id, { replyCount: newReplyCount });
-            const updatedPost = {
-              ...data,
-              counts: { ...(data.counts || {}), replies: newReplyCount },
-            };
-            setData(updatedPost);
-            if (onUpdate) onUpdate(updatedPost);
+            // A rendered reply bubbles up to its top-level comment; a top-level
+            // comment adds the reply to its own flat list.
+            if (onReplyPosted) onReplyPosted(newReply);
+            else addReplyLocally(newReply);
           }}
         />
       )}

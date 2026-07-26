@@ -30,14 +30,21 @@ export const decodeCursor = (cursor) => {
   }
 };
 
-export const buildCursorQuery = (cursor) => {
+/**
+ * @param {"desc"|"asc"} direction  Match the query's sort. "desc" (default,
+ *   newest-first feeds) pages with `$lt`; "asc" (oldest-first, e.g. the flat
+ *   reply list under a comment) pages with `$gt`. Using the wrong operator for
+ *   the sort silently re-serves or skips rows, so this must track the sort.
+ */
+export const buildCursorQuery = (cursor, direction = "desc") => {
   if (!cursor) return {};
+  const op = direction === "asc" ? "$gt" : "$lt";
   return {
     $or: [
-      { createdAt: { $lt: new Date(cursor.createdAt) } },
+      { createdAt: { [op]: new Date(cursor.createdAt) } },
       {
         createdAt: new Date(cursor.createdAt),
-        _id: { $lt: cursor._id },
+        _id: { [op]: cursor._id },
       },
     ],
   };

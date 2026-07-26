@@ -109,41 +109,44 @@ export const applyPostPublishEffects = async (post, { authorUsername } = {}) => 
 export const applyCommentPublishEffects = async (comment) => {
   const authorId = comment.author?._id || comment.author;
   const parentId = comment.parent;
+  // The comment actually answered. Equals `parent` for a direct reply to a
+  // top-level comment; differs for a reply made on another reply.
+  const replyToId = comment.replyTo || parentId;
 
   await Post.updateOne({ _id: comment.post }, { $inc: { "counts.replies": 1 } });
+  // `parent` is the top-level comment for every reply, so its count is the whole
+  // flat thread's size.
   if (parentId) {
     await Comment.updateOne({ _id: parentId }, { $inc: { "counts.replies": 1 } });
   }
 
   const post = await Post.findById(comment.post).select("author").lean();
 
-  if (parentId) {
-    const parent = await Comment.findById(parentId).select("author parent").lean();
-    if (parent && parent.author.toString() !== authorId.toString()) {
-      await sendNotification(parent.author, authorId, "reply", {
-        entity: comment._id,
-        entityType: "Comment",
-      });
-    }
-    // The post author also hears about a direct reply to a top-level comment.
-    if (
-      post &&
-      !parent?.parent &&
-      post.author.toString() !== authorId.toString() &&
-      parent?.author?.toString() !== post.author.toString()
-    ) {
-      await sendNotification(post.author, authorId, "reply", {
-        entity: comment._id,
-        entityType: "Comment",
-      });
-    }
-    return;
-  }
-
-  if (post && post.author.toString() !== authorId.toString()) {
-    await sendNotification(post.author, authorId, "reply", {
+  // Never notify yourself, and never the same person twice.
+  const notified = new Set([authorId.toString()]);
+  const notify = async (userId) => {
+    if (!userId) return;
+    const key = userId.toString();
+    if (notified.has(key)) return;
+    notified.add(key);
+    await sendNotification(userId, authorId, "reply", {
       entity: comment._id,
       entityType: "Comment",
     });
+  };
+
+  // Top-level comment on the post → tell the post author.
+  if (!parentId) {
+    await notify(post?.author);
+    return;
   }
+
+  // A reply → tell whoever was actually replied to.
+  const replyTo = await Comment.findById(replyToId).select("author").lean();
+  await notify(replyTo?.author);
+
+  // A direct reply to a top-level comment also reaches the post author (matches
+  // the pre-flattening behaviour); a reply made on another reply notifies only
+  // the person answered.
+  if (String(replyToId) === String(parentId)) await notify(post?.author);
 };

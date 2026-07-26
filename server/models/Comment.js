@@ -21,7 +21,16 @@ const commentSchema = new Schema(
 
     post:   { type: Schema.Types.ObjectId, ref: "Post",    required: true },
     author: { type: Schema.Types.ObjectId, ref: "User",    required: true },
+    // Structural parent. Threads are two levels only: `parent` is either null
+    // (a top-level comment) or a top-level comment (a reply). A reply never
+    // points at another reply — see resolveReplyThread. This keeps every
+    // reply in one flat, time-sorted list under its top-level comment.
     parent: { type: Schema.Types.ObjectId, ref: "Comment", default: null },
+    // The comment this one was written in answer to. Equals `parent` for a
+    // direct reply to a top-level comment; for a reply made on another reply it
+    // is that reply (while `parent` stays the shared top-level comment). Drives
+    // the "Replying to @user" label and reply notifications.
+    replyTo: { type: Schema.Types.ObjectId, ref: "Comment", default: null },
 
     // Cached counts
     counts: {
