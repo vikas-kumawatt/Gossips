@@ -233,6 +233,32 @@ export const userAPI = {
   getMuted: () => api.get(`/user/muted`).then((r) => r.data),
 };
 
+// ─── Search ──────────────────────────────────────────────────────────────────
+/**
+ * Every read here skips the GET cache. Results change as people post, the query
+ * changes per keystroke, and recent searches change as you search — a 60-second
+ * stale copy would show a list that has already moved on.
+ */
+export const searchAPI = {
+  content: (params) =>
+    api
+      .get("/search/content", { params, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  history: () =>
+    api
+      .get("/search/history", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  // { kind: "query", query } | { kind: "user", username }
+  addHistory: (payload) => api.post("/search/history", payload).then((r) => r.data),
+
+  removeHistory: (entryId) =>
+    api.delete(`/search/history/${entryId}`).then((r) => r.data),
+
+  clearHistory: () => api.delete("/search/history").then((r) => r.data),
+};
+
 // ─── Sharing ─────────────────────────────────────────────────────────────────
 export const shareAPI = {
   // Uncached: ranking shifts as you message people, and search is per-keystroke.

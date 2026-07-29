@@ -93,6 +93,11 @@ commentSchema.index({ parent: 1, createdAt: 1 });
 // Author's comment history
 commentSchema.index({ author: 1, createdAt: -1 });
 
+// Content search across all replies. Mirrors Post's { isDeleted, createdAt }
+// index: search has no author to narrow by, so a date-windowed query ("past 24
+// hours") walks this instead of scanning every reply ever written.
+commentSchema.index({ isDeleted: 1, isScheduled: 1, createdAt: -1 });
+
 // The publisher polls this.
 commentSchema.index({ scheduleStatus: 1, scheduledFor: 1 });
 

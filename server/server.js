@@ -12,6 +12,7 @@ import reportRoutes from "./routes/reportRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import scheduleRoutes from "./routes/scheduleRoutes.js";
 import attachmentRoutes from "./routes/attachmentRoutes.js";
+import searchRoutes from "./routes/searchRoutes.js";
 import { maintenanceGate } from "./middleware/maintenanceMiddleware.js";
 import { sanitizeMongo } from "./middleware/sanitizeMongo.js";
 import { backfillRoles } from "./utils/roles.js";
@@ -86,6 +87,8 @@ app.use("/reports", reportRoutes);
 app.use("/schedule", scheduleRoutes);
 // Poll voting and place search — shared by the composer and the feed.
 app.use("/attachments", attachmentRoutes);
+// Content search (posts + replies) and recent-search history.
+app.use("/search", searchRoutes);
 
 app.get("/", (req, res) => {
   res.send("Server is running");
