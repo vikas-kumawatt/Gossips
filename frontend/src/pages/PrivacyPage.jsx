@@ -1,6 +1,5 @@
 import { useNavigate } from "react-router-dom";
 import { Link } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
 import { Icons } from "../components/icons";
 
 const Section = ({ title, children }) => (
@@ -21,7 +20,7 @@ const PrivacyPage = () => {
           className="p-2 rounded-full hover:bg-neutral-800 transition-colors"
           aria-label="Go back"
         >
-          <ArrowLeft className="w-5 h-5 text-white" />
+          <Icons.back className="w-5 h-5 text-white" />
         </button>
         <Icons.logo className="w-7 h-7" />
         <span className="text-white font-semibold">Privacy Policy</span>

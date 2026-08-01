@@ -102,7 +102,7 @@ const PollComposerSheet = ({ value, onDone, onClose }) => {
           <label className="mt-5 mb-1 block text-[13px] font-medium text-neutral-400">
             Poll length
           </label>
-          <div className="relative">
+          <div>
             <button
               type="button"
               onClick={() => setDurationOpen((v) => !v)}
@@ -111,8 +111,14 @@ const PollComposerSheet = ({ value, onDone, onClose }) => {
               <span>{durationLabel}</span>
               <span className="text-[13px] text-neutral-500">Change</span>
             </button>
+            {/*
+              Expands in place rather than opening a second sheet. This picker
+              already lives inside a ResponsiveSheet, and a sheet within a sheet
+              fights the parent's scroll lock — the same reason the hide-confirm
+              in CreateGroupShareSheet stayed a plain dialog.
+            */}
             {durationOpen && (
-              <div className="absolute inset-x-0 bottom-full z-10 mb-1 overflow-hidden rounded-xl border border-neutral-700 bg-[#181818] shadow-xl">
+              <div className="mt-1 overflow-hidden rounded-xl border border-neutral-700 bg-[#181818]">
                 {POLL_DURATIONS.map((d) => (
                   <button
                     key={d.value}

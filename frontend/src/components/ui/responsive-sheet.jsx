@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronLeft, X } from "lucide-react";
+import { X } from "lucide-react";
+import { Icons } from "../icons";
 import useWindow from "../../hooks/UseWindow";
+import { lockBodyScroll, unlockBodyScroll } from "../../lib/scrollLock";
 
 const CLOSE_MS = 200;
 const DRAG_DISMISS_PX = 90;
@@ -62,11 +64,10 @@ const ResponsiveSheet = ({
       if (e.key === "Escape") requestClose();
     };
     document.addEventListener("keydown", handleKey);
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    lockBodyScroll();
     return () => {
       document.removeEventListener("keydown", handleKey);
-      document.body.style.overflow = previousOverflow;
+      unlockBodyScroll();
     };
   }, [requestClose]);
 
@@ -112,7 +113,13 @@ const ResponsiveSheet = ({
         opacity: visible ? 1 : 0,
         transition: `opacity ${CLOSE_MS}ms ease`,
       }}
-      onClick={requestClose}
+      /* Portals bubble along the React tree, not the DOM: without this a tap
+         on the backdrop also reaches the PostCard this sheet was opened from,
+         and navigates to the post. */
+      onClick={(e) => {
+        e.stopPropagation();
+        requestClose();
+      }}
     >
       <div
         role="dialog"
@@ -162,7 +169,7 @@ const ResponsiveSheet = ({
               className="absolute left-2 p-1.5 rounded-full hover:bg-neutral-800 transition-colors cursor-pointer"
               aria-label="Back"
             >
-              <ChevronLeft className="w-5 h-5" />
+              <Icons.back className="w-5 h-5" />
             </button>
           )}
           <h2 className="w-full min-w-0 font-bold text-[15px] px-10 text-center truncate">

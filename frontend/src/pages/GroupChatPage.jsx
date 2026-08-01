@@ -13,13 +13,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { Icons } from "../components/icons";
 import SharedPostCard from "../components/Chat/SharedPostCard";
 import EmojiPicker from "emoji-picker-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "../components/ui/dropdown-menu";
+import ResponsiveMenu from "../components/ui/ResponsiveMenu";
 
 const MESSAGE_RATE_LIMIT = 1000;
 const MAX_MESSAGE_LENGTH = 10000;
@@ -647,11 +641,12 @@ const GroupChatPage = () => {
       </div>
 
       {/* Context Menu, Emoji Picker, etc would go here as overlays */}
-      {contextMenu && (
-        <div
+      <ResponsiveMenu
+          open={Boolean(contextMenu)}
+          onClose={() => setContextMenu(null)}
+          title="Message"
           className="fixed bg-neutral-800 border border-neutral-700 rounded-lg shadow-xl z-50 py-1"
-          style={{ top: contextMenu.y, left: contextMenu.x }}
-          onClick={(e) => e.stopPropagation()}
+          style={{ top: contextMenu?.y, left: contextMenu?.x }}
         >
           <button
             onClick={() => handleContextMenuAction("reply")}
@@ -696,13 +691,12 @@ const GroupChatPage = () => {
               <Icons.report className="w-4 h-4" /> Report
             </button>
           )}
-        </div>
-      )}
+      </ResponsiveMenu>
 
-      {/* Click outside to close context menu */}
+      {/* Desktop only: the sheet has its own backdrop on a phone. */}
       {contextMenu && (
         <div
-          className="fixed inset-0 z-40"
+          className="fixed inset-0 z-40 hidden md:block"
           onClick={() => setContextMenu(null)}
         />
       )}

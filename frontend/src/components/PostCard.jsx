@@ -12,13 +12,13 @@ import axios from "axios";
 import PostHeader from "./PostHeader";
 import PostContent from "./PostContent";
 import PostMedia from "./PostMedia";
+import ConfirmDialog from "./ui/ConfirmDialog";
 import PollCard from "./PollCard";
 import LocationChip from "./LocationChip";
 import PostActions from "./PostActions";
 import MediaModal from "./MediaModal";
 import Reply from "./Reply";
 import CreatePost from "./CreatePost";
-import Modal from "react-modal";
 import toast from "react-hot-toast";
 import { Icons } from "./icons";
 import NoDataMessage from "./NoDataMessage";
@@ -34,7 +34,6 @@ import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
 
 
-Modal.setAppElement("#root");
 const viewedPostsInSession = new Set();
 const pendingViewedPostIds = new Set();
 let bulkFlushTimer = null;
@@ -1589,49 +1588,21 @@ const PostCard = ({
       {selectedImage && (
         <MediaModal selectedImage={selectedImage} closeModal={closeModal} />
       )}
-      <Modal
-        isOpen={isDeleteModalOpen}
-        onRequestClose={() => {
-          setIsDeleteModalOpen(false);
-          if (onCancel) onCancel();
-        }}
-        className="bg-[#1A1A1A] rounded-lg max-w-[300px] mx-auto border border-neutral-700 z-[1000]"
-        overlayClassName="fixed inset-0 bg-black/90 flex items-center justify-center z-[1000]"
-      >
-        <div className="flex flex-col">
-          <h2 className="text-lg font-bold text-center px-4 pt-4">
-            Delete {isDraft ? "draft" : isComment ? "comment" : "post"}?
-          </h2>
-          <p className="mt-2 text-neutral-400 text-center px-4 border-b border-neutral-700 pb-4">
-            If you delete this{" "}
-            {isDraft ? "draft" : isComment ? "comment" : "post"}, you won’t be
-            able to restore it.
-          </p>
-          <div className="flex justify-between mx-2">
-            <button
-              onClick={() => {
-                setIsDeleteModalOpen(false);
-                if (onCancel) onCancel();
-              }}
-              className="flex-1 py-2 my-2 font-medium rounded-lg hover:bg-neutral-700"
-              disabled={isDeleting}
-            >
-              Cancel
-            </button>
-            <span className="border-r border-neutral-700 mx-2" />
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDelete();
-              }}
-              className="flex-1 py-2 my-2 text-red-500 font-medium rounded-lg hover:bg-neutral-800"
-              disabled={isDeleting}
-            >
-              {isDeleting ? "Deleting..." : "Delete"}
-            </button>
-          </div>
-        </div>
-      </Modal>
+      {isDeleteModalOpen && (
+        <ConfirmDialog
+          title={`Delete ${isDraft ? "draft" : isComment ? "comment" : "post"}?`}
+          confirmLabel="Delete"
+          busy={isDeleting}
+          onConfirm={handleDelete}
+          onCancel={() => {
+            setIsDeleteModalOpen(false);
+            if (onCancel) onCancel();
+          }}
+        >
+          If you delete this {isDraft ? "draft" : isComment ? "comment" : "post"},
+          you won't be able to restore it.
+        </ConfirmDialog>
+      )}
 
       {isProfileModalOpen && author && (
         <ProfileCard

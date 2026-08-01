@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { AlertTriangle, ArrowLeft, Clock } from "lucide-react";
+import { AlertTriangle, Clock } from "lucide-react";
 import { toast } from "react-hot-toast";
 import { Icons } from "../components/icons";
 import SchedulePickerSheet from "../components/SchedulePickerSheet";
@@ -9,6 +9,7 @@ import { formatScheduleLabel, formatTimeUntil } from "../lib/schedule";
 import { normalizeMedia } from "../lib/mediaTypes";
 import AudioPlayer from "../components/AudioPlayer";
 import LocationChip from "../components/LocationChip";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 
 /** Stable key across the two collections — ids only collide across types. */
 const keyOf = (item) => `${item.type}:${item._id}`;
@@ -226,7 +227,7 @@ const ScheduledPostsPage = () => {
           className="rounded-full p-2 transition-colors hover:bg-neutral-800 cursor-pointer"
           aria-label="Go back"
         >
-          <ArrowLeft className="h-5 w-5 text-white" />
+          <Icons.back className="h-5 w-5 text-white" />
         </button>
         <h1 className="font-semibold">Scheduled posts</h1>
       </header>
@@ -268,36 +269,15 @@ const ScheduledPostsPage = () => {
       )}
 
       {confirming && (
-        <div
-          className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/70 px-4"
-          onClick={() => setConfirming(null)}
+        <ConfirmDialog
+          title="Cancel this schedule?"
+          confirmLabel="Discard"
+          cancelLabel="Keep it"
+          onConfirm={() => handleCancel(confirming)}
+          onCancel={() => setConfirming(null)}
         >
-          <div
-            className="w-full max-w-[340px] rounded-2xl border border-neutral-700 bg-[#181818] p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="font-semibold text-white">Cancel this schedule?</h2>
-            <p className="mt-2 text-sm text-neutral-400">
-              It won't be posted, and the draft will be discarded.
-            </p>
-            <div className="mt-5 flex gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirming(null)}
-                className="flex-1 rounded-xl border border-neutral-700 py-2.5 text-sm font-medium text-white transition-colors hover:bg-neutral-800 cursor-pointer"
-              >
-                Keep it
-              </button>
-              <button
-                type="button"
-                onClick={() => handleCancel(confirming)}
-                className="flex-1 rounded-xl bg-rose-600 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer"
-              >
-                Discard
-              </button>
-            </div>
-          </div>
-        </div>
+          It won't be posted, and the draft will be discarded.
+        </ConfirmDialog>
       )}
     </div>
   );

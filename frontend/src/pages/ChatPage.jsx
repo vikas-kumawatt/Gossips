@@ -42,9 +42,9 @@ import SiteHeader from "../components/layouts/site-header";
 import MobileNavbar from "../components/layouts/mobile-navbar";
 import { Icons } from "../components/icons";
 import CreatePost from "../components/CreatePost";
-import Modal from "react-modal";
+import ResponsiveMenu from "../components/ui/ResponsiveMenu";
+import ResponsiveSheet from "../components/ui/responsive-sheet";
 
-Modal.setAppElement("#root");
 
 const ChatPage = ({ embedded = false }) => {
   const { userAuth } = useContext(UserContext);
@@ -1305,13 +1305,14 @@ const ChatPage = ({ embedded = false }) => {
             <Icons.plus className="w-4 h-4" />
           </button>
         </div>
-        {isFilterDropdownOpen && (
-          <div
-            ref={filterDropdownRef}
-            className="fixed z-[70] w-[220px] rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
-            style={{ left: `${filterDropdownPosition.x}px`, top: `${filterDropdownPosition.y}px` }}
-            onClick={(event) => event.stopPropagation()}
-          >
+        <ResponsiveMenu
+          open={isFilterDropdownOpen}
+          onClose={() => setIsFilterDropdownOpen(false)}
+          title="Filter chats"
+          className="fixed z-[70] w-[220px] rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
+          style={{ left: `${filterDropdownPosition.x}px`, top: `${filterDropdownPosition.y}px` }}
+        >
+          <div ref={filterDropdownRef} onClick={(event) => event.stopPropagation()}>
             {[
               { key: "verifiedProfiles", label: "Verified Profiles", icon: BadgeCheck },
               { key: "following", label: "Following", icon: UserCheck },
@@ -1340,7 +1341,7 @@ const ChatPage = ({ embedded = false }) => {
               </button>
             ))}
           </div>
-        )}
+        </ResponsiveMenu>
 
         {showSearchResults ? (
           <div className="bg-neutral-950 border border-neutral-800 rounded-lg mt-2 overflow-hidden">
@@ -1406,28 +1407,15 @@ const ChatPage = ({ embedded = false }) => {
       </main>
 
       <CreatePost isOpen={isCreateModalOpen} onClose={closeCreateModal} />
-      <Modal
-        isOpen={isCategoryModalOpen}
-        onRequestClose={() => {
-          setIsCategoryModalOpen(false);
-          setNewCategoryName("");
-        }}
-        className="bg-neutral-950 text-white border border-neutral-800 rounded-2xl max-w-sm w-full mx-4 p-5 outline-none"
-        overlayClassName="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold">Create category</h3>
-          <button
-            type="button"
-            className="text-neutral-400 hover:text-white"
-            onClick={() => {
-              setIsCategoryModalOpen(false);
-              setNewCategoryName("");
-            }}
-          >
-            <Icons.close className="w-5 h-5" />
-          </button>
-        </div>
+      {isCategoryModalOpen && (
+        <ResponsiveSheet
+          title="New list"
+          onClose={() => {
+            setIsCategoryModalOpen(false);
+            setNewCategoryName("");
+          }}
+        >
+          <div className="p-5">
         <input
           autoFocus
           type="text"
@@ -1458,31 +1446,19 @@ const ChatPage = ({ embedded = false }) => {
             Create
           </button>
         </div>
-      </Modal>
-      <Modal
-        isOpen={isAssignCategoryModalOpen}
-        onRequestClose={() => {
-          setIsAssignCategoryModalOpen(false);
-          setSelectedItemForCategory(null);
-          setSelectedCategoryId("");
-        }}
-        className="bg-neutral-950 text-white border border-neutral-800 rounded-2xl max-w-sm w-full mx-4 p-5 outline-none"
-        overlayClassName="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
-      >
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-semibold">Move to category</h3>
-          <button
-            type="button"
-            className="text-neutral-400 hover:text-white"
-            onClick={() => {
-              setIsAssignCategoryModalOpen(false);
-              setSelectedItemForCategory(null);
-              setSelectedCategoryId("");
-            }}
-          >
-            <Icons.close className="w-5 h-5" />
-          </button>
-        </div>
+          </div>
+        </ResponsiveSheet>
+      )}
+      {isAssignCategoryModalOpen && (
+        <ResponsiveSheet
+          title="Move to list"
+          onClose={() => {
+            setIsAssignCategoryModalOpen(false);
+            setSelectedItemForCategory(null);
+            setSelectedCategoryId("");
+          }}
+        >
+          <div className="p-5">
 
         <div className="space-y-2 max-h-56 overflow-y-auto">
           <button
@@ -1532,14 +1508,20 @@ const ChatPage = ({ embedded = false }) => {
             Save
           </button>
         </div>
-      </Modal>
+          </div>
+        </ResponsiveSheet>
+      )}
+      {/* Guarded outside the menu too: JSX children are evaluated eagerly, so
+          the rows below would dereference a null tabMenu while it's closed. */}
       {tabMenu?.category && (
-        <div
-          ref={tabMenuRef}
-          className="fixed z-[70] w-[220px] rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
-          style={{ left: `${tabMenu.x}px`, top: `${tabMenu.y}px` }}
-          onClick={(event) => event.stopPropagation()}
-        >
+      <ResponsiveMenu
+        open={Boolean(tabMenu?.category)}
+        onClose={() => setTabMenu(null)}
+        title="Category"
+        className="fixed z-[70] w-[220px] rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
+        style={{ left: `${tabMenu?.x}px`, top: `${tabMenu?.y}px` }}
+      >
+        <div ref={tabMenuRef} onClick={(event) => event.stopPropagation()}>
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 mt-2 flex items-center gap-3 text-left p-3 rounded-xl text-[15px] text-white hover:bg-neutral-800 cursor-pointer"
@@ -1578,14 +1560,17 @@ const ChatPage = ({ embedded = false }) => {
             </>
           )}
         </div>
+      </ResponsiveMenu>
       )}
       {chatMenu?.item && (
-        <div
-          data-chat-menu
-          className="fixed z-[80] w-[260px] max-h-[78vh] overflow-y-auto scrollbar-hide rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
-          style={{ left: `${chatMenu.x}px`, top: `${chatMenu.y}px` }}
-          onClick={(event) => event.stopPropagation()}
-        >
+      <ResponsiveMenu
+        open={Boolean(chatMenu?.item)}
+        onClose={() => setChatMenu(null)}
+        title="Chat options"
+        className="fixed z-[80] w-[260px] max-h-[78vh] overflow-y-auto scrollbar-hide rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
+        style={{ left: `${chatMenu?.x}px`, top: `${chatMenu?.y}px` }}
+      >
+        <div data-chat-menu onClick={(event) => event.stopPropagation()}>
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 mt-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
@@ -1788,18 +1773,19 @@ const ChatPage = ({ embedded = false }) => {
             <Trash2 className="w-5 h-5" />
           </button>
         </div>
+      </ResponsiveMenu>
       )}
-      <Modal
-        isOpen={isPinModalOpen}
-        onRequestClose={() => {
-          setIsPinModalOpen(false);
-          setPendingLockItem(null);
-          setLockPinInput("");
-          setPinAction("toggle");
-        }}
-        className="bg-neutral-950 text-white border border-neutral-800 rounded-2xl max-w-sm w-full mx-4 p-5 outline-none"
-        overlayClassName="fixed inset-0 bg-black/80 flex items-center justify-center z-50"
-      >
+      {isPinModalOpen && (
+        <ResponsiveSheet
+          title="Chat lock"
+          onClose={() => {
+            setIsPinModalOpen(false);
+            setPendingLockItem(null);
+            setLockPinInput("");
+            setPinAction("toggle");
+          }}
+        >
+          <div className="p-5">
         <h3 className="text-lg font-semibold mb-3">
           {pinAction === "open"
             ? "Enter PIN to open chat"
@@ -1835,7 +1821,9 @@ const ChatPage = ({ embedded = false }) => {
             Confirm
           </button>
         </div>
-      </Modal>
+          </div>
+        </ResponsiveSheet>
+      )}
       {!embedded && <MobileNavbar layoutContext={layoutContext} />}
     </div>
   );

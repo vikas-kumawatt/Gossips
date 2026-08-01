@@ -8,6 +8,7 @@ import React, {
 import { toast } from "react-hot-toast";
 import { UserContext } from "./UserContext";
 import { userAPI } from "../services/api";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 
 /**
  * BlockContext — single source of truth for which accounts the current user has
@@ -115,37 +116,16 @@ export const BlockProvider = ({ children }) => {
     >
       {children}
       {pending && (
-        <div
-          className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/80 px-4"
-          onClick={() => !working && setPending(null)}
+        <ConfirmDialog
+          title={`Block @${pending.username}?`}
+          confirmLabel="Block"
+          busy={working}
+          onConfirm={confirmBlock}
+          onCancel={() => !working && setPending(null)}
         >
-          <div
-            className="w-full max-w-[320px] rounded-2xl bg-[#1A1A1A] border border-neutral-700 overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="px-5 pt-5 pb-4 text-center border-b border-neutral-700">
-              <h2 className="text-lg font-bold">Block @{pending.username}?</h2>
-              <p className="mt-2 text-neutral-400 text-sm">
-                They won't be able to find your profile, posts or message you on
-                Gossips. We won't let them know you blocked them.
-              </p>
-            </div>
-            <button
-              onClick={confirmBlock}
-              disabled={working}
-              className="w-full py-3 text-red-500 font-semibold text-[15px] hover:bg-neutral-800 disabled:opacity-60 cursor-pointer"
-            >
-              {working ? "Blocking..." : "Block"}
-            </button>
-            <div className="border-t border-neutral-700" />
-            <button
-              onClick={() => !working && setPending(null)}
-              className="w-full py-3 font-medium text-[15px] hover:bg-neutral-800 cursor-pointer"
-            >
-              Cancel
-            </button>
-          </div>
-        </div>
+          They won't be able to find your profile, posts or message you on
+          Gossips. We won't let them know you blocked them.
+        </ConfirmDialog>
       )}
     </BlockContext.Provider>
   );

@@ -153,7 +153,7 @@ const PostHeader = ({
                 <Icons.more2 />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
+            <DropdownMenuContent sheetTitle="Post options"
               align="end"
               className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[250px] mt-1 p-0 border border-neutral-700"
             >
@@ -196,10 +196,18 @@ const PostHeader = ({
                     </DropdownMenuItem>
                   )}
                   <DropdownMenuItem
-                    onClick={(e) => e.stopPropagation()}
-                    onSelect={(e) => {
-                      e.preventDefault();
-                      // Open the separate audience dropdown after this menu closes.
+                    /*
+                     * Scheduled from onClick, not onSelect+preventDefault.
+                     * preventDefault means "keep this menu open", which on
+                     * desktop Radix papered over by closing it anyway when the
+                     * second menu took focus — but on mobile it left both
+                     * sheets stacked, the audience one over a menu the user
+                     * then had to dismiss separately. Letting this menu close
+                     * normally gives one sheet at a time on both.
+                     */
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      // The timeout lets the first menu finish closing.
                       setTimeout(() => setIsReplyPrivacyOpen(true), 0);
                     }}
                     className="flex justify-between items-center p-3 mx-2 tracking-normal select-none font-semibold mb-2 cursor-pointer text-[15px] active:bg-neutral-950 hover:bg-neutral-800 hover:rounded-xl outline-none"
@@ -312,7 +320,7 @@ const PostHeader = ({
               <DropdownMenuTrigger asChild>
                 <span className="absolute right-0 top-0 h-0 w-0" aria-hidden />
               </DropdownMenuTrigger>
-              <DropdownMenuContent
+              <DropdownMenuContent sheetTitle="Who can reply & quote"
                 align="end"
                 onClick={(e) => e.stopPropagation()}
                 className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[260px] mt-1 p-2 border border-neutral-700"

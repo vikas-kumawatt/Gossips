@@ -24,7 +24,7 @@ const MessageContextMenu = ({
           style={{ pointerEvents: 'none' }}
         />
       </DropdownMenuTrigger>
-      <DropdownMenuContent
+      <DropdownMenuContent sheetTitle="Message"
         align="end"
         className="bg-neutral-900 border-neutral-700 rounded-2xl w-56 p-2 z-50"
         style={{

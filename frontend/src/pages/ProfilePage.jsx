@@ -826,7 +826,7 @@ const ProfilePage = () => {
                           <Icons.more />
                         </button>
                       </DropdownMenuTrigger>
-                      <DropdownMenuContent
+                      <DropdownMenuContent sheetTitle="Profile options"
                         align="end"
                         className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[250px] p-0 border border-neutral-700"
                       >

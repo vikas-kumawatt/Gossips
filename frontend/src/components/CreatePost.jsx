@@ -6,26 +6,129 @@ import React, {
   useCallback,
 } from "react";
 import { Icons } from "./icons";
-import { Check, Clock } from "lucide-react";
+import { Check, Clock, MapPin, Mic } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { UserContext } from "../contexts/UserContext";
 import axios from "axios";
 import { toast } from "react-hot-toast";
 import PostCard from "./PostCard";
 import SchedulePickerSheet from "./SchedulePickerSheet";
+import ResponsivePanel from "./ui/responsive-panel";
 import { formatScheduleLabel } from "../lib/schedule";
-import { normalizeMedia } from "../lib/mediaTypes";
+import { formatDuration, normalizeMedia } from "../lib/mediaTypes";
 import {
   ComposerPreviews,
   ComposerSheets,
   ComposerToolbar,
 } from "./ComposerAttachments";
 import useComposerAttachments from "../hooks/useComposerAttachments";
+import ResponsiveMenu from "./ui/ResponsiveMenu";
 import {
   REPLY_AUDIENCE_OPTIONS,
   getReplyTriggerText,
   REPLY_RESTRICTED_TEXT,
 } from "../lib/replyAudience";
+
+/**
+ * What you're quoting, as shown while composing.
+ *
+ * Previously this was two copy-pasted blocks that rendered only text and
+ * images, so quoting a poll, a voice clip or a verified account showed a
+ * blank-looking card that didn't match what would be posted.
+ */
+const QuotedPreview = ({ content, author }) => {
+  const media = normalizeMedia(content.media);
+  const audio = media.find((m) => m.type === "audio");
+  const visuals = media.filter((m) => m.type !== "audio");
+
+  return (
+    <div className="mt-4 p-3 border border-neutral-700 rounded-lg">
+      <div className="flex gap-2">
+        <img
+          className="w-6 h-6 rounded-full object-cover shrink-0"
+          src={author.profilePic}
+          alt=""
+        />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1">
+            <p className="text-white font-medium text-sm truncate">{author.username}</p>
+            {(author.isVerified ||
+              (author.verificationBadge && author.verificationBadge !== "none")) && (
+              <span className="inline-flex shrink-0 items-center">
+                <Icons.verified />
+              </span>
+            )}
+            {content.isAiGenerated && (
+              <span className="shrink-0 inline-flex items-center gap-1 rounded-full border border-neutral-700 bg-neutral-800/60 px-1.5 py-[1px] text-[10px] text-neutral-300">
+                <Icons.ai className="h-3 w-3" />
+                AI
+              </span>
+            )}
+          </div>
+
+          {content.location?.name && (
+            <p className="mt-0.5 flex items-center gap-1 text-[12px] text-neutral-500">
+              <MapPin className="h-3 w-3 shrink-0" />
+              <span className="truncate">{content.location.name}</span>
+            </p>
+          )}
+
+          {content.content && (
+            <p className="text-gray-300 text-sm break-words">{content.content}</p>
+          )}
+
+          {/* A poll can't be voted on from here, so it's shown as a summary
+              rather than a live ballot. */}
+          {content.poll?.question && (
+            <div className="mt-2 rounded-lg border border-neutral-700 p-2">
+              <p className="text-[13px] font-medium text-white break-words">
+                {content.poll.question}
+              </p>
+              <p className="mt-1 text-[12px] text-neutral-500">
+                Poll · {content.poll.options?.length || 0} options
+              </p>
+            </div>
+          )}
+
+          {/* A summary, not a player: the composer isn't the place to listen,
+              and an embedded player here would fight the one on the post. */}
+          {audio && (
+            <p className="mt-2 flex items-center gap-2 rounded-lg border border-neutral-700 px-2 py-1.5 text-[13px] text-neutral-300">
+              <Mic className="h-3.5 w-3.5 shrink-0" />
+              Audio clip
+              {Number.isFinite(audio.duration) && (
+                <span className="text-neutral-500">{formatDuration(audio.duration)}</span>
+              )}
+            </p>
+          )}
+
+          {visuals.length > 0 && (
+            <div className="mt-2 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
+              {visuals.map((item) => (
+                <div key={item.url} className="relative flex-shrink-0">
+                  {item.type === "video" ? (
+                    <video src={item.url} className="w-24 h-24 rounded-lg object-cover" />
+                  ) : (
+                    <img
+                      src={item.url}
+                      alt=""
+                      className="w-24 h-24 rounded-lg object-cover"
+                    />
+                  )}
+                  {item.type === "gif" && (
+                    <span className="pointer-events-none absolute bottom-1 left-1 rounded bg-black/70 px-1 py-[1px] text-[9px] font-bold text-white">
+                      GIF
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const CreatePost = ({
   isOpen,
@@ -90,7 +193,15 @@ const CreatePost = ({
     const handleOutsideClick = (event) => {
       // The picker is a portal at document.body, so every click inside it
       // looks "outside" the card and would otherwise close the composer.
-      if (isSchedulePickerOpen || attachments.openSheet) return;
+      // Every one of these is a portal at document.body, so a tap inside it
+      // reads as "outside the card" and would close the composer underneath.
+      if (
+        isSchedulePickerOpen ||
+        attachments.openSheet ||
+        isMoreDropdownOpen ||
+        isReplyDropdownOpen
+      )
+        return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
         if (content.trim() || mediaFiles.length > 0 || attachments.hasAttachment) {
           setShowSaveDraftDialog(true);
@@ -119,7 +230,7 @@ const CreatePost = ({
     return () => {
       document.removeEventListener("mousedown", handleOutsideClick);
     };
-  }, [onClose, content, mediaFiles, isSchedulePickerOpen, attachments.hasAttachment, attachments.openSheet]);
+  }, [onClose, content, mediaFiles, isSchedulePickerOpen, attachments.hasAttachment, attachments.openSheet, isMoreDropdownOpen, isReplyDropdownOpen]);
 
   useEffect(() => {
     if (isOpen) {
@@ -475,21 +586,14 @@ const CreatePost = ({
 
   if (showDraftPostsDialog) {
     return (
-      <div className="fixed inset-0 z-[200] bg-black/70 flex items-center justify-center px-4">
-        <div className="bg-neutral-900 w-full max-w-[600px] rounded-2xl border border-neutral-600 overflow-hidden">
-          <div className="flex relative items-center justify-center p-4 border-b border-neutral-700">
-            <button
-              onClick={() => {
-                setShowDraftPostsDialog(false);
-                if (!isOpen) onClose();
-              }}
-              className="text-md hover:text-red-500 transition-colors cursor-pointer absolute left-4"
-            >
-              <Icons.back />
-            </button>
-            <p className="font-medium text-lg">Drafts</p>
-          </div>
-          <div className="max-h-[70vh] overflow-y-auto custom-scrollbar pt-4">
+      <ResponsivePanel
+        title="Drafts"
+        onClose={() => {
+          setShowDraftPostsDialog(false);
+          if (!isOpen) onClose();
+        }}
+      >
+        <div className="pt-4">
             {drafts.length > 0 ? (
               drafts.map((draft, index) => {
                 const isLastDraft = index === drafts.length - 1;
@@ -530,14 +634,13 @@ const CreatePost = ({
                 )}
               </div>
             )}
-            {isDraftsLoading && drafts.length > 0 && (
-              <div className="flex justify-center py-4">
-                <Icons.spinner className="animate-spin h-8 w-8 text-neutral-400" />
-              </div>
-            )}
-          </div>
+          {isDraftsLoading && drafts.length > 0 && (
+            <div className="flex justify-center py-4">
+              <Icons.spinner className="animate-spin h-8 w-8 text-neutral-400" />
+            </div>
+          )}
         </div>
-      </div>
+      </ResponsivePanel>
     );
   }
 
@@ -579,8 +682,12 @@ const CreatePost = ({
               >
                 <Icons.more className="h-6 w-6" />
               </button>
-              {isMoreDropdownOpen && (
-                <div className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]">
+              <ResponsiveMenu
+                  open={isMoreDropdownOpen}
+                  onClose={() => setIsMoreDropdownOpen(false)}
+                  title="Options"
+                  className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+                >
                   <div className="p-2">
                     <button
                       className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
@@ -614,8 +721,7 @@ const CreatePost = ({
                       <Icons.chevronRight />
                     </button>
                   </div>
-                </div>
-              )}
+                </ResponsiveMenu>
             </div>
           </div>
         </div>
@@ -639,89 +745,11 @@ const CreatePost = ({
                 rows={1}
                 style={{ overflow: "hidden" }}
               />
-              {quotedPost && quotedAuthor && (
-                <div className="mt-4 p-3 border border-neutral-700 rounded-lg">
-                  <div className="flex gap-2">
-                    <img
-                      className="w-6 h-6 rounded-full object-cover"
-                      src={quotedAuthor.profilePic}
-                      alt="Quoted Profile"
-                    />
-                    <div>
-                      <p className="text-white font-medium text-sm">
-                        {quotedAuthor.username}
-                      </p>
-                      <p className="text-gray-300 text-sm">
-                        {quotedPost.content}
-                      </p>
-                      {quotedPost.media && quotedPost.media.length > 0 && (
-                        <div className="mt-2 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
-                          {/* Feed responses carry typed media items; legacy
-                              quotes may still be bare URLs. Normalise both. */}
-                          {normalizeMedia(quotedPost.media).map((item) => (
-                            <div key={item.url} className="flex-shrink-0">
-                              {item.type === "video" ? (
-                                <video
-                                  src={item.url}
-                                  controls
-                                  className="w-24 h-24 rounded-lg object-cover"
-                                />
-                              ) : (
-                                <img
-                                  src={item.url}
-                                  alt="Quoted Media"
-                                  className="w-24 h-24 rounded-lg object-cover"
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
-              {quotedComment && quotedAuthor && (
-                <div className="mt-4 p-3 border border-neutral-700 rounded-lg">
-                  <div className="flex gap-2">
-                    <img
-                      className="w-6 h-6 rounded-full object-cover"
-                      src={quotedAuthor.profilePic}
-                      alt="Quoted Profile"
-                    />
-                    <div>
-                      <p className="text-white font-medium text-sm">
-                        {quotedAuthor.username}
-                      </p>
-                      <p className="text-gray-300 text-sm">
-                        {quotedComment.content}
-                      </p>
-                      {quotedComment.media && quotedComment.media.length > 0 && (
-                        <div className="mt-2 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
-                          {/* Feed responses carry typed media items; legacy
-                              quotes may still be bare URLs. Normalise both. */}
-                          {normalizeMedia(quotedComment.media).map((item) => (
-                            <div key={item.url} className="flex-shrink-0">
-                              {item.type === "video" ? (
-                                <video
-                                  src={item.url}
-                                  controls
-                                  className="w-24 h-24 rounded-lg object-cover"
-                                />
-                              ) : (
-                                <img
-                                  src={item.url}
-                                  alt="Quoted Media"
-                                  className="w-24 h-24 rounded-lg object-cover"
-                                />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
+              {(quotedPost || quotedComment) && quotedAuthor && (
+                <QuotedPreview
+                  content={quotedPost || quotedComment}
+                  author={quotedAuthor}
+                />
               )}
               {mediaFiles.length > 0 && (
                 <div className="mt-3 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
@@ -814,8 +842,12 @@ const CreatePost = ({
                   >
                     {getReplyTriggerText(whoCanReply)}
                   </p>
-                  {isReplyDropdownOpen && (
-                    <div className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]">
+                  <ResponsiveMenu
+                      open={isReplyDropdownOpen}
+                      onClose={() => setIsReplyDropdownOpen(false)}
+                      title="Who can reply & quote"
+                      className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+                    >
                       <div className="p-2">
                         {REPLY_AUDIENCE_OPTIONS.map((option) => (
                           <button
@@ -833,8 +865,7 @@ const CreatePost = ({
                           </button>
                         ))}
                       </div>
-                    </div>
-                  )}
+                    </ResponsiveMenu>
                 </div>
                 <button
                   className={`px-4 py-1.5 rounded-2xl font-medium ${

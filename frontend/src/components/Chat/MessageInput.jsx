@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import { Icons } from "../components/icons";
 import EmojiPicker from "emoji-picker-react";
-import { cachedFetchJson } from "../../utils/cachedFetch";
+import GifPicker from "../GifPicker";
 
 const MessageInput = ({
   newMessage,
@@ -24,31 +24,8 @@ const MessageInput = ({
 }) => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
-  const [gifs, setGifs] = useState([]);
   const [showMoreOptions, setShowMoreOptions] = useState(false);
   const MAX_MESSAGE_LENGTH = 10000;
-
-  const fetchGifs = async (query = "") => {
-    try {
-      const apiKey = import.meta.env.VITE_GIPHY_API_KEY;
-      if (!apiKey) {
-        throw new Error("GIPHY API key not configured");
-      }
-      
-      const endpoint = query 
-        ? `https://api.giphy.com/v1/gifs/search?api_key=${apiKey}&q=${encodeURIComponent(query)}&limit=20&rating=g`
-        : `https://api.giphy.com/v1/gifs/trending?api_key=${apiKey}&limit=20&rating=g`;
-
-      const json = await cachedFetchJson(
-        endpoint,
-        { credentials: "omit", mode: "cors" },
-        { ttlMs: 2 * 60 * 1000, cacheKey: `v1::giphy::${endpoint}` }
-      );
-      setGifs(json.data);
-    } catch (error) {
-      console.error("Error fetching GIFs:", error);
-    }
-  };
 
   const handleEmojiClick = (emojiObject) => {
     if (newMessage.length + emojiObject.emoji.length <= MAX_MESSAGE_LENGTH) {
@@ -56,23 +33,12 @@ const MessageInput = ({
     }
   };
 
-  const handleGifClick = (gif) => {
+  /** Shape from the shared GifPicker: { url, width, height }. */
+  const handleGifSelect = (gif) => {
     if (isBlocked || isRestricted) return;
-    
-    const media = [{ 
-      type: "gif", 
-      url: gif.images.fixed_height.url,
-      thumbnail: gif.images.fixed_height_small.url
-    }];
-    onSendMessage(media, 'gif');
+    onSendMessage([{ type: "gif", url: gif.url, thumbnail: gif.url }], "gif");
     setShowGifPicker(false);
   };
-
-  useEffect(() => {
-    if (showGifPicker) {
-      fetchGifs();
-    }
-  }, [showGifPicker]);
 
   const ReplyPreview = () => (
     <div className="flex items-center justify-between bg-neutral-800 px-4 py-2 border-l-4 border-violet-600 mx-2 mb-2 rounded-lg">
@@ -197,9 +163,11 @@ const MessageInput = ({
             </button>
           )}
 
+          {/* Desktop only: phone keyboards have their own emoji panel, and
+              this one is a fixed-width popover that doesn't fit beside it. */}
           <button
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="text-neutral-400 hover:text-white p-2 transition-colors disabled:opacity-50"
+            className="hidden md:inline-flex text-neutral-400 hover:text-white p-2 transition-colors disabled:opacity-50"
             disabled={isSending}
             aria-label="Emoji"
           >
@@ -207,7 +175,7 @@ const MessageInput = ({
           </button>
 
           {showEmojiPicker && (
-            <div className="absolute bottom-16 left-2 z-50">
+            <div className="absolute bottom-16 left-2 z-50 hidden md:block">
               <EmojiPicker onEmojiClick={handleEmojiClick} theme="dark" />
             </div>
           )}
@@ -258,41 +226,10 @@ const MessageInput = ({
         {showMoreOptions && <MoreOptionsMenu />}
 
         {showGifPicker && (
-          <div className="absolute bottom-16 right-2 bg-neutral-900 border border-neutral-700 p-4 rounded-lg max-h-96 overflow-y-auto w-80 z-50 shadow-2xl">
-            <div className="flex items-center gap-2 mb-3">
-              <input
-                type="text"
-                placeholder="Search GIFs..."
-                onChange={(e) => fetchGifs(e.target.value)}
-                className="flex-1 bg-neutral-800 text-white px-3 py-2 rounded-lg text-sm focus:outline-none"
-              />
-              <button
-                onClick={() => setShowGifPicker(false)}
-                className="text-neutral-400 hover:text-white p-2"
-              >
-                <Icons.close className="w-5 h-5" />
-              </button>
-            </div>
-            {gifs.length === 0 ? (
-              <div className="text-center py-8 text-neutral-400">
-                <Icons.spinner className="w-6 h-6 animate-spin mx-auto mb-2" />
-                <p className="text-sm">Loading GIFs...</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-2 gap-2">
-                {gifs.map((gif) => (
-                  <img
-                    key={gif.id}
-                    src={gif.images.fixed_height_small.url}
-                    alt={gif.title}
-                    onClick={() => handleGifClick(gif)}
-                    className="cursor-pointer rounded hover:opacity-80 w-full h-32 object-cover transition-opacity"
-                    loading="lazy"
-                  />
-                ))}
-              </div>
-            )}
-          </div>
+          <GifPicker
+            onSelect={handleGifSelect}
+            onClose={() => setShowGifPicker(false)}
+          />
         )}
       </div>
     </>

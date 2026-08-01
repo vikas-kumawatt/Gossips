@@ -58,7 +58,7 @@ export default function NavigationMenu() {
             />
           </div>
         </DropdownMenuTrigger>
-        <DropdownMenuContent
+        <DropdownMenuContent sheetTitle="Menu"
           align="end"
           className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[220px] mt-1 p-0 border border-neutral-700"
         >

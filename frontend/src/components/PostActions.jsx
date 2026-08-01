@@ -1,11 +1,13 @@
 import React from "react";
 import { Icons } from "./icons";
+// The local wrapper, not Radix directly — it's what turns this into a bottom
+// sheet on a phone. Importing the primitive bypasses that entirely.
 import {
   DropdownMenu,
   DropdownMenuTrigger,
   DropdownMenuContent,
   DropdownMenuItem,
-} from "@radix-ui/react-dropdown-menu";
+} from "./ui/dropdown-menu";
 
 const PostActions = ({
   handleIconClick,
@@ -55,7 +57,7 @@ const PostActions = ({
             {!hideLikeShareCount && repostCount > 0 && <p>{repostCount}</p>}
           </button>
         </DropdownMenuTrigger>
-        <DropdownMenuContent
+        <DropdownMenuContent sheetTitle="Repost"
           align="start"
           className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[250px] mt-1 p-0 border border-neutral-700"
         >

@@ -109,7 +109,7 @@ const ChatHeader = ({
                 <Icons.about className="w-6 h-6" />
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
+            <DropdownMenuContent sheetTitle="Chat options"
               align="end"
               className="bg-neutral-900 border-neutral-700 rounded-2xl w-56 p-2"
             >

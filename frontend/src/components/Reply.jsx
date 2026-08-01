@@ -14,6 +14,7 @@ import {
 } from "./ComposerAttachments";
 import useComposerAttachments from "../hooks/useComposerAttachments";
 import { REPLY_RESTRICTED_TEXT } from "../lib/replyAudience";
+import ResponsiveMenu from "./ui/ResponsiveMenu";
 
 const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdded }) => {
   const { userAuth, userAuth: { token } } = useContext(UserContext);
@@ -46,7 +47,15 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
     const handleOutsideClick = (event) => {
       // The picker is a portal at document.body, so clicks inside it look
       // "outside" this card and would otherwise close the composer.
-      if (isSchedulePickerOpen || attachments.openSheet) return;
+      // Every one of these is a portal at document.body, so a tap inside it
+      // reads as "outside the card" and would close the composer underneath.
+      if (
+        isSchedulePickerOpen ||
+        attachments.openSheet ||
+        isMoreDropdownOpen ||
+        isReplyDropdownOpen
+      )
+        return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
         onClose();
       } else {
@@ -63,7 +72,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
       document.addEventListener("mousedown", handleOutsideClick);
     }
     return () => document.removeEventListener("mousedown", handleOutsideClick);
-  }, [isOpen, onClose, isSchedulePickerOpen, attachments.openSheet]);
+  }, [isOpen, onClose, isSchedulePickerOpen, attachments.openSheet, isMoreDropdownOpen, isReplyDropdownOpen]);
 
   useEffect(() => {
     if (isOpen && textareaRef.current) {
@@ -194,8 +203,12 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
               >
                 <Icons.more className="h-6 w-6" />
               </button>
-              {isMoreDropdownOpen && (
-                <div className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]">
+              <ResponsiveMenu
+                  open={isMoreDropdownOpen}
+                  onClose={() => setIsMoreDropdownOpen(false)}
+                  title="Options"
+                  className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+                >
                   <div className="p-2">
                     <button
                       className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
@@ -229,8 +242,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                       <Icons.chevronRight />
                     </button>
                   </div>
-                </div>
-              )}
+                </ResponsiveMenu>
             </div>
           </div>
         </div>
@@ -341,8 +353,12 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                   >
                     {replyText}
                   </p>
-                  {isReplyDropdownOpen && (
-                    <div className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]">
+                  <ResponsiveMenu
+                      open={isReplyDropdownOpen}
+                      onClose={() => setIsReplyDropdownOpen(false)}
+                      title="Who can reply & quote"
+                      className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+                    >
                       <div className="p-2">
                         <button
                           className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
@@ -372,8 +388,7 @@ const Reply = ({ isOpen, onClose, postId, commentId, parentId = null, onReplyAdd
                           <span>Mentioned only</span>
                         </button>
                       </div>
-                    </div>
-                  )}
+                    </ResponsiveMenu>
                 </div>
                 <button
                   className={`px-4 py-2 rounded-full font-medium ${

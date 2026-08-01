@@ -321,7 +321,7 @@ const ConversationDetailsPage = () => {
                 <span className="text-[11px] text-neutral-300">Options</span>
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
+            <DropdownMenuContent sheetTitle="Chat options"
               align="end"
               className="bg-neutral-900 border-neutral-700 rounded-2xl w-56 p-2"
             >
@@ -380,7 +380,7 @@ const ConversationDetailsPage = () => {
                 )}
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
+            <DropdownMenuContent sheetTitle="Theme"
               align="start"
               className="bg-neutral-900 border-neutral-700 rounded-xl w-52 p-1"
             >
@@ -424,7 +424,7 @@ const ConversationDetailsPage = () => {
                 )}
               </button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent
+            <DropdownMenuContent sheetTitle="Disappearing messages"
               align="start"
               className="bg-neutral-900 border-neutral-700 rounded-xl w-56 p-1"
             >

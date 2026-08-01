@@ -1,5 +1,4 @@
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft } from "lucide-react";
 import { Icons } from "../components/icons";
 
 const Section = ({ title, children }) => (
@@ -24,7 +23,7 @@ const AiLabelsPage = () => {
           className="p-2 rounded-full hover:bg-neutral-800 transition-colors cursor-pointer"
           aria-label="Go back"
         >
-          <ArrowLeft className="w-5 h-5 text-white" />
+          <Icons.back className="w-5 h-5 text-white" />
         </button>
         <h1 className="text-white font-semibold">AI labels</h1>
       </header>

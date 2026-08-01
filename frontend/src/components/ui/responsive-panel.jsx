@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronLeft, X } from "lucide-react";
+import { X } from "lucide-react";
+import { Icons } from "../icons";
 import useWindow from "../../hooks/UseWindow";
+import { lockBodyScroll, unlockBodyScroll } from "../../lib/scrollLock";
 
 const CLOSE_MS = 200;
 
@@ -54,11 +56,10 @@ const ResponsivePanel = ({
       if (e.key === "Escape") requestClose();
     };
     document.addEventListener("keydown", handleKey);
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
+    lockBodyScroll();
     return () => {
       document.removeEventListener("keydown", handleKey);
-      document.body.style.overflow = previousOverflow;
+      unlockBodyScroll();
     };
   }, [requestClose]);
 
@@ -107,7 +108,7 @@ const ResponsivePanel = ({
             {/* A phone gets a back arrow because the panel is a page; a modal
                 gets a close cross because it's an overlay. */}
             {onBack || isMobile ? (
-              <ChevronLeft className="w-5 h-5" />
+              <Icons.back className="w-5 h-5" />
             ) : (
               <X className="w-[18px] h-[18px]" />
             )}
