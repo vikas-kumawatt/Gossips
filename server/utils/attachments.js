@@ -257,8 +257,10 @@ export const parseAttachments = async ({ files = [], body = {}, uploader }) => {
     }
   }
 
+  // An unknown duration doesn't get a pass — a clip Cloudinary couldn't
+  // probe is exactly the kind most likely to be oversized.
   const tooLong = uploaded.find(
-    (m) => m.type === "audio" && Number.isFinite(m.duration) && m.duration > AUDIO_MAX_SECONDS
+    (m) => m.type === "audio" && (!Number.isFinite(m.duration) || m.duration > AUDIO_MAX_SECONDS)
   );
   if (tooLong) return { error: "Audio clips can be up to 5 minutes" };
 

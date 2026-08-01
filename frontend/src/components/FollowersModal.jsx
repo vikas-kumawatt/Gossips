@@ -1,13 +1,82 @@
-import React, { useEffect, useState, useContext, useRef, useCallback } from "react";
-import Modal from "react-modal";
-import InPageNavigation from "./InPageNavigation";
-import { useNavigate } from "react-router";
-import FollowButton from "./FollowButton";
+import { useCallback, useContext, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Search, X } from "lucide-react";
 import { Icons } from "./icons";
+import ResponsivePanel from "./ui/responsive-panel";
+import SortMenu from "./ui/SortMenu";
+import FollowButton from "./FollowButton";
+import FollowsYouBadge from "./FollowsYouBadge";
 import { UserContext } from "../contexts/UserContext";
 import { userAPI } from "../services/api";
+import { useDebounce } from "../hooks/useDebounce";
 
-Modal.setAppElement("#root");
+/**
+ * Followers / Following lists — a full page on a phone, a modal on desktop.
+ *
+ * Rebuilt from the react-modal version on ResponsivePanel, with search and
+ * sort done by the API rather than filtering the loaded page: a list of ten
+ * thousand followers has to be searched where the data lives, not in whatever
+ * slice happens to be scrolled in.
+ */
+
+const SORT_OPTIONS = [
+  { value: "default", label: "Default", hint: "People you interact with first" },
+  { value: "latest", label: "Latest first", hint: "Most recently followed" },
+  { value: "earliest", label: "Earliest first", hint: "Followed longest ago" },
+];
+
+const PAGE_SIZE = 20;
+
+/**
+ * One row. The layout contract: username and name may truncate, the verified
+ * badge and the follow button may not. That's plain flexbox — the text block
+ * is `min-w-0 flex-1` with `truncate` on the text spans only, and everything
+ * that must survive is `shrink-0` outside them.
+ */
+const UserRow = ({ user, isSelf, onNavigate, onFollowStatusChange }) => (
+  <div className="flex items-center gap-3 border-b border-neutral-800 px-4 py-3">
+    <img
+      src={user.profilePic}
+      alt={user.username}
+      referrerPolicy="no-referrer"
+      onClick={() => onNavigate(user.username)}
+      className="h-10 w-10 shrink-0 cursor-pointer rounded-full border border-neutral-800 bg-neutral-800 object-cover"
+    />
+
+    <div
+      className="min-w-0 flex-1 cursor-pointer"
+      onClick={() => onNavigate(user.username)}
+    >
+      <div className="flex items-center gap-1">
+        <span className="truncate font-medium text-white hover:underline">
+          {user.username}
+        </span>
+        {user.isVerified && (
+          <span className="inline-flex shrink-0 items-center">
+            <Icons.verified />
+          </span>
+        )}
+        {user.relationship?.canFollowBack && !isSelf && <FollowsYouBadge />}
+      </div>
+      {user.name && <p className="truncate text-sm text-neutral-500">{user.name}</p>}
+    </div>
+
+    {!isSelf && (
+      // The pill background belongs to the wrapper, not FollowButton — the
+      // button only renders its label. Fixed width keeps the four states
+      // (Follow / Following / Requested / Follow back) from resizing the row.
+      <div className="flex h-10 w-[104px] shrink-0 items-center justify-center rounded-xl bg-neutral-800 font-medium transition-colors hover:bg-neutral-700">
+        <FollowButton
+          username={user.username}
+          isPrivate={user.isPrivate}
+          initialState={user.relationship}
+          disableStatusFetch={Boolean(user.relationship)}
+          onFollowStatusChange={onFollowStatusChange}
+        />
+      </div>
+    )}
+  </div>
+);
 
 const FollowersModal = ({
   isOpen,
@@ -15,443 +84,253 @@ const FollowersModal = ({
   username,
   followerCount = 0,
   followingCount = 0,
+  initialTab = 0,
 }) => {
-  const [activeTab, setActiveTab] = useState(0);
-  const navigate = useNavigate();
   const { userAuth } = useContext(UserContext);
-  const [followers, setFollowers] = useState([]);
-  const [following, setFollowing] = useState([]);
-  const [followersCursor, setFollowersCursor] = useState(null);
-  const [followingCursor, setFollowingCursor] = useState(null);
-  const [followersHasMore, setFollowersHasMore] = useState(true);
-  const [followingHasMore, setFollowingHasMore] = useState(true);
+  const navigate = useNavigate();
+
+  const [tab, setTab] = useState(initialTab); // 0 followers, 1 following
+  const [sort, setSort] = useState("default");
+  const [query, setQuery] = useState("");
+  const debouncedQuery = useDebounce(query.trim(), 350);
+
+  const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [isFetchingMore, setIsFetchingMore] = useState(false);
-  const [followersTotalCount, setFollowersTotalCount] = useState(followerCount);
-  const [followingTotalCount, setFollowingTotalCount] = useState(followingCount);
-  const [relationshipOverrides, setRelationshipOverrides] = useState({});
-  const scrollContainerRef = useRef(null);
-  const cacheRef = useRef({
-    followers: { items: [], cursor: null, hasMore: true },
-    following: { items: [], cursor: null, hasMore: true },
-  });
+  const [error, setError] = useState("");
 
-  useEffect(() => {
-    cacheRef.current = {
-      followers: { items: [], cursor: null, hasMore: true },
-      following: { items: [], cursor: null, hasMore: true },
-    };
-    setFollowers([]);
-    setFollowing([]);
-    setFollowersCursor(null);
-    setFollowingCursor(null);
-    setFollowersHasMore(true);
-    setFollowingHasMore(true);
-    setFollowersTotalCount(followerCount);
-    setFollowingTotalCount(followingCount);
-    setRelationshipOverrides({});
-    setActiveTab(0);
-  }, [username, followerCount, followingCount]);
+  const listRef = useRef(null);
+  const sentinelRef = useRef(null);
+  // Kills responses that arrive after the tab/search/sort has moved on.
+  const requestId = useRef(0);
+  /*
+   * Pagination lives in a ref, not in state, and this is the whole fix for
+   * "sort and search do nothing".
+   *
+   * Both the reset effect and the scroll observer depend on `fetchPage`, so
+   * changing the sort or the search term re-runs both. The observer's sentinel
+   * is always on screen for a short list, so it fired immediately — and
+   * because `setCursor(null)` hadn't rendered yet, it fired with the *previous*
+   * query's cursor. That second request won the requestId race and overwrote
+   * the correct one, so the list came back unsorted and unfiltered every time.
+   *
+   * Writing cursor/hasMore synchronously here means the observer sees
+   * `hasMore: false` the instant a reset starts and stays quiet until the real
+   * page lands.
+   */
+  const stateRef = useRef({ cursor: null, hasMore: false, loading: false });
 
-  const applyRelationshipOverrides = useCallback(
-    (items) =>
-      items.map((user) =>
-        relationshipOverrides[user.username]
-          ? {
-              ...user,
-              relationship: {
-                ...(user.relationship || {}),
-                ...relationshipOverrides[user.username],
-              },
-            }
-          : user
-      ),
-    [relationshipOverrides]
+  const fetchPage = useCallback(
+    async ({ reset = false } = {}) => {
+      const id = ++requestId.current;
+      // The ref is written synchronously, not via state: the observer below
+      // reads it in the same tick and would otherwise still see the previous
+      // page's values.
+      stateRef.current.loading = true;
+      if (reset) {
+        stateRef.current.cursor = null;
+        stateRef.current.hasMore = false;
+      }
+      setLoading(true);
+      setError("");
+
+      try {
+        const call = tab === 0 ? userAPI.getFollowers : userAPI.getFollowingUsers;
+        const data = await call(username, {
+          q: debouncedQuery || undefined,
+          sort,
+          cursor: reset ? undefined : stateRef.current.cursor || undefined,
+          limit: PAGE_SIZE,
+        });
+        if (id !== requestId.current) return;
+
+        setItems((prev) => {
+          if (reset) return data.users;
+          // The ranked sort pages by offset, so a follow landing mid-scroll
+          // can re-serve a row; keyed by username, duplicates must be dropped.
+          const seen = new Set(prev.map((u) => u.username));
+          return [...prev, ...data.users.filter((u) => !seen.has(u.username))];
+        });
+        stateRef.current.cursor = data.pageInfo?.nextCursor || null;
+        stateRef.current.hasMore = Boolean(data.pageInfo?.hasNextPage);
+      } catch (err) {
+        if (id !== requestId.current) return;
+        setError(
+          err.response?.status === 403
+            ? "This account is private"
+            : "Couldn't load the list"
+        );
+        if (reset) setItems([]);
+        stateRef.current.hasMore = false;
+      } finally {
+        if (id === requestId.current) {
+          stateRef.current.loading = false;
+          setLoading(false);
+        }
+      }
+    },
+    [tab, sort, debouncedQuery, username]
   );
 
-  useEffect(() => {
-    if (isOpen) {
-      document.body.style.overflow = "hidden";
-    } else {
-      document.body.style.overflow = "unset";
-    }
-    return () => {
-      document.body.style.overflow = "unset";
-    };
-  }, [isOpen]);
-
-  useEffect(() => {
-    if (!isOpen || !username) return;
-
-    const loadInitial = async () => {
-      if (activeTab === 0) {
-        if (cacheRef.current.followers.items.length > 0) {
-          setFollowers(cacheRef.current.followers.items);
-          setFollowersCursor(cacheRef.current.followers.cursor);
-          setFollowersHasMore(cacheRef.current.followers.hasMore);
-          return;
-        }
-      } else {
-        if (cacheRef.current.following.items.length > 0) {
-          setFollowing(cacheRef.current.following.items);
-          setFollowingCursor(cacheRef.current.following.cursor);
-          setFollowingHasMore(cacheRef.current.following.hasMore);
-          return;
-        }
-      }
-
-      setLoading(true);
-      try {
-        if (activeTab === 0) {
-          const data = await userAPI.getFollowers(username, { limit: 20 });
-          const items = applyRelationshipOverrides(data?.users || []);
-          setFollowersTotalCount(
-            typeof data?.totalCount === "number" ? data.totalCount : followerCount
-          );
-          const nextCursor = data?.pageInfo?.nextCursor || null;
-          const hasNext = Boolean(data?.pageInfo?.hasNextPage);
-          setFollowers(items);
-          setFollowersCursor(nextCursor);
-          setFollowersHasMore(hasNext);
-          cacheRef.current.followers = {
-            items,
-            cursor: nextCursor,
-            hasMore: hasNext,
-          };
-        } else {
-          const data = await userAPI.getFollowingUsers(username, { limit: 20 });
-          const items = applyRelationshipOverrides(data?.users || []);
-          setFollowingTotalCount(
-            typeof data?.totalCount === "number"
-              ? data.totalCount
-              : followingCount
-          );
-          const nextCursor = data?.pageInfo?.nextCursor || null;
-          const hasNext = Boolean(data?.pageInfo?.hasNextPage);
-          setFollowing(items);
-          setFollowingCursor(nextCursor);
-          setFollowingHasMore(hasNext);
-          cacheRef.current.following = {
-            items,
-            cursor: nextCursor,
-            hasMore: hasNext,
-          };
-        }
-      } catch (error) {
-        console.error("Error loading follow list:", error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadInitial();
-  }, [
-    activeTab,
-    isOpen,
-    username,
-    followerCount,
-    followingCount,
-    applyRelationshipOverrides,
-  ]);
-
+  // Each open starts on the requested tab with a clean search — the component
+  // stays mounted between opens, so state would otherwise linger.
   useEffect(() => {
     if (!isOpen) return;
+    setTab(initialTab);
+    setQuery("");
+  }, [isOpen, initialTab]);
 
-    const scrollContainer = scrollContainerRef.current;
-    if (!scrollContainer) return;
+  // A new tab, search term or sort starts the list over from the top.
+  useEffect(() => {
+    if (!isOpen) return;
+    setItems([]);
+    fetchPage({ reset: true });
+    listRef.current?.scrollTo?.({ top: 0 });
+  }, [isOpen, fetchPage]);
 
-    const onScroll = async () => {
-      const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
-      if (scrollTop + clientHeight < scrollHeight - 50) return;
-      if (loading || isFetchingMore) return;
+  // Infinite scroll via a sentinel — no scroll-position maths to get wrong.
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return undefined;
 
-      if (activeTab === 0) {
-        if (!followersHasMore || !followersCursor) return;
-      } else {
-        if (!followingHasMore || !followingCursor) return;
-      }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const { hasMore: more, loading: busy } = stateRef.current;
+        if (entries[0].isIntersecting && more && !busy) fetchPage();
+      },
+      { root: listRef.current, rootMargin: "200px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [isOpen, fetchPage, items.length]);
 
-      setIsFetchingMore(true);
-      try {
-        if (activeTab === 0) {
-          const data = await userAPI.getFollowers(username, {
-            limit: 20,
-            cursor: followersCursor,
-          });
-          const incoming = applyRelationshipOverrides(data?.users || []);
-          const nextCursor = data?.pageInfo?.nextCursor || null;
-          const hasNext = Boolean(data?.pageInfo?.hasNextPage);
-          setFollowers((prev) => {
-            const merged = [...prev, ...incoming];
-            cacheRef.current.followers = {
-              items: merged,
-              cursor: nextCursor,
-              hasMore: hasNext,
-            };
-            return merged;
-          });
-          setFollowersCursor(nextCursor);
-          setFollowersHasMore(hasNext);
-        } else {
-          const data = await userAPI.getFollowingUsers(username, {
-            limit: 20,
-            cursor: followingCursor,
-          });
-          const incoming = applyRelationshipOverrides(data?.users || []);
-          const nextCursor = data?.pageInfo?.nextCursor || null;
-          const hasNext = Boolean(data?.pageInfo?.hasNextPage);
-          setFollowing((prev) => {
-            const merged = [...prev, ...incoming];
-            cacheRef.current.following = {
-              items: merged,
-              cursor: nextCursor,
-              hasMore: hasNext,
-            };
-            return merged;
-          });
-          setFollowingCursor(nextCursor);
-          setFollowingHasMore(hasNext);
-        }
-      } catch (error) {
-        console.error("Error loading more users:", error);
-      } finally {
-        setIsFetchingMore(false);
-      }
-    };
-
-    scrollContainer.addEventListener("scroll", onScroll);
-    return () => scrollContainer.removeEventListener("scroll", onScroll);
-  }, [
-    activeTab,
-    followersCursor,
-    followersHasMore,
-    followingCursor,
-    followingHasMore,
-    isOpen,
-    isFetchingMore,
-    loading,
-    username,
-    applyRelationshipOverrides,
-  ]);
-
-  const handleFollowStatusChange = (nextStatus) => {
-    if (!nextStatus?.username) return;
-    const nextRelationship = {
-      isFollowing: Boolean(nextStatus.isFollowing),
-      isPending: Boolean(nextStatus.isPending),
-      canFollowBack: Boolean(nextStatus.canFollowBack),
-    };
-    setRelationshipOverrides((prev) => ({
-      ...prev,
-      [nextStatus.username]: nextRelationship,
-    }));
-
-    const patchUser = (user) =>
-      user.username === nextStatus.username
-        ? {
-            ...user,
-            relationship: {
-              ...(user.relationship || {}),
-              ...nextRelationship,
-            },
-          }
-        : user;
-
-    setFollowers((prev) => prev.map(patchUser));
-    setFollowing((prev) => prev.map(patchUser));
-    cacheRef.current.followers.items = cacheRef.current.followers.items.map(patchUser);
-    cacheRef.current.following.items = cacheRef.current.following.items.map(patchUser);
+  const handleNavigate = (toUsername) => {
+    onClose();
+    navigate(`/${toUsername}`);
   };
 
-  const renderFollowersTab = () => {
-    const handleProfileClick = (followerUsername) => {
-      navigate(`/${followerUsername}`);
-      onClose();
-    };
-
-    return (
-      <div className="space-y-4 mt-4 mx-2">
-        {loading ? (
-          <div className="flex justify-center py-4">
-            <Icons.spinner className="animate-spin h-6 w-6 text-neutral-400" />
-          </div>
-        ) : followers.length > 0 ? (
-          followers.map((follower) => (
-            <div
-              key={follower.username}
-              className="text-white w-full border-b border-neutral-800 px-3 pb-4"
-            >
-              <div className="flex gap-3">
-                <div
-                  className="cursor-pointer"
-                  onClick={() => handleProfileClick(follower.username)}
-                >
-                  <img
-                    className="w-10 h-10 rounded-full bg-neutral-800 object-cover border border-neutral-800"
-                    src={follower.profilePic}
-                    alt="Profile"
-                    referrerPolicy="no-referrer"
-                  />
-                </div>
-                <div className="flex-1">
-                  <div className="flex flex-row justify-start items-center relative">
-                    <div
-                      className="cursor-pointer"
-                      onClick={() => handleProfileClick(follower.username)}
-                    >
-                      <p className="text-white font-medium line-clamp-1 flex items-center hover:underline">
-                        {follower.username}
-                        {follower.isVerified && (
-                          <span className="pl-1 pt-0.5 inline-flex items-center">
-                            <Icons.verified />
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-neutral-500">{follower.name}</p>
-                    </div>
-                    {userAuth?.username === follower.username ? (
-                      ""
-                    ) : (
-                      <div className="absolute right-0 flex items-center justify-center bg-neutral-800 rounded-xl font-medium h-10 w-26">
-                        <FollowButton
-                          username={follower.username}
-                          currentUserFollowing={userAuth?.following || []}
-                          isPrivate={follower.isPrivate}
-                          initialState={follower.relationship}
-                          disableStatusFetch={Boolean(follower.relationship)}
-                          onFollowStatusChange={handleFollowStatusChange}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="text-center py-10 text-neutral-400">
-            {username} has no followers yet.
-          </div>
-        )}
-      </div>
+  /** Keep the row's badge state in step when a follow/unfollow happens. */
+  const handleFollowStatusChange = (next) => {
+    if (!next?.username) return;
+    setItems((prev) =>
+      prev.map((u) =>
+        u.username === next.username
+          ? {
+              ...u,
+              relationship: {
+                ...(u.relationship || {}),
+                isFollowing: Boolean(next.isFollowing),
+                isPending: Boolean(next.isPending),
+                canFollowBack: Boolean(
+                  next.canFollowBack ?? u.relationship?.canFollowBack
+                ),
+              },
+            }
+          : u
+      )
     );
   };
 
-  const renderFollowingTab = () => {
-    const handleProfileClick = (followedUsername) => {
-      navigate(`/${followedUsername}`);
-      onClose();
-    };
+  if (!isOpen) return null;
 
-    return (
-      <div className="space-y-4 mt-4 mx-2">
-        {loading ? (
-          <div className="flex justify-center py-4">
-            <Icons.spinner className="animate-spin h-6 w-6 text-neutral-400" />
-          </div>
-        ) : following.length > 0 ? (
-          following.map((followedUser) => (
-            <div
-              key={followedUser.username}
-              className="text-white w-full border-b border-neutral-800 px-3 pb-4"
-            >
-              <div className="flex gap-3">
-                <div
-                  className="cursor-pointer"
-                  onClick={() => handleProfileClick(followedUser.username)}
-                >
-                  <img
-                    className="w-10 h-10 rounded-full bg-neutral-800 object-cover border border-neutral-800"
-                    src={followedUser.profilePic}
-                    alt="Profile"
-                    referrerPolicy="no-referrer"
-                  />
-                </div>
-                <div className="flex-1">
-                  <div className="flex flex-row justify-start items-center relative">
-                    <div
-                      className="cursor-pointer"
-                      onClick={() => handleProfileClick(followedUser.username)}
-                    >
-                      <p className="text-white font-medium line-clamp-1 flex items-center hover:underline">
-                        {followedUser.username}
-                        {followedUser.isVerified && (
-                          <span className="pl-1 pt-0.5 inline-flex items-center">
-                            <Icons.verified />
-                          </span>
-                        )}
-                      </p>
-                      <p className="text-neutral-500">{followedUser.name}</p>
-                    </div>
-
-                    {userAuth?.username === followedUser.username ? (
-                      ""
-                    ) : (
-                      <div className="absolute right-0 flex items-center justify-center bg-neutral-800 rounded-xl font-medium h-10 w-26">
-                        <FollowButton
-                          username={followedUser.username}
-                          currentUserFollowing={userAuth?.following || []}
-                          isPrivate={followedUser.isPrivate}
-                          initialState={followedUser.relationship}
-                          disableStatusFetch={Boolean(followedUser.relationship)}
-                          onFollowStatusChange={handleFollowStatusChange}
-                        />
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="text-center py-10 text-neutral-400">
-            {username} is not following anyone yet.
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const routes = [
-    <div className="flex flex-col items-center">
-      <span className="font-medium">Followers</span>
-      <span className="text-sm">{followersTotalCount}</span>
-    </div>,
-    <div className="flex flex-col items-center">
-      <span className="font-medium">Following</span>
-      <span className="text-sm">{followingTotalCount}</span>
-    </div>,
+  const tabs = [
+    { label: "Followers", count: followerCount },
+    { label: "Following", count: followingCount },
   ];
 
   return (
-    <Modal
-      isOpen={isOpen}
-      onRequestClose={onClose}
-      className="bg-neutral-950 text-white border border-neutral-800 rounded-2xl max-w-lg w-full ml-4 mr-4 mx-auto pb-2 outline-none"
-      overlayClassName="fixed inset-0 bg-black/80 flex items-center justify-center"
+    <ResponsivePanel
+      title={username}
+      onClose={onClose}
+      scrollBody={false}
+      headerRight={
+        <SortMenu value={sort} onChange={setSort} options={SORT_OPTIONS} />
+      }
     >
-      <div className="relative flex flex-col max-h-[70vh] h-full">
-        <div className="flex flex-col flex-1 overflow-hidden">
-          <div>
-            <InPageNavigation
-              routes={routes}
-              defaultActiveIndex={activeTab}
-              onTabChange={setActiveTab}
-            />
-          </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        {/* Tabs */}
+        <div className="flex shrink-0 border-b border-neutral-800">
+          {tabs.map((t, i) => (
+            <button
+              key={t.label}
+              type="button"
+              onClick={() => setTab(i)}
+              className={`flex-1 cursor-pointer py-3 text-center text-[15px] font-medium transition-colors ${
+                tab === i
+                  ? "border-b-2 border-white text-white"
+                  : "text-neutral-500 hover:text-neutral-300"
+              }`}
+            >
+              {t.label}
+              <span className="ml-1.5 text-[13px] text-neutral-500">
+                {t.count ?? 0}
+              </span>
+            </button>
+          ))}
+        </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar -mt-4" ref={scrollContainerRef}>
-            {activeTab === 0 && renderFollowersTab()}
-            {activeTab === 1 && renderFollowingTab()}
-            {isFetchingMore && (
-              <div className="flex justify-center py-4">
-                <Icons.spinner className="animate-spin h-6 w-6 text-neutral-400" />
-              </div>
+        {/* Search — sent to the API, not filtered client-side. */}
+        <div className="shrink-0 px-4 py-2">
+          <div className="flex items-center gap-2 rounded-xl bg-neutral-800 px-3 py-2">
+            <Search className="h-4 w-4 shrink-0 text-neutral-400" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={`Search ${tab === 0 ? "followers" : "following"}`}
+              className="min-w-0 flex-1 bg-transparent text-[15px] text-white outline-none placeholder:text-neutral-500"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="shrink-0 cursor-pointer rounded-full p-1 text-neutral-400 hover:bg-neutral-700 hover:text-white"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
             )}
           </div>
         </div>
+
+        {/* The list is the only scrolling region. */}
+        <div
+          ref={listRef}
+          className="custom-scrollbar min-h-0 flex-1 overflow-y-auto overscroll-contain"
+        >
+          {items.map((user) => (
+            <UserRow
+              key={user.username}
+              user={user}
+              isSelf={userAuth?.username === user.username}
+              onNavigate={handleNavigate}
+              onFollowStatusChange={handleFollowStatusChange}
+            />
+          ))}
+
+          {loading && (
+            <div className="flex justify-center py-6">
+              <Icons.spinner className="h-7 w-7 animate-spin text-neutral-400" />
+            </div>
+          )}
+
+          {!loading && error && (
+            <p className="px-4 py-10 text-center text-sm text-neutral-500">{error}</p>
+          )}
+
+          {!loading && !error && items.length === 0 && (
+            <p className="px-4 py-10 text-center text-sm text-neutral-500">
+              {debouncedQuery
+                ? `No one matching “${debouncedQuery}”`
+                : tab === 0
+                  ? "No followers yet"
+                  : "Not following anyone yet"}
+            </p>
+          )}
+
+          <div ref={sentinelRef} className="h-px" />
+        </div>
       </div>
-    </Modal>
+    </ResponsivePanel>
   );
 };
 

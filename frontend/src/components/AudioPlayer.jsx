@@ -89,7 +89,10 @@ const AudioPlayer = ({ item }) => {
         src={item.url}
         preload="metadata"
         onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
+        onPause={(e) => {
+          setPlaying(false);
+          if (activePlayer === e.currentTarget) activePlayer = null;
+        }}
         onEnded={() => {
           setPlaying(false);
           setElapsed(0);

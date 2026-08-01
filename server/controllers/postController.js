@@ -58,7 +58,7 @@ const populatePost = (postId) =>
     })
     .populate({
       path: "quotedComment",
-      select: "content media author createdAt post counts isEdited editedAt isAiGenerated",
+      select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
       populate: { path: "author", select: AUTHOR_SELECT },
     })
     .lean();
@@ -378,7 +378,7 @@ export const getDrafts = async (req, res) => {
       })
       .populate({
         path: "quotedComment",
-        select: "content media author createdAt post counts isEdited editedAt isAiGenerated",
+        select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
         populate: { path: "author", select: AUTHOR_SELECT },
       })
       .sort({ createdAt: -1 })
@@ -520,16 +520,16 @@ export const getHomeFeed = async (req, res) => {
 
     const posts = orderedIds.length
       ? await Post.find({ _id: { $in: orderedIds } })
-          .select("_id author content icon media counts quotedPost quotedComment quotedSnapshot isQuoteRepost isQuoteComment createdAt hideLikeShareCount whoCanReply mentions isEdited editedAt isAiGenerated")
+          .select("_id author content icon media poll location counts quotedPost quotedComment quotedSnapshot isQuoteRepost isQuoteComment createdAt hideLikeShareCount whoCanReply mentions isEdited editedAt isAiGenerated")
           .populate("author", AUTHOR_SELECT)
           .populate({
             path: "quotedPost",
-            select: "_id author content media counts isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
+            select: "_id author content media poll location counts isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .populate({
             path: "quotedComment",
-            select: "_id content media counts author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
+            select: "_id content media poll location counts author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .lean()
@@ -655,7 +655,7 @@ export const getUserPosts = async (req, res) => {
         })
         .populate({
           path: "quotedComment",
-          select: "content media author createdAt post counts isEdited editedAt isAiGenerated",
+          select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
           populate: { path: "author", select: AUTHOR_SELECT },
         })
         .sort({ createdAt: -1 })
@@ -746,7 +746,7 @@ export const getPost = async (req, res) => {
       })
       .populate({
         path: "quotedComment",
-        select: "content media author createdAt post counts isEdited editedAt isAiGenerated",
+        select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
         populate: { path: "author", select: AUTHOR_SELECT },
       })
       .lean();

@@ -4,6 +4,7 @@ import { toast } from "react-hot-toast";
 import { adminAPI } from "../../services/api";
 import ResponsiveSheet from "../../components/ui/responsive-sheet";
 import { REPORT_CATEGORIES } from "../../lib/reportCategories";
+import { normalizeMedia } from "../../lib/mediaTypes";
 import {
   Panel,
   Spinner,
@@ -278,10 +279,10 @@ const ReportDetailSheet = ({ reportId, onClose, onResolved }) => {
               </p>
               {data.target.media?.length > 0 && (
                 <div className="flex gap-2 mt-2 flex-wrap">
-                  {data.target.media.map((m) => (
+                  {normalizeMedia(data.target.media).map((m) => (
                     <img
-                      key={m}
-                      src={m}
+                      key={m.url}
+                      src={m.thumbnail || m.url}
                       alt=""
                       className="w-20 h-20 rounded-lg object-cover bg-neutral-800"
                     />

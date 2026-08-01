@@ -424,13 +424,7 @@ const CreatePost = ({
     fileInputRef.current.click();
   };
 
-  const isVideo = (mediaUrl) => {
-    return (
-      mediaUrl.endsWith(".mp4") ||
-      mediaUrl.endsWith(".webm") ||
-      mediaUrl.endsWith(".ogg")
-    );
-  };
+
 
   if (showSaveDraftDialog) {
     return (
@@ -662,17 +656,19 @@ const CreatePost = ({
                       </p>
                       {quotedPost.media && quotedPost.media.length > 0 && (
                         <div className="mt-2 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
-                          {quotedPost.media.map((media, index) => (
-                            <div key={index} className="flex-shrink-0">
-                              {isVideo(media) ? (
+                          {/* Feed responses carry typed media items; legacy
+                              quotes may still be bare URLs. Normalise both. */}
+                          {normalizeMedia(quotedPost.media).map((item) => (
+                            <div key={item.url} className="flex-shrink-0">
+                              {item.type === "video" ? (
                                 <video
-                                  src={media}
+                                  src={item.url}
                                   controls
                                   className="w-24 h-24 rounded-lg object-cover"
                                 />
                               ) : (
                                 <img
-                                  src={media}
+                                  src={item.url}
                                   alt="Quoted Media"
                                   className="w-24 h-24 rounded-lg object-cover"
                                 />
@@ -702,17 +698,19 @@ const CreatePost = ({
                       </p>
                       {quotedComment.media && quotedComment.media.length > 0 && (
                         <div className="mt-2 flex flex-row gap-2 overflow-x-auto scrollbar-hide">
-                          {quotedComment.media.map((media, index) => (
-                            <div key={index} className="flex-shrink-0">
-                              {isVideo(media) ? (
+                          {/* Feed responses carry typed media items; legacy
+                              quotes may still be bare URLs. Normalise both. */}
+                          {normalizeMedia(quotedComment.media).map((item) => (
+                            <div key={item.url} className="flex-shrink-0">
+                              {item.type === "video" ? (
                                 <video
-                                  src={media}
+                                  src={item.url}
                                   controls
                                   className="w-24 h-24 rounded-lg object-cover"
                                 />
                               ) : (
                                 <img
-                                  src={media}
+                                  src={item.url}
                                   alt="Quoted Media"
                                   className="w-24 h-24 rounded-lg object-cover"
                                 />

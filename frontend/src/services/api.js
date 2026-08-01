@@ -178,11 +178,21 @@ export const userAPI = {
 
   getProfile: (username) => cachedGet(`/user/${username}`),
 
+  // Uncached: rows carry the viewer's live follow state, and a 60-second
+  // stale copy shows "Follow" on someone you just followed.
   getFollowers: (username, params) =>
-    cachedGet(`/user/${username}/followers`, { params }),
+    api
+      .get(`/user/${username}/followers`, { params, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
 
   getFollowingUsers: (username, params) =>
-    cachedGet(`/user/${username}/following`, { params }),
+    api
+      .get(`/user/${username}/following`, { params, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  // Owner-only: take someone off your followers list.
+  removeFollower: (username) =>
+    api.delete(`/user/followers/${username}`).then((r) => r.data),
 
   getReplies: (username, params) =>
     cachedGet(`/user/${username}/replies`, { params }),

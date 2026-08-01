@@ -21,6 +21,7 @@ import {
   getMutedUsers,
   getBlockedUsers,
   getFollowersList,
+  removeFollower,
   getFollowingList,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
@@ -46,6 +47,9 @@ router.post("/unblock/:username", protect, unblockUser);
 router.post("/mute/:username", protect, muteUser);
 router.post("/unmute/:username", protect, unmuteUser);
 router.get('/is-following-me/:username', protect, isFollowingMe);
+// Owner-only: removing someone from your followers. Registered before the
+// GET list routes only for grouping — different verbs, no conflict.
+router.delete("/followers/:username", protect, removeFollower);
 router.get("/:username/followers", protect, getFollowersList);
 router.get("/:username/following", protect, getFollowingList);
 router.get("/:username/replies", protect, getReplies);

@@ -41,6 +41,13 @@ const AudioRecorderSheet = ({ onDone, onClose }) => {
   const startedAt = useRef(0);
   const levelsRef = useRef([]);
   const playerRef = useRef(null);
+  // Once the clip is handed to the composer via onDone, the composer owns its
+  // object URL — the unmount cleanup must not revoke it out from under the
+  // preview player.
+  const handedOff = useRef(false);
+  // Stops a recorder's onstop (which fires after teardown) from minting an
+  // object URL nobody will ever revoke when the sheet closed mid-recording.
+  const unmounted = useRef(false);
 
   /** Everything that has to be released whether we finish or bail. */
   const teardown = useCallback(() => {
@@ -59,8 +66,9 @@ const AudioRecorderSheet = ({ onDone, onClose }) => {
   // mid-recording, so release them on unmount too.
   useEffect(
     () => () => {
+      unmounted.current = true;
       teardown();
-      if (clip?.url) URL.revokeObjectURL(clip.url);
+      if (clip?.url && !handedOff.current) URL.revokeObjectURL(clip.url);
     },
     [teardown, clip]
   );
@@ -96,6 +104,9 @@ const AudioRecorderSheet = ({ onDone, onClose }) => {
     };
 
     recorder.onstop = () => {
+      // Fires after teardown when the sheet is closed mid-recording; a clip
+      // created here would leak its object URL.
+      if (unmounted.current) return;
       const blob = new Blob(chunksRef.current, { type: mimeType || "audio/webm" });
       const duration = Math.max(0.1, (Date.now() - startedAt.current) / 1000);
       setClip({
@@ -303,6 +314,7 @@ const AudioRecorderSheet = ({ onDone, onClose }) => {
             type="button"
             disabled={phase !== "ready"}
             onClick={() => {
+              handedOff.current = true;
               onDone(clip);
               close();
             }}

@@ -21,7 +21,16 @@ const PollCard = ({ type, id, poll: initial, isAuthor }) => {
   // without a reload.
   const [, setNow] = useState(Date.now());
 
-  useEffect(() => setPoll(initial), [initial]);
+  /*
+   * Resync from the parent only when the poll meaningfully changes. `initial`
+   * is a fresh object identity on every parent render, so depending on it
+   * directly would replace an optimistic just-voted state with the stale
+   * pre-vote copy the feed still holds — buttons would reappear after voting.
+   */
+  useEffect(() => {
+    setPoll(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, initial?.hasVoted, initial?.closesAt, initial?.totalVotes]);
 
   const closed = poll.closed || (poll.closesAt && new Date(poll.closesAt) <= new Date());
 

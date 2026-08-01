@@ -1,6 +1,6 @@
 import { uploadToCloudinary } from "../config/cloudinary.js";
 import { sendNotification } from "../utils/notifications.js";
-import { getOrSet, del, delByPrefix, CacheKeys } from "../utils/cache.js";
+import { getOrSet, del, CacheKeys } from "../utils/cache.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
 import Repost from "../models/Repost.js";
@@ -14,6 +14,8 @@ import {
   decodeCursor,
   parseCursorLimit,
 } from "../utils/cursorPagination.js";
+import { followListPage, normalizeFollowListSort } from "../utils/followList.js";
+import { decorateContent } from "../utils/attachments.js";
 
 const ACTIVE_ACCOUNT_FILTER = {
   accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
@@ -24,8 +26,6 @@ const invalidateFollowRelatedCaches = async (...usernames) => {
   await Promise.all(
     unique.flatMap((username) => [
       del(CacheKeys.profile(username)),
-      delByPrefix(`followers:${username}:`),
-      delByPrefix(`following:${username}:`),
     ])
   );
 };
@@ -217,187 +217,167 @@ export const getUserProfile = async (req, res) => {
 // Followers / Following lists
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const getFollowersList = async (req, res) => {
+/**
+ * Who may see whose lists. A private account's followers and following are
+ * part of the private profile — only the owner and accepted followers get
+ * them. The old handlers never checked, so any logged-in stranger could read
+ * a private account's entire social graph; the frontend merely hid the
+ * button.
+ *
+ * Returns { profileUser } or { status, error }.
+ */
+const authorizeListView = async (username, viewerId) => {
+  const profileUser = await User.findOne({ username, ...ACTIVE_ACCOUNT_FILTER })
+    .select("_id isPrivate")
+    .lean();
+  if (!profileUser) return { status: 404, error: "User not found" };
+
+  const isOwner = profileUser._id.toString() === viewerId.toString();
+  if (isOwner) return { profileUser };
+
+  // Same answer as a missing account — a block shouldn't confirm anything.
+  if (await UserRelation.eitherBlocks(viewerId, profileUser._id)) {
+    return { status: 404, error: "User not found" };
+  }
+
+  if (profileUser.isPrivate) {
+    const follows = await Follow.exists({
+      follower: viewerId,
+      following: profileUser._id,
+      status: "accepted",
+    });
+    if (!follows) return { status: 403, error: "This account is private" };
+  }
+
+  return { profileUser };
+};
+
+/** The viewer's relationship to each row, batched — three queries per page. */
+const attachRelationships = async (viewerId, items) => {
+  const ids = items.map((u) => u._id);
+  const [followingEdges, pendingEdges, reverseEdges] = await Promise.all([
+    Follow.find({ follower: viewerId, following: { $in: ids }, status: "accepted" })
+      .select("following")
+      .lean(),
+    Follow.find({ follower: viewerId, following: { $in: ids }, status: "pending" })
+      .select("following")
+      .lean(),
+    Follow.find({ follower: { $in: ids }, following: viewerId, status: "accepted" })
+      .select("follower")
+      .lean(),
+  ]);
+
+  const followingSet = new Set(followingEdges.map((e) => e.following.toString()));
+  const pendingSet = new Set(pendingEdges.map((e) => e.following.toString()));
+  const reverseSet = new Set(reverseEdges.map((e) => e.follower.toString()));
+
+  return items.map((user) => {
+    const id = user._id.toString();
+    return {
+      _id: user._id,
+      username: user.username,
+      name: user.name || "",
+      profilePic: user.profilePic,
+      isVerified: Boolean(
+        user.isVerified || (user.verificationBadge && user.verificationBadge !== "none")
+      ),
+      isPrivate: Boolean(user.isPrivate),
+      followerCount: user.counts?.followers ?? 0,
+      followedAt: user._edgeCreatedAt || null,
+      relationship: {
+        isFollowing: followingSet.has(id),
+        isPending: pendingSet.has(id),
+        // They follow the viewer — drives both "Follow back" and the
+        // "Follows you" badge.
+        canFollowBack: reverseSet.has(id),
+      },
+    };
+  });
+};
+
+/**
+ * The two list endpoints differ only in which side of the edge is fixed, so
+ * they share one body. Querystring: q (search), sort (default | latest |
+ * earliest), cursor, limit.
+ *
+ * No response cache here any more: the default ranking and the relationship
+ * flags are per-viewer, and the old shared 60-second cache was one refactor
+ * away from serving viewer A's data to viewer B.
+ */
+const listHandler = (direction) => async (req, res) => {
   try {
     const { username } = req.params;
-    const { cursor, limit = 20 } = req.query;
+    const { cursor, q = "", limit = 20 } = req.query;
     const limitNum = parseCursorLimit(limit, 20);
-    const parsedCursor = decodeCursor(cursor);
+    const sort = normalizeFollowListSort(req.query.sort);
 
-    const profileUser = await User.findOne({ username }).select("_id").lean();
-    if (!profileUser) return res.status(404).json({ error: "User not found" });
+    const { profileUser, status, error } = await authorizeListView(username, req.user._id);
+    if (error) return res.status(status).json({ error });
 
-    const cacheKey = `followers:${username}:${cursor || "start"}:${limitNum}`;
-    const followersPage = await getOrSet(cacheKey, 60, async () => {
-      const cursorFilter = parsedCursor
-        ? { createdAt: { $lt: new Date(parsedCursor.createdAt) } }
-        : {};
-
-      const edges = await Follow.find({
-        following: profileUser._id,
-        status: "accepted",
-        ...cursorFilter,
-      })
-        .sort({ createdAt: -1 })
-        .limit(limitNum + 1)
-        .populate({
-          path: "follower",
-          select: "username name profilePic isVerified verificationBadge isPrivate counts createdAt",
-          match: ACTIVE_ACCOUNT_FILTER,
-        })
-        .lean();
-
-      const validEdges = edges.filter((e) => e.follower);
-      return buildCursorPageInfo(
-        validEdges.map((e) => ({ ...e.follower, _edgeCreatedAt: e.createdAt })),
-        limitNum,
-        "_edgeCreatedAt"
-      );
+    const page = await followListPage(direction, profileUser._id, req.user._id, {
+      q: typeof q === "string" ? q : "",
+      sort,
+      cursor,
+      limit: limitNum,
     });
 
-    // Current viewer's follow state for items in this page
-    const pageUserIds = followersPage.items.map((u) => u._id);
-    const [viewerFollowEdges, pendingEdges] = await Promise.all([
-      Follow.find({
-        follower: req.user._id,
-        following: { $in: pageUserIds },
-        status: "accepted",
-      }).select("following").lean(),
-      Follow.find({
-        follower: req.user._id,
-        following: { $in: pageUserIds },
-        status: "pending",
-      }).select("following").lean(),
-    ]);
-
-    const followingSet = new Set(viewerFollowEdges.map((e) => e.following.toString()));
-    const pendingSet = new Set(pendingEdges.map((e) => e.following.toString()));
-
-    // Does the profile user follow the viewer? (canFollowBack)
-    const reverseEdges = await Follow.find({
-      follower: { $in: pageUserIds },
-      following: req.user._id,
-      status: "accepted",
-    }).select("follower").lean();
-    const reverseSet = new Set(reverseEdges.map((e) => e.follower.toString()));
-
-    const users = followersPage.items.map((user) => {
-      const id = user._id.toString();
-      return {
-        _id: user._id,
-        username: user.username,
-        name: user.name || "",
-        profilePic: user.profilePic,
-        isVerified: Boolean(user.isVerified || (user.verificationBadge && user.verificationBadge !== "none")),
-        isPrivate: Boolean(user.isPrivate),
-        followerCount: user.counts?.followers ?? 0,
-        relationship: {
-          isFollowing: followingSet.has(id),
-          isPending: pendingSet.has(id),
-          canFollowBack: reverseSet.has(id),
-        },
-      };
-    });
+    const edgeFilter =
+      direction === "followers"
+        ? { following: profileUser._id, status: "accepted" }
+        : { follower: profileUser._id, status: "accepted" };
 
     return res.status(200).json({
-      users,
-      pageInfo: followersPage.pageInfo,
-      totalCount: await Follow.countDocuments({ following: profileUser._id, status: "accepted" }),
+      users: await attachRelationships(req.user._id, page.items),
+      pageInfo: page.pageInfo,
+      sort,
+      // First page only — it's a whole-collection count, and recomputing it
+      // for every scroll increment buys nothing.
+      totalCount: cursor ? null : await Follow.countDocuments(edgeFilter),
     });
   } catch (error) {
-    console.error("getFollowersList error:", error);
-    return res.status(500).json({ error: "Failed to get followers" });
+    console.error(`${direction} list error:`, error);
+    return res.status(500).json({ error: "Failed to load the list" });
   }
 };
 
-export const getFollowingList = async (req, res) => {
+export const getFollowersList = listHandler("followers");
+export const getFollowingList = listHandler("following");
+
+/**
+ * The profile owner removing one of their followers — the quiet alternative
+ * to blocking. The edge is deleted, both counters step down, and the removed
+ * account is told nothing; they'd have to look at the profile to notice, which
+ * is exactly how Instagram plays it.
+ */
+export const removeFollower = async (req, res) => {
   try {
     const { username } = req.params;
-    const { cursor, limit = 20 } = req.query;
-    const limitNum = parseCursorLimit(limit, 20);
-    const parsedCursor = decodeCursor(cursor);
 
-    const profileUser = await User.findOne({ username }).select("_id").lean();
-    if (!profileUser) return res.status(404).json({ error: "User not found" });
+    const target = await User.findOne({ username }).select("_id").lean();
+    if (!target) return res.status(404).json({ error: "User not found" });
 
-    const cacheKey = `following:${username}:${cursor || "start"}:${limitNum}`;
-    const followingPage = await getOrSet(cacheKey, 60, async () => {
-      const cursorFilter = parsedCursor
-        ? { createdAt: { $lt: new Date(parsedCursor.createdAt) } }
-        : {};
-
-      const edges = await Follow.find({
-        follower: profileUser._id,
-        status: "accepted",
-        ...cursorFilter,
-      })
-        .sort({ createdAt: -1 })
-        .limit(limitNum + 1)
-        .populate({
-          path: "following",
-          select: "username name profilePic isVerified verificationBadge isPrivate counts createdAt",
-          match: ACTIVE_ACCOUNT_FILTER,
-        })
-        .lean();
-
-      const validEdges = edges.filter((e) => e.following);
-      return buildCursorPageInfo(
-        validEdges.map((e) => ({ ...e.following, _edgeCreatedAt: e.createdAt })),
-        limitNum,
-        "_edgeCreatedAt"
-      );
-    });
-
-    const pageUserIds = followingPage.items.map((u) => u._id);
-    const [viewerFollowEdges, pendingEdges] = await Promise.all([
-      Follow.find({
-        follower: req.user._id,
-        following: { $in: pageUserIds },
-        status: "accepted",
-      }).select("following").lean(),
-      Follow.find({
-        follower: req.user._id,
-        following: { $in: pageUserIds },
-        status: "pending",
-      }).select("following").lean(),
-    ]);
-
-    const followingSet = new Set(viewerFollowEdges.map((e) => e.following.toString()));
-    const pendingSet = new Set(pendingEdges.map((e) => e.following.toString()));
-
-    const reverseEdges = await Follow.find({
-      follower: { $in: pageUserIds },
+    // findOneAndDelete rather than check-then-delete: two concurrent removals
+    // must decrement the counters exactly once.
+    const edge = await Follow.findOneAndDelete({
+      follower: target._id,
       following: req.user._id,
       status: "accepted",
-    }).select("follower").lean();
-    const reverseSet = new Set(reverseEdges.map((e) => e.follower.toString()));
-
-    const users = followingPage.items.map((user) => {
-      const id = user._id.toString();
-      return {
-        _id: user._id,
-        username: user.username,
-        name: user.name || "",
-        profilePic: user.profilePic,
-        isVerified: Boolean(user.isVerified || (user.verificationBadge && user.verificationBadge !== "none")),
-        isPrivate: Boolean(user.isPrivate),
-        followerCount: user.counts?.followers ?? 0,
-        relationship: {
-          isFollowing: followingSet.has(id),
-          isPending: pendingSet.has(id),
-          canFollowBack: reverseSet.has(id),
-        },
-      };
     });
+    if (!edge) return res.status(404).json({ error: "They don't follow you" });
 
-    return res.status(200).json({
-      users,
-      pageInfo: followingPage.pageInfo,
-      totalCount: await Follow.countDocuments({ follower: profileUser._id, status: "accepted" }),
-    });
+    await Promise.all([
+      User.updateOne({ _id: req.user._id }, { $inc: { "counts.followers": -1 } }),
+      User.updateOne({ _id: target._id }, { $inc: { "counts.following": -1 } }),
+    ]);
+
+    // Same invalidation as follow/unfollow: the cached profile holds both
+    // counts and the follower preview strip.
+    await invalidateFollowRelatedCaches(req.user.username, username);
+
+    return res.status(200).json({ removed: true, username });
   } catch (error) {
-    console.error("getFollowingList error:", error);
-    return res.status(500).json({ error: "Failed to get following users" });
+    console.error("removeFollower error:", error);
+    return res.status(500).json({ error: "Failed to remove follower" });
   }
 };
 
@@ -988,7 +968,11 @@ export const getReplies = async (req, res) => {
       })
       .lean();
 
-    const { items: pagedReplies, pageInfo } = buildCursorPageInfo(replies, limitNum);
+    const { items: pagedRepliesRaw, pageInfo } = buildCursorPageInfo(replies, limitNum);
+    // Typed media + per-viewer poll projection; the populated parent post
+    // rides along, so it needs the same treatment.
+    const pagedReplies = await decorateContent(pagedRepliesRaw, req.user?._id);
+    await Promise.all(pagedReplies.map((r) => decorateContent(r.post, req.user?._id)));
 
     return res.status(200).json({ success: true, replies: pagedReplies, pageInfo });
   } catch (error) {
@@ -1047,8 +1031,12 @@ export const getReposts = async (req, res) => {
         : [],
     ]);
 
-    const postMap = new Map(posts.map((p) => [p._id.toString(), p]));
-    const commentMap = new Map(comments.map((c) => [c._id.toString(), c]));
+    // Same projection every other read path applies — a repost of a poll
+    // must not ship raw counts to someone who hasn't voted.
+    const decoratedPosts = await decorateContent(posts, req.user?._id);
+    const decoratedComments = await decorateContent(comments, req.user?._id);
+    const postMap = new Map(decoratedPosts.map((p) => [p._id.toString(), p]));
+    const commentMap = new Map(decoratedComments.map((c) => [c._id.toString(), c]));
 
     const reposts = pageEdges.map((edge) => ({
       type: edge.targetType === "Post" ? "post" : "comment",

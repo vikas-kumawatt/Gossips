@@ -359,7 +359,11 @@ export const getComment = async (req, res) => {
     if (!comment) return res.status(404).json({ error: "Comment not found" });
     const viewerId = req.user?._id;
     const viewerCanReply = viewerId ? await canUserReplyToTarget(viewerId, comment) : true;
-    res.status(200).json({ ...(await decorateContent(comment, viewerId)), viewerCanReply });
+    const decorated = await decorateContent(comment, viewerId);
+    // The populated parent post carries its own media/poll; decorateContent
+    // recurses into quotes, not into `post`, so it's handled explicitly.
+    if (decorated.post) await decorateContent(decorated.post, viewerId);
+    res.status(200).json({ ...decorated, viewerCanReply });
   } catch (error) {
     console.error("getComment error:", error);
     res.status(500).json({ error: "Server error" });

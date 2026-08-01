@@ -15,6 +15,9 @@ const router = Router();
 const placeLimit = rateLimit({
   windowMs: 60 * 1000,
   max: 30,
+  // Keyed by account, not IP: one user behind a shared NAT shouldn't burn
+  // everyone's budget, and many IPs shouldn't multiply one user's.
+  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
   message: { success: false, error: { message: "Slow down a moment" } },
   standardHeaders: true,
   legacyHeaders: false,
@@ -24,6 +27,7 @@ const placeLimit = rateLimit({
 const voteLimit = rateLimit({
   windowMs: 60 * 1000,
   max: 40,
+  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
   message: { success: false, error: { message: "Slow down a moment" } },
   standardHeaders: true,
   legacyHeaders: false,

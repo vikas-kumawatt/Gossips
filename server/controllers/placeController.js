@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { getOrSet } from "../utils/cache.js";
 import { getRedis, isRedisReady } from "../config/redis.js";
 import { ok, fail, serverError } from "../utils/respond.js";
@@ -92,7 +93,9 @@ export const searchPlaces = async (req, res) => {
     if (q.length < 2) return ok(res, { places: [] });
     if (q.length > 120) return fail(res, "That search is too long");
 
-    const key = `places:search:${q.toLowerCase()}`;
+    // Hashed so arbitrary user text (colons included) can't collide with other
+    // key namespaces on a shared Redis.
+    const key = `places:search:${crypto.createHash("sha1").update(q.toLowerCase()).digest("hex")}`;
     const places = await getOrSet(key, CACHE_TTL, async () => {
       const rows = await request(
         `/search?format=jsonv2&addressdetails=0&limit=${RESULT_LIMIT}&q=${encodeURIComponent(q)}`

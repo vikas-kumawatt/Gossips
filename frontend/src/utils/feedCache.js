@@ -1,5 +1,13 @@
 const DB_NAME = "gossips-feed-cache";
-const DB_VERSION = 2;
+/*
+ * Bump this whenever the shape of a cached post changes.
+ *
+ * The store is dropped on upgrade, so a stale snapshot can't outlive the shape
+ * it was written for. Version 3 is the poll/location/typed-media change: the
+ * home feed reads from here on load, so posts cached before those fields
+ * existed rendered without a poll while every live-fetched surface showed one.
+ */
+const DB_VERSION = 3;
 const STORE_NAME = "feedSnapshots";
 
 let dbPromise = null;

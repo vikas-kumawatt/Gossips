@@ -1,4 +1,5 @@
 import { useState, useEffect, useContext, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { UserContext } from '../contexts/UserContext';
 import { useFollow } from "../contexts/FollowContext.jsx";
 import { Icons } from './icons';
@@ -35,6 +36,8 @@ const FollowButton = ({
     isLoading: false,
   });
   const [isResolved, setIsResolved] = useState(false);
+  // Only ever set for private accounts — see handleFollowAction.
+  const [confirmUnfollow, setConfirmUnfollow] = useState(false);
   const { userAuth } = useContext(UserContext);
   const { followUpdates, handleFollowUpdate } = useFollow();
 
@@ -163,11 +166,27 @@ const FollowButton = ({
     refreshFollowStatus();
   }, [username, currentUserFollowing, userAuth?.token, refreshFollowStatus]);
 
-  const handleFollowAction = async (e) => {
+  /**
+   * Tapping the button acts immediately — except when it would unfollow a
+   * private account. Re-following one means sending a request and waiting for
+   * approval, so an accidental tap there costs real access; a public account
+   * can just be followed again.
+   */
+  const handleFollowAction = (e) => {
     e.preventDefault();
     e.stopPropagation();
     if (!userAuth?.token) return;
 
+    if (followState.isFollowing && isPrivate) {
+      setConfirmUnfollow(true);
+      return;
+    }
+    runFollowAction();
+  };
+
+  const runFollowAction = async () => {
+    if (!userAuth?.token) return;
+    setConfirmUnfollow(false);
     setFollowState(prev => ({ ...prev, isLoading: true }));
     const { isFollowing, isPending } = followState;
 
@@ -250,13 +269,62 @@ const FollowButton = ({
   } cursor-pointer disabled:opacity-50`;
 
   return (
-    <button
-      onClick={handleFollowAction}
-      disabled={isLoading || !isResolved}
-      className={buttonClasses}
-    >
-      {buttonText}
-    </button>
+    <>
+      <button
+        onClick={handleFollowAction}
+        disabled={isLoading || !isResolved}
+        className={buttonClasses}
+      >
+        {buttonText}
+      </button>
+
+      {/* Portalled: this button lives inside cards and list rows that clip
+          their overflow, so an inline dialog would be cut off. */}
+      {confirmUnfollow &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[2200] flex items-center justify-center bg-black/70 px-4"
+            onClick={(e) => {
+              e.stopPropagation();
+              setConfirmUnfollow(false);
+            }}
+          >
+            <div
+              className="w-full max-w-[340px] rounded-2xl border border-neutral-700 bg-[#181818] p-5"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 className="font-semibold text-white">Unfollow @{username}?</h2>
+              <p className="mt-2 text-sm text-neutral-400">
+                Their account is private. To follow them again you'll have to
+                send a request and wait for them to accept it.
+              </p>
+              <div className="mt-5 flex gap-2">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmUnfollow(false);
+                  }}
+                  className="flex-1 cursor-pointer rounded-xl border border-neutral-700 py-2.5 text-sm font-medium text-white transition-colors hover:bg-neutral-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    runFollowAction();
+                  }}
+                  className="flex-1 cursor-pointer rounded-xl bg-rose-600 py-2.5 text-sm font-semibold text-white transition-opacity hover:opacity-90"
+                >
+                  Unfollow
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </>
   );
 };
 
