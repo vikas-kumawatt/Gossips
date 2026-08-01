@@ -93,21 +93,18 @@ export default function Navigation({ layoutContext }) {
         className="hover:bg-zinc-800 p-4 sm:py-5 sm:px-8 rounded-lg transform transition-all duration-150 ease-out hover:scale-100 active:scale-90 flex items-center justify-center w-full"
       >
         <span className="relative flex items-center justify-center">
-          {unreadNotificationCount > 0 ? (
-            <Icons.unread
-              className="h-[28px] w-[28px] text-lg"
-              strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
-              fill={path === "/activity" ? "white" : "transparent"}
-            />
-          ) : (
-            <Icons.activity
-              className="h-[26px] w-[26px] text-lg"
-              strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
-              fill={path === "/activity" ? "white" : "transparent"}
-            />
-          )}
-          {/* The count-swapped icon alone is too subtle — both states are a
-              bell of the same weight. The dot is the part people look for. */}
+          {/*
+            Always the plain glyph. `Icons.unread` is the same heart with a red
+            <circle> baked into the SVG, so rendering it *and* the badge below
+            drew two dots. One dot, and it's this one — a span can carry the
+            ring that separates it from the icon, and an aria-label that
+            actually announces the count.
+          */}
+          <Icons.activity
+            className="h-[26px] w-[26px] text-lg"
+            strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
+            fill={path === "/activity" ? "white" : "transparent"}
+          />
           {unreadNotificationCount > 0 && (
             <span
               role="status"

@@ -16,8 +16,9 @@ import SearchUserCard from "../components/SearchUserCard";
 import RecentSearches from "../components/RecentSearches";
 import SearchFiltersSheet from "../components/SearchFiltersSheet";
 import PostCard from "../components/PostCard";
+import HashtagResultCard from "../components/HashtagResultCard";
 import CreatePost from "../components/CreatePost";
-import { searchAPI, userAPI } from "../services/api";
+import { searchAPI, userAPI, hashtagAPI } from "../services/api";
 import {
   DEFAULT_FILTERS,
   MAX_QUERY_LENGTH,
@@ -33,10 +34,14 @@ import {
 const TABS = [
   { id: "posts", label: "Posts" },
   { id: "people", label: "People" },
+  { id: "tags", label: "Tags" },
 ];
+
+const TAB_IDS = new Set(TABS.map((t) => t.id));
 
 const PAGE_SIZE = 15;
 const PEOPLE_PAGE_SIZE = 20;
+const TAG_PAGE_SIZE = 20;
 const SUGGESTION_PAGE_SIZE = 20;
 const DEBOUNCE_MS = 350;
 
@@ -113,15 +118,39 @@ const SearchPage = () => {
   // The URL is the source of truth for what's being searched, so a refresh, a
   // shared link and the back button all land on the same results.
   const query = (searchParams.get("q") || "").slice(0, MAX_QUERY_LENGTH);
-  const tab = searchParams.get("tab") === "people" ? "people" : "posts";
+  const rawTab = searchParams.get("tab");
+  const tab = TAB_IDS.has(rawTab) ? rawTab : "posts";
   const filters = useMemo(() => filtersFromUrl(searchParams), [searchParams]);
 
   const [inputValue, setInputValue] = useState(query);
   const [isFilterSheetOpen, setIsFilterSheetOpen] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
 
+  /*
+   * Two modes, the way Threads does it.
+   *
+   * Idle is a browse surface: a search box and accounts to follow. Tapping the
+   * box switches to the search surface — recent searches, then results as you
+   * type. Keeping them separate is what lets the idle page be about discovery
+   * rather than a form with an empty history under it, and it's why the result
+   * tabs don't exist until there's something to tab between.
+   *
+   * A mode rather than a route: the URL already carries `q`, so a deep link
+   * lands mid-search, and the initial value below picks that up.
+   */
+  const [isSearchActive, setIsSearchActive] = useState(
+    /*
+     * Filters alone can drive a post search — "everything @bob posted in
+     * March" needs no query — so the mode has to agree with `hasSearch` below.
+     * Initialising on `query` alone put the idle page's suggestion list
+     * underneath live result chrome, with the results fetched and invisible.
+     */
+    () => Boolean(query) || filtersAnchorSearch(filters)
+  );
+
   const [postResults, setPostResults] = useState(EMPTY_LIST);
   const [peopleResults, setPeopleResults] = useState(EMPTY_LIST);
+  const [tagResults, setTagResults] = useState(EMPTY_LIST);
   const [suggestions, setSuggestions] = useState(EMPTY_LIST);
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
@@ -131,10 +160,12 @@ const SearchPage = () => {
   // response would otherwise overwrite the results of the current query.
   const postsRequestRef = useRef(0);
   const peopleRequestRef = useRef(0);
+  const tagsRequestRef = useRef(0);
   // What each list currently holds, so switching tabs doesn't refetch results
   // that are already correct.
   const postsLoadedKeyRef = useRef(null);
   const peopleLoadedKeyRef = useRef(null);
+  const tagsLoadedKeyRef = useRef(null);
 
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
@@ -147,7 +178,10 @@ const SearchPage = () => {
   // ("everything @user posted in March"). People search needs terms.
   const canSearchPosts = Boolean(query) || filtersAnchorSearch(filters);
   const canSearchPeople = Boolean(query);
-  const isSearching = tab === "posts" ? canSearchPosts : canSearchPeople;
+  // A tag search is a prefix match on a name, so it needs something to match.
+  const canSearchTags = Boolean(query);
+  const isSearching =
+    tab === "posts" ? canSearchPosts : tab === "people" ? canSearchPeople : canSearchTags;
 
   const requestParams = useMemo(() => filtersToRequestParams(filters), [filters]);
   const postsKey = useMemo(
@@ -155,6 +189,7 @@ const SearchPage = () => {
     [query, requestParams]
   );
   const peopleKey = query;
+  const tagsKey = query;
 
   // ── URL updates ───────────────────────────────────────────────────────────
   const applyUrl = useCallback(
@@ -189,6 +224,10 @@ const SearchPage = () => {
   // while someone is mid-word.
   useEffect(() => {
     setInputValue((current) => (current.trim() === query ? current : query));
+    // Arriving at a query by any route — Back, Forward, a shared link — means
+    // the search view. Only one direction: an empty query doesn't force idle,
+    // or deleting a word would throw you out mid-edit.
+    if (query) setIsSearchActive(true);
   }, [query]);
 
   // ── Recent searches ───────────────────────────────────────────────────────
@@ -296,9 +335,11 @@ const SearchPage = () => {
   );
 
   useEffect(() => {
-    if (!token) return;
+    // Skipped when the page opens straight into a search — the idle list isn't
+    // rendered then, and Cancel fetches it lazily.
+    if (!token || isSearchActive) return;
     fetchSuggestions(null);
-  }, [token, fetchSuggestions]);
+  }, [token, isSearchActive, fetchSuggestions]);
 
   // ── Post search ───────────────────────────────────────────────────────────
   const runPostSearch = useCallback(
@@ -418,6 +459,71 @@ const SearchPage = () => {
     runPeopleSearch({ cursor: null, key: peopleKey });
   }, [token, tab, canSearchPeople, peopleKey, runPeopleSearch]);
 
+  // ── Hashtag search ────────────────────────────────────────────────────────
+  const runTagSearch = useCallback(
+    async ({ cursor = null, key }) => {
+      const requestId = tagsRequestRef.current + 1;
+      tagsRequestRef.current = requestId;
+
+      setTagResults((prev) => ({
+        ...prev,
+        items: cursor ? prev.items : [],
+        loading: !cursor,
+        loadingMore: Boolean(cursor),
+        error: null,
+      }));
+
+      try {
+        const data = await hashtagAPI.search({
+          q: query,
+          limit: TAG_PAGE_SIZE,
+          ...(cursor ? { cursor } : {}),
+        });
+        if (tagsRequestRef.current !== requestId) return;
+
+        setTagResults((prev) => ({
+          // Keyed by tag, which is unique — these have no _id.
+          items: cursor
+            ? [
+                ...prev.items,
+                ...(data?.hashtags || []).filter(
+                  (row) => !prev.items.some((existing) => existing.tag === row.tag)
+                ),
+              ]
+            : data?.hashtags || [],
+          cursor: data?.pageInfo?.nextCursor || null,
+          hasMore: Boolean(data?.pageInfo?.hasNextPage),
+          loading: false,
+          loadingMore: false,
+          error: null,
+          meta: {},
+        }));
+        tagsLoadedKeyRef.current = key;
+      } catch (error) {
+        if (tagsRequestRef.current !== requestId) return;
+        setTagResults((prev) => ({
+          ...prev,
+          loading: false,
+          loadingMore: false,
+          error: errorMessage(error, "Couldn't search hashtags."),
+        }));
+        tagsLoadedKeyRef.current = null;
+      }
+    },
+    [query]
+  );
+
+  useEffect(() => {
+    if (!token || tab !== "tags") return;
+    if (!canSearchTags) {
+      tagsLoadedKeyRef.current = null;
+      setTagResults(EMPTY_LIST);
+      return;
+    }
+    if (tagsLoadedKeyRef.current === tagsKey) return;
+    runTagSearch({ cursor: null, key: tagsKey });
+  }, [token, tab, canSearchTags, tagsKey, runTagSearch]);
+
   // ── Infinite scroll ───────────────────────────────────────────────────────
   const loadMorePosts = useCallback(() => {
     if (postResults.loading || postResults.loadingMore || !postResults.hasMore || !postResults.cursor) {
@@ -450,9 +556,17 @@ const SearchPage = () => {
     fetchSuggestions(suggestions.cursor);
   }, [suggestions, fetchSuggestions]);
 
+  const loadMoreTags = useCallback(() => {
+    if (tagResults.loading || tagResults.loadingMore || !tagResults.hasMore || !tagResults.cursor) {
+      return;
+    }
+    runTagSearch({ cursor: tagResults.cursor, key: tagsKey });
+  }, [tagResults, runTagSearch, tagsKey]);
+
   const lastPostRef = useLastItemRef(loadMorePosts, postResults.hasMore);
   const lastPersonRef = useLastItemRef(loadMorePeople, peopleResults.hasMore);
   const lastSuggestionRef = useLastItemRef(loadMoreSuggestions, suggestions.hasMore);
+  const lastTagRef = useLastItemRef(loadMoreTags, tagResults.hasMore);
 
   // ── Result mutations ──────────────────────────────────────────────────────
   const handleFollowStatusChange = useCallback((nextStatus) => {
@@ -506,10 +620,25 @@ const SearchPage = () => {
     inputRef.current?.focus();
   };
 
+  const openSearch = () => setIsSearchActive(true);
+
+  const cancelSearch = () => {
+    setIsSearchActive(false);
+    setInputValue("");
+    // Filters go too. Leaving them set would silently narrow the next search
+    // someone starts from a page that shows no sign of them.
+    applyUrl(
+      { query: "", tab: "posts", filters: { ...DEFAULT_FILTERS } },
+      { replace: true }
+    );
+    inputRef.current?.blur();
+  };
+
   const selectRecentQuery = (text) => {
     setInputValue(text);
     applyUrl({ query: text.trim() });
     recordQuery(text);
+    inputRef.current?.blur();
   };
 
   const selectRecentUser = (user) => {
@@ -517,86 +646,127 @@ const SearchPage = () => {
     navigate(`/${user.username}`);
   };
 
-  const showRecent = !isSearching;
-  const activeList = tab === "posts" ? postResults : peopleResults;
+  const activeList =
+    tab === "posts" ? postResults : tab === "people" ? peopleResults : tagResults;
+  /*
+   * Is *any* search happening? Not the same as `isSearching`, which is about
+   * the current tab: a filter-only search is real on Posts and impossible on
+   * People, so keying the tab bar on the tab's own answer let switching to
+   * People remove the control you'd switch back with.
+   */
+  const hasSearch = canSearchPosts || canSearchPeople || canSearchTags;
 
   return (
     <div className="w-full bg-neutral-950">
-      <SiteHeader layoutContext={layoutContext} />
+      {/* Hidden on phones while searching: a logo and a menu button are chrome
+          on a screen whose whole job is one input and a list. Desktop keeps it,
+          since the nav there is how you leave. */}
+      <div className={isSearchActive ? "hidden sm:contents" : "contents"}>
+        <SiteHeader layoutContext={layoutContext} />
+      </div>
+
       <main className="container mx-auto max-w-[620px] bg-neutral-950 px-4 pb-16 sm:px-6">
-        <div className="flex items-center gap-2 pt-4">
-          <form onSubmit={submitSearch} className="relative flex-1">
-            <Icons.search
-              className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2"
-              strokeColor="#404040"
-            />
-            <input
-              ref={inputRef}
-              // Deliberately not type="search": the native cancel button
-              // duplicates the clear button below it and can't be styled to
-              // match.
-              type="text"
-              enterKeyHint="search"
-              value={inputValue}
-              maxLength={MAX_QUERY_LENGTH}
-              onChange={(event) => setInputValue(event.target.value)}
-              placeholder="Search posts and people"
-              aria-label="Search"
-              autoComplete="off"
-              className="w-full rounded-xl border border-neutral-800 bg-neutral-950 py-4 pl-12 pr-11 text-white outline-none focus:border-neutral-600"
-            />
-            {inputValue && (
+        <div
+          className={
+            isSearchActive
+              ? "sticky top-0 z-[90] -mx-4 bg-neutral-950 px-4 pb-2 pt-3 sm:relative sm:top-auto sm:mx-0 sm:px-0 sm:pt-4"
+              : "pt-4"
+          }
+        >
+          <div className="flex items-center gap-2">
+            <form onSubmit={submitSearch} className="relative min-w-0 flex-1">
+              <Icons.search
+                className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2"
+                strokeColor="#404040"
+              />
+              <input
+                ref={inputRef}
+                // Deliberately not type="search": the native cancel button
+                // duplicates the clear button below it and can't be styled to
+                // match.
+                type="text"
+                enterKeyHint="search"
+                value={inputValue}
+                maxLength={MAX_QUERY_LENGTH}
+                onChange={(event) => setInputValue(event.target.value)}
+                onFocus={openSearch}
+                placeholder="Search"
+                aria-label="Search"
+                autoComplete="off"
+                className="w-full rounded-xl border border-neutral-800 bg-neutral-900/60 py-3.5 pl-12 pr-11 text-[15px] text-white outline-none transition-colors placeholder:text-neutral-500 focus:border-neutral-600 focus:bg-neutral-950"
+              />
+              {inputValue && (
+                <button
+                  type="button"
+                  onClick={clearInput}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-white"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </form>
+
+            {isSearchActive && (
               <button
                 type="button"
-                onClick={clearInput}
-                aria-label="Clear search"
-                className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-2 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-white cursor-pointer"
+                onClick={cancelSearch}
+                className="shrink-0 cursor-pointer px-1 text-[15px] font-medium text-white transition-colors hover:text-neutral-300"
               >
-                <X className="h-4 w-4" />
+                Cancel
               </button>
             )}
-          </form>
+          </div>
 
-          {tab === "posts" && (
-            <button
-              type="button"
-              onClick={() => setIsFilterSheetOpen(true)}
-              aria-label="Search filters"
-              className={`relative shrink-0 rounded-xl border p-3.5 transition-colors cursor-pointer ${
-                activeFilterCount > 0
-                  ? "border-white bg-white text-black"
-                  : "border-neutral-800 text-neutral-300 hover:border-neutral-600"
-              }`}
-            >
-              <SlidersHorizontal className="h-5 w-5" />
-              {activeFilterCount > 0 && (
-                <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-500 px-1 text-[11px] font-semibold text-white">
-                  {activeFilterCount}
-                </span>
+          {/*
+            This row belongs to the search view, not to the idle page — two
+            pills asking you to choose between two empty lists was the thing to
+            get rid of.
+            Inside it the two halves appear on their own terms: the tabs once
+            there's something to tab between, the filter button as soon as
+            you're searching. Filters have to come first, because a filter can
+            *be* the search — "everything @bob posted in March" needs no query,
+            and gating the button on having one made that unreachable.
+          */}
+          {isSearchActive && (hasSearch || tab === "posts") && (
+            <div className="mt-3 flex items-center gap-2">
+              {hasSearch &&
+                TABS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => applyUrl({ tab: item.id }, { replace: true })}
+                    aria-pressed={tab === item.id}
+                    className={`shrink-0 cursor-pointer rounded-full border px-4 py-1.5 text-[14px] font-medium transition-colors ${
+                      tab === item.id
+                        ? "border-white bg-white text-black"
+                        : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-neutral-600"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+
+              {tab === "posts" && (
+                <button
+                  type="button"
+                  onClick={() => setIsFilterSheetOpen(true)}
+                  aria-label="Search filters"
+                  className={`ml-auto flex shrink-0 cursor-pointer items-center gap-1.5 rounded-full border px-3 py-1.5 text-[14px] font-medium transition-colors ${
+                    activeFilterCount > 0
+                      ? "border-white bg-white text-black"
+                      : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-neutral-600"
+                  }`}
+                >
+                  <SlidersHorizontal className="h-4 w-4" />
+                  {activeFilterCount > 0 ? activeFilterCount : "Filters"}
+                </button>
               )}
-            </button>
+            </div>
           )}
         </div>
 
-        <div className="mt-3 flex items-center gap-2">
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => applyUrl({ tab: item.id }, { replace: true })}
-              aria-pressed={tab === item.id}
-              className={`shrink-0 rounded-full border px-4 py-2 text-sm font-medium transition-colors cursor-pointer ${
-                tab === item.id
-                  ? "border-white bg-white text-black"
-                  : "border-neutral-800 bg-neutral-900 text-neutral-300 hover:border-neutral-600"
-              }`}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-
-        {tab === "posts" && filterChips.length > 0 && (
+        {canSearchPosts && tab === "posts" && filterChips.length > 0 && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {filterChips.map((chip) => (
               <button
@@ -604,7 +774,7 @@ const SearchPage = () => {
                 type="button"
                 onClick={() => applyUrl({ filters: clearFilterKey(filters, chip.key) })}
                 aria-label={`Remove filter: ${chip.label}`}
-                className="flex items-center gap-1.5 rounded-full border border-neutral-700 bg-neutral-900 py-1.5 pl-3 pr-2 text-[13px] text-neutral-200 transition-colors hover:border-neutral-500 cursor-pointer"
+                className="flex cursor-pointer items-center gap-1.5 rounded-full border border-neutral-700 bg-neutral-900 py-1.5 pl-3 pr-2 text-[13px] text-neutral-200 transition-colors hover:border-neutral-500"
               >
                 {chip.label}
                 <X className="h-3.5 w-3.5 text-neutral-500" />
@@ -613,57 +783,31 @@ const SearchPage = () => {
             <button
               type="button"
               onClick={() => applyUrl({ filters: { ...DEFAULT_FILTERS } })}
-              className="text-[13px] font-medium text-blue-500 hover:underline cursor-pointer"
+              className="cursor-pointer text-[13px] font-medium text-blue-500 hover:underline"
             >
               Clear all
             </button>
           </div>
         )}
 
-        {showRecent ? (
-          <>
-            <RecentSearches
-              entries={history}
-              loading={historyLoading}
-              onSelectQuery={selectRecentQuery}
-              onSelectUser={selectRecentUser}
-              onRemove={removeHistoryEntry}
-              onClear={clearHistory}
-            />
-
-            <p className="my-4 ml-2 font-medium text-neutral-500">Follow suggestions</p>
-            <div className="mt-4 space-y-4">
-              {suggestions.items.length > 0 ? (
-                <>
-                  {suggestions.items.map((user, index) => (
-                    <div
-                      key={user._id}
-                      ref={index === suggestions.items.length - 1 ? lastSuggestionRef : null}
-                      onClickCapture={() => recordUser(user.username)}
-                    >
-                      <SearchUserCard
-                        user={user}
-                        onFollowStatusChange={handleFollowStatusChange}
-                      />
-                    </div>
-                  ))}
-                  {suggestions.loadingMore && (
-                    <div className="py-4 text-center">
-                      <Icons.spinner className="mx-auto h-6 w-6 animate-spin text-neutral-400" />
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="py-10 text-center text-neutral-400">
-                  {suggestions.loading ? (
-                    <Icons.spinner className="mx-auto h-8 w-8 animate-spin" />
-                  ) : (
-                    suggestions.error || "No users available yet."
-                  )}
-                </div>
-              )}
-            </div>
-          </>
+        {!isSearchActive ? (
+          /* Idle: nothing but accounts worth following. No history — that's
+             what opening the box is for. */
+          <SuggestionList
+            suggestions={suggestions}
+            lastSuggestionRef={lastSuggestionRef}
+            onFollowStatusChange={handleFollowStatusChange}
+            onOpen={recordUser}
+          />
+        ) : !isSearching ? (
+          <RecentSearches
+            entries={history}
+            loading={historyLoading}
+            onSelectQuery={selectRecentQuery}
+            onSelectUser={selectRecentUser}
+            onRemove={removeHistoryEntry}
+            onClear={clearHistory}
+          />
         ) : activeList.loading ? (
           <div className="py-16 text-center">
             <Icons.spinner className="mx-auto h-8 w-8 animate-spin text-neutral-400" />
@@ -673,12 +817,12 @@ const SearchPage = () => {
             <p className="text-[15px] text-neutral-200">{activeList.error}</p>
             <button
               type="button"
-              onClick={() =>
-                tab === "posts"
-                  ? runPostSearch({ cursor: null, key: postsKey })
-                  : runPeopleSearch({ cursor: null, key: peopleKey })
-              }
-              className="mt-4 rounded-xl bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-opacity hover:opacity-90 cursor-pointer"
+              onClick={() => {
+                if (tab === "posts") runPostSearch({ cursor: null, key: postsKey });
+                else if (tab === "people") runPeopleSearch({ cursor: null, key: peopleKey });
+                else runTagSearch({ cursor: null, key: tagsKey });
+              }}
+              className="mt-4 cursor-pointer rounded-xl bg-white px-5 py-2.5 text-[15px] font-semibold text-black transition-opacity hover:opacity-90"
             >
               Try again
             </button>
@@ -694,13 +838,20 @@ const SearchPage = () => {
             onUpdate={handleResultUpdated}
             onOpen={() => recordQuery(query)}
           />
-        ) : (
+        ) : tab === "people" ? (
           <PeopleResults
             results={peopleResults}
             query={query}
             lastPersonRef={lastPersonRef}
             onFollowStatusChange={handleFollowStatusChange}
             onOpen={recordUser}
+          />
+        ) : (
+          <TagResults
+            results={tagResults}
+            query={query}
+            lastTagRef={lastTagRef}
+            onOpen={() => recordQuery(query)}
           />
         )}
       </main>
@@ -718,6 +869,40 @@ const SearchPage = () => {
     </div>
   );
 };
+
+/** Accounts worth following — the idle page's whole body. */
+const SuggestionList = ({ suggestions, lastSuggestionRef, onFollowStatusChange, onOpen }) => (
+  <>
+    <h2 className="mb-1 mt-6 px-1 text-[15px] font-semibold text-white">Suggested for you</h2>
+
+    {suggestions.items.length > 0 ? (
+      <div className="mt-3 space-y-4">
+        {suggestions.items.map((user, index) => (
+          <div
+            key={user._id}
+            ref={index === suggestions.items.length - 1 ? lastSuggestionRef : null}
+            onClickCapture={() => onOpen(user.username)}
+          >
+            <SearchUserCard user={user} onFollowStatusChange={onFollowStatusChange} />
+          </div>
+        ))}
+        {suggestions.loadingMore && (
+          <div className="py-4 text-center">
+            <Icons.spinner className="mx-auto h-6 w-6 animate-spin text-neutral-400" />
+          </div>
+        )}
+      </div>
+    ) : (
+      <div className="py-10 text-center text-neutral-400">
+        {suggestions.loading ? (
+          <Icons.spinner className="mx-auto h-8 w-8 animate-spin" />
+        ) : (
+          suggestions.error || "No suggestions right now."
+        )}
+      </div>
+    )}
+  </>
+);
 
 /**
  * Why a post search came back empty, in the terms the viewer set it up with —
@@ -759,7 +944,7 @@ const PostEmptyState = ({ results, query, activeFilterCount, onClearFilters }) =
       <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-neutral-500">
         {activeFilterCount > 0
           ? "Your filters may be narrowing this too far."
-          : "Try different words, or search People instead."}
+          : "Try different words, or look under People or Tags."}
       </p>
       {activeFilterCount > 0 && (
         <button
@@ -831,6 +1016,45 @@ const PostResults = ({
           </div>
         );
       })}
+
+      {results.loadingMore && (
+        <div className="py-4 text-center">
+          <Icons.spinner className="mx-auto h-6 w-6 animate-spin text-neutral-400" />
+        </div>
+      )}
+    </div>
+  );
+};
+
+/**
+ * Matching hashtags.
+ *
+ * A prefix match on the tag name, ordered by how much they're used — so typing
+ * "cof" offers #coffee before #coffeeshopvibes. No filters here: they narrow
+ * *content*, and a tag is a name.
+ */
+const TagResults = ({ results, query, lastTagRef, onOpen }) => {
+  if (!results.items.length) {
+    return (
+      <div className="mt-6 rounded-2xl border border-neutral-800 bg-neutral-900/50 px-5 py-12 text-center sm:px-8">
+        <p className="text-[15px] font-medium text-neutral-200">
+          No hashtags starting with &ldquo;{query.replace(/^#/, "")}&rdquo;
+        </p>
+        <p className="mx-auto mt-2 max-w-sm text-sm leading-relaxed text-neutral-500">
+          Hashtags are matched from the start of the name. Try a shorter prefix,
+          or search Posts instead.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3" onClickCapture={onOpen}>
+      {results.items.map((row, index) => (
+        <div key={row.tag} ref={index === results.items.length - 1 ? lastTagRef : null}>
+          <HashtagResultCard tag={row.tag} postCount={row.postCount} />
+        </div>
+      ))}
 
       {results.loadingMore && (
         <div className="py-4 text-center">

@@ -313,7 +313,13 @@ export const hashtagAPI = {
   getContent: (tag, params) =>
     cachedGet(`/tags/${encodeURIComponent(tag)}`, { params }),
 
-  getTrending: (params) => cachedGet("/tags/trending", { params }),
+  /*
+   * Under /search, not /tags: every single-segment path there is a legal tag
+   * name, so /tags/search would shadow the page for #search.
+   */
+  search: (params) => cachedGet("/search/hashtags", { params }),
+
+  getTrending: (params) => cachedGet("/search/hashtags/trending", { params }),
 };
 
 // ─── Search ──────────────────────────────────────────────────────────────────

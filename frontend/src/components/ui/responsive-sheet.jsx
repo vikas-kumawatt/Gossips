@@ -21,6 +21,12 @@ const ResponsiveSheet = ({
   onClose,
   title,
   onBack,
+  /*
+   * Rendered just left of the close button. For the one action that belongs to
+   * the sheet as a whole rather than to its content — Reset on the filter
+   * sheet, which has to stay reachable from every step.
+   */
+  headerAction,
   canClose,
   // The sheet scrolls its whole body by default. Pass false when the content
   // needs to pin its own header/footer and scroll just one region — the child
@@ -166,23 +172,39 @@ const ResponsiveSheet = ({
             <button
               type="button"
               onClick={onBack}
+              onTouchStart={(event) => event.stopPropagation()}
               className="absolute left-2 p-1.5 rounded-full hover:bg-neutral-800 transition-colors cursor-pointer"
               aria-label="Back"
             >
               <Icons.back className="w-5 h-5" />
             </button>
           )}
-          <h2 className="w-full min-w-0 font-bold text-[15px] px-10 text-center truncate">
+          <h2
+            className={`w-full min-w-0 font-bold text-[15px] text-center truncate ${
+              headerAction ? "px-28" : "px-10"
+            }`}
+          >
             {title}
           </h2>
-          <button
-            type="button"
-            onClick={requestClose}
-            className="absolute right-2 p-1.5 rounded-full hover:bg-neutral-800 transition-colors cursor-pointer"
-            aria-label="Close"
+          <div
+            className="absolute right-2 flex items-center gap-1"
+            /*
+             * The header doubles as a drag-to-dismiss handle, so a touch that
+             * lands on a button here and drifts downwards drags the sheet away
+             * — taking any in-progress draft with it. The buttons opt out.
+             */
+            onTouchStart={(event) => event.stopPropagation()}
           >
-            <X className="w-[18px] h-[18px]" />
-          </button>
+            {headerAction}
+            <button
+              type="button"
+              onClick={requestClose}
+              className="p-1.5 rounded-full hover:bg-neutral-800 transition-colors cursor-pointer"
+              aria-label="Close"
+            >
+              <X className="w-[18px] h-[18px]" />
+            </button>
+          </div>
         </div>
 
         {/* overflow-x-hidden so a stray wide child can't add a second bar.

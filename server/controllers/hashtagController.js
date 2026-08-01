@@ -9,7 +9,13 @@ import { decodeCursor, parseCursorLimit, encodeCursor } from "../utils/cursorPag
 import { encodeOffsetCursor, decodeOffsetCursor } from "../utils/activitySort.js";
 import { decorateContent } from "../utils/attachments.js";
 import { normalizeTag } from "../utils/richText.js";
-import { isBlockedTag } from "../utils/blockedHashtags.js";
+import {
+  isBlockedTag,
+  isBlockedHashtag,
+  listBuiltInBlockedHashtags,
+} from "../utils/blockedHashtags.js";
+import { getSettings } from "../utils/settings.js";
+import { escapeRegex } from "../utils/respond.js";
 
 const AUTHOR_SELECT = "_id username name bio profilePic isVerified verificationBadge isPrivate";
 
@@ -332,5 +338,79 @@ export const getTrendingHashtags = async (req, res) => {
   } catch (error) {
     console.error("getTrendingHashtags error:", error);
     return res.status(500).json({ error: "Failed to load trending hashtags" });
+  }
+};
+
+/**
+ * GET /tags/search?q=… — hashtags whose name starts with the query.
+ *
+ * Prefix, not substring. Typing "cof" should offer #coffee, not every tag with
+ * "cof" buried in it — and an anchored regex is the only shape Mongo can serve
+ * from the index on `tag`, so the alternative is a collection scan per
+ * keystroke for results nobody asked for.
+ *
+ * Blocked tags are excluded in the query rather than filtered afterwards, which
+ * keeps the page size exact: filtering after `skip` makes both the page length
+ * and hasNextPage a guess.
+ */
+export const searchHashtags = async (req, res) => {
+  try {
+    const raw = String(req.query.q || "").trim().replace(/^#/, "").toLowerCase();
+
+    // Anything that couldn't be a tag has no matches by definition — answered
+    // as an empty page rather than an error, since it's just what half-typed
+    // input looks like.
+    if (!raw || !/^[a-z0-9_]{1,100}$/.test(raw)) {
+      return res
+        .status(200)
+        .json({ hashtags: [], pageInfo: { hasNextPage: false, nextCursor: null } });
+    }
+
+    const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 20, 1), 30);
+    const offset = decodeOffsetCursor(req.query.cursor);
+
+    const settings = await getSettings();
+    const blocked = [
+      ...listBuiltInBlockedHashtags(),
+      ...(settings?.blockedHashtags || []),
+    ];
+
+    /*
+     * Both conditions on `tag` have to live in one operator object. Written as
+     * two `tag:` keys the second silently wins, and the prefix match — or the
+     * blocklist — quietly stops applying.
+     */
+    const prefix = `^${escapeRegex(raw)}`;
+
+    const rows = await Hashtag.find({
+      // A tag whose every post has since been deleted is a dead end.
+      postCount: { $gt: 0 },
+      tag: blocked.length ? { $regex: prefix, $nin: blocked } : { $regex: prefix },
+    })
+      // Most used first, then alphabetically so the order is stable between
+      // pages when counts tie.
+      .sort({ postCount: -1, tag: 1 })
+      .skip(offset)
+      .limit(limit + 1)
+      .select("tag postCount")
+      .lean();
+
+    const hasNextPage = rows.length > limit;
+    const page = (hasNextPage ? rows.slice(0, limit) : rows)
+      // Belt and braces: a tag blocked by a pattern rather than by name
+      // wouldn't be caught by the $nin above.
+      .filter((row) => !isBlockedHashtag(row.tag, settings?.blockedHashtags || []))
+      .map((row) => ({ tag: row.tag, postCount: row.postCount }));
+
+    return res.status(200).json({
+      hashtags: page,
+      pageInfo: {
+        hasNextPage,
+        nextCursor: hasNextPage ? encodeOffsetCursor(offset + limit) : null,
+      },
+    });
+  } catch (error) {
+    console.error("searchHashtags error:", error);
+    return res.status(500).json({ error: "Failed to search hashtags" });
   }
 };

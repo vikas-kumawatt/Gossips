@@ -1,14 +1,15 @@
 import { Router } from "express";
-import { getHashtagContent, getTrendingHashtags } from "../controllers/hashtagController.js";
+import { getHashtagContent } from "../controllers/hashtagController.js";
 import { protect } from "../middleware/authMiddleware.js";
 
 const router = Router();
 
 /*
- * "trending" before "/:tag" — it's a legal tag shape, so ordering is the only
- * thing keeping it from being read as somebody's hashtag page.
+ * Only the page. Anything else here would need a single-segment name, and every
+ * one of those is a legal hashtag — `/tags/search` would have shadowed the page
+ * for #search. Hashtag search and trending live under /search instead, which is
+ * where searching for things belongs.
  */
-router.get("/trending", protect, getTrendingHashtags);
 router.get("/:tag", protect, getHashtagContent);
 
 export default router;

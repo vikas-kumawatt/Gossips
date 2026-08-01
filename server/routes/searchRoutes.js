@@ -8,6 +8,7 @@ import {
   deleteSearchHistoryEntry,
   clearSearchHistory,
 } from "../controllers/searchController.js";
+import { searchHashtags, getTrendingHashtags } from "../controllers/hashtagController.js";
 
 const router = Router();
 
@@ -37,6 +38,13 @@ const historyWriteLimit = rateLimit({
 // Posts and replies. People search stays on /user/search — it returns accounts,
 // not content, and already has its own suggestion ranking.
 router.get("/content", protect, searchLimit, searchContent);
+
+/*
+ * Hashtags. Here rather than under /tags because every single-segment path
+ * there is a legal tag name, so /tags/search would shadow the page for #search.
+ */
+router.get("/hashtags", protect, searchLimit, searchHashtags);
+router.get("/hashtags/trending", protect, getTrendingHashtags);
 
 router.get("/history", protect, getSearchHistory);
 router.post("/history", protect, historyWriteLimit, addSearchHistory);

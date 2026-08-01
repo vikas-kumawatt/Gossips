@@ -3,11 +3,15 @@ import { Search, X } from "lucide-react";
 import { Icons } from "./icons";
 
 /**
- * Recent searches — the list shown while the search box is empty.
+ * Recent searches — the whole body of the search view before you type.
  *
  * Two kinds of row: a term you searched, which re-runs it, and a profile you
- * opened from results, which goes back to it. Renders nothing at all when the
- * history is empty, so the follow suggestions below take over the space.
+ * opened from results, which goes back to it.
+ *
+ * It used to return null when empty, which was right when follow suggestions
+ * sat underneath and could take the space. Now that opening the search box is
+ * its own view, an empty history has to say so — a blank screen after a tap
+ * reads as a page that failed to load.
  *
  * @param {Array}  entries    [{ _id, kind, query, user }]
  * @param {(text: string) => void} onSelectQuery
@@ -26,11 +30,17 @@ const RecentSearches = ({ entries, loading, onSelectQuery, onSelectUser, onRemov
     );
   }
 
-  if (!entries.length) return null;
+  if (!entries.length) {
+    return (
+      <div className="py-20 text-center">
+        <p className="text-[15px] text-neutral-500">Search for posts and people</p>
+      </div>
+    );
+  }
 
   return (
-    <section className="mt-4">
-      <div className="flex items-center justify-between px-1">
+    <section className="mt-3">
+      <div className="flex items-center justify-between px-1 py-1">
         <h2 className="text-[15px] font-semibold text-white">Recent</h2>
         {confirmingClear ? (
           <div className="flex items-center gap-3 text-[13px]">
