@@ -10,6 +10,7 @@ import AppSettings, {
   EDITABLE_SETTINGS,
   SETTINGS_KEY,
   normalizeReservedUsernames,
+  normalizeBlockedHashtags,
 } from "../models/AppSettings.js";
 import { getSettings, invalidateSettingsCache } from "../utils/settings.js";
 import { recordAudit } from "../utils/audit.js";
@@ -17,6 +18,7 @@ import { getReasonLabelServer } from "../utils/reportCategories.js";
 import { escapeRegex } from "../utils/respond.js";
 import { roleOf } from "../utils/roles.js";
 import { listBuiltInReservedUsernames } from "../utils/reservedUsernames.js";
+import { listBuiltInBlockedHashtags } from "../utils/blockedHashtags.js";
 import { del, CacheKeys } from "../utils/cache.js";
 
 const ADMIN_USER_SELECT =
@@ -536,16 +538,40 @@ export const listReports = async (req, res) => {
 
     const settings = await getSettings();
 
-    // How many total reports each of these targets has drawn — one report is
-    // noise, eight is a pattern.
-    const grouped = await Report.aggregate([
-      { $match: { targetId: { $in: reports.map((r) => r.targetId).filter(Boolean) } } },
-      { $group: { _id: "$targetId", count: { $sum: 1 } } },
+    /*
+     * How many total reports each of these targets has drawn — one report is
+     * noise, eight is a pattern.
+     *
+     * Two groupings, because not every target is a document. Conversations and
+     * hashtags have no `targetId` and are keyed by `targetKey`; counting only
+     * by id meant every hashtag report read as its first, so a tag could never
+     * cross the auto-flag threshold no matter how many people reported it.
+     */
+    const targetIds = reports.map((r) => r.targetId).filter(Boolean);
+    const targetKeys = reports.filter((r) => !r.targetId && r.targetKey).map((r) => r.targetKey);
+
+    const [groupedById, groupedByKey] = await Promise.all([
+      targetIds.length
+        ? Report.aggregate([
+            { $match: { targetId: { $in: targetIds } } },
+            { $group: { _id: "$targetId", count: { $sum: 1 } } },
+          ])
+        : [],
+      targetKeys.length
+        ? Report.aggregate([
+            { $match: { targetId: null, targetKey: { $in: targetKeys } } },
+            { $group: { _id: "$targetKey", count: { $sum: 1 } } },
+          ])
+        : [],
     ]);
-    const countByTarget = new Map(grouped.map((g) => [g._id.toString(), g.count]));
+
+    const countByTarget = new Map(groupedById.map((g) => [g._id.toString(), g.count]));
+    const countByKey = new Map(groupedByKey.map((g) => [g._id, g.count]));
 
     const enriched = reports.map((r) => {
-      const targetReports = r.targetId ? countByTarget.get(r.targetId.toString()) || 1 : 1;
+      const targetReports = r.targetId
+        ? countByTarget.get(r.targetId.toString()) || 1
+        : (r.targetKey && countByKey.get(r.targetKey)) || 1;
       return {
         ...r,
         reasonLabel: getReasonLabelServer(r.category, r.subcategory),
@@ -754,6 +780,7 @@ export const readSettings = async (req, res) => {
       // Read-only, and sent alongside the editable list so an admin can see
       // what's already covered instead of re-reserving a name by guesswork.
       builtInReservedUsernames: listBuiltInReservedUsernames(),
+      builtInBlockedHashtags: listBuiltInBlockedHashtags(),
     });
   } catch (error) {
     console.error("readSettings error:", error);
@@ -779,6 +806,9 @@ export const updateSettings = async (req, res) => {
         if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
       } else if (type === "usernameList") {
         value = normalizeReservedUsernames(raw);
+        if (value === null) continue;
+      } else if (type === "tagList") {
+        value = normalizeBlockedHashtags(raw);
         if (value === null) continue;
       } else if (typeof raw !== "string") {
         continue;

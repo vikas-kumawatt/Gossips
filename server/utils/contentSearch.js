@@ -35,7 +35,7 @@ const FROM_PROFILES = new Set(["anyone", "following", "user"]);
 const DATE_PRESETS = new Set(["all", ...Object.keys(DATE_WINDOWS_MS)]);
 
 /** Authors whose content is never returned by a discovery surface. */
-const ACTIVE_ACCOUNT_STATUSES = { $nin: ["deleted", "deactivated", "suspended", "locked"] };
+export const ACTIVE_ACCOUNT_STATUSES = { $nin: ["deleted", "deactivated", "suspended", "locked"] };
 
 /**
  * `?q=a&q=b` arrives as an array and `?q[x]=y` as an object; neither has a
@@ -212,7 +212,7 @@ const buildAuthorConditions = ({ field, authorId, from, followingIds, hiddenAuth
  * Suspended and deleted accounts drop out of search entirely — search is a
  * discovery surface, and user discovery already excludes them.
  */
-const authorVisibilityMatch = ({ prefix, authorField, viewerId, followingIds }) => ({
+export const authorVisibilityMatch = ({ prefix, authorField, viewerId, followingIds }) => ({
   [`${prefix}.accountStatus`]: ACTIVE_ACCOUNT_STATUSES,
   $or: [
     { [`${prefix}.isPrivate`]: { $ne: true } },
@@ -232,6 +232,10 @@ export const buildPostSearchPipeline = ({
   viewerId,
   filters,
   contentRegex,
+  // An extra equality folded into the first $match. The hashtag page is the
+  // same query as a search with no text: same visibility rules, same cursor,
+  // different predicate.
+  extraMatch = {},
   cursorMatch,
   authorId,
   followingIds,
@@ -253,6 +257,7 @@ export const buildPostSearchPipeline = ({
         // A scheduled post is stored as a draft until it goes out, so this one
         // exclusion covers both.
         isDraft: { $ne: true },
+        ...extraMatch,
         ...(contentRegex ? { content: contentRegex } : {}),
         // Posts carrying a parent are replies in the legacy sense; excluded
         // alongside Comments when the viewer asked for no replies.
@@ -286,6 +291,7 @@ export const buildReplySearchPipeline = ({
   viewerId,
   filters,
   contentRegex,
+  extraMatch = {},
   cursorMatch,
   authorId,
   followingIds,
@@ -305,6 +311,7 @@ export const buildReplySearchPipeline = ({
       $match: {
         isDeleted: { $ne: true },
         isScheduled: { $ne: true },
+        ...extraMatch,
         ...(contentRegex ? { content: contentRegex } : {}),
         ...buildDateMatch(filters),
         ...buildCountMatch(filters),

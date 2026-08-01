@@ -8,6 +8,7 @@ import Repost from "../models/Repost.js";
 import User from "../models/User.js";
 import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
+import UserSettings from "../models/UserSettings.js";
 import { io, getUserSocket } from "../server.js";
 import {
   buildCursorPageInfo,
@@ -17,6 +18,7 @@ import {
 } from "../utils/cursorPagination.js";
 import { followListPage, normalizeFollowListSort } from "../utils/followList.js";
 import { decorateContent } from "../utils/attachments.js";
+import { indexContent, notifyMentions } from "../utils/contentIndex.js";
 import {
   CHANGE_WINDOW_MS,
   HOLD_MS,
@@ -134,7 +136,19 @@ export const setupProfile = async (req, res) => {
 
     const updateObj = {};
     if (cleanName !== undefined) updateObj.name = cleanName;
-    if (bio !== undefined) updateObj.bio = bio;
+
+    /*
+     * A bio can @mention people, and the same permission rules apply as
+     * anywhere else. Resolved here so the profile renderer has the allowed set
+     * without re-deriving it per view. Hashtags in a bio aren't indexed — a bio
+     * isn't content, and letting it feed the tag pages is a spam vector.
+     */
+    let bioMentions = null;
+    if (bio !== undefined) {
+      updateObj.bio = bio;
+      bioMentions = await indexContent(bio, req.user._id);
+      updateObj.bioMentions = bioMentions.mentionIds;
+    }
     if (link !== undefined) updateObj.link = link;
     if (isPrivate !== undefined)
       updateObj.isPrivate = isPrivate === "true" || isPrivate === true;
@@ -204,6 +218,12 @@ export const setupProfile = async (req, res) => {
       }
     }
 
+    // Read before the write, so "who is newly mentioned" is answerable.
+    const existingBioMentions =
+      bio === undefined
+        ? null
+        : (await User.findById(req.user).select("bioMentions").lean())?.bioMentions;
+
     const updatedUser = await User.findByIdAndUpdate(req.user, updateObj, {
       runValidators: true,
       new: true,
@@ -214,6 +234,21 @@ export const setupProfile = async (req, res) => {
      * populated, and AUTHOR_SELECT includes `name`, so a rename that only
      * cleared the profile key left your own posts listed under the old name.
      */
+    /*
+     * Only the newly added ones. Editing a typo elsewhere in the bio must not
+     * re-notify everyone it names, which is otherwise a way to ping someone
+     * as often as you like.
+     */
+    if (bioMentions) {
+      const before = new Set((existingBioMentions || []).map(String));
+      await notifyMentions({
+        mentions: bioMentions.mentions.filter((m) => !before.has(String(m._id))),
+        authorId: req.user._id,
+        entity: null,
+        entityType: undefined,
+      });
+    }
+
     await del(CacheKeys.profile(updatedUser.username));
     await del(CacheKeys.userPosts(updatedUser.username));
 
@@ -239,7 +274,10 @@ export const getUserProfile = async (req, res) => {
 
     const profileData = await getOrSet(CacheKeys.profile(username), 60, async () => {
       const profile = await User.findOne({ username })
-        .select("username name profilePic bio link isVerified verificationBadge isPrivate counts createdAt")
+        .select(
+          "username name profilePic bio bioMentions link isVerified verificationBadge isPrivate counts createdAt"
+        )
+        .populate("bioMentions", "username")
         .lean();
 
       if (!profile) return null;
@@ -272,6 +310,11 @@ export const getUserProfile = async (req, res) => {
         name: profile.name || "",
         profilePic: profile.profilePic,
         bio: profile.bio || "",
+        /*
+         * The handles in the bio whose owners permitted the mention. The
+         * renderer links these and leaves any other @word as plain text.
+         */
+        bioMentionUsernames: (profile.bioMentions || []).map((u) => u.username).filter(Boolean),
         link: profile.link || "",
         isVerified: Boolean(
           profile.isVerified || (profile.verificationBadge && profile.verificationBadge !== "none")
@@ -1411,5 +1454,76 @@ export const changeUsername = async (req, res) => {
   } catch (error) {
     console.error("changeUsername error:", error);
     return res.status(500).json({ error: "Failed to change username" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Privacy settings
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The subset of UserSettings.privacy this app currently exposes.
+ *
+ * An allow-list rather than a pass-through: `privacy` holds two dozen fields,
+ * most of them for features that don't exist yet, and a PATCH that accepts
+ * whatever it's given would let a crafted request write all of them.
+ */
+const EDITABLE_PRIVACY = {
+  whoCanMention: ["everyone", "following", "none"],
+};
+
+/** GET /user/privacy-settings */
+export const getPrivacySettings = async (req, res) => {
+  try {
+    const settings = await UserSettings.findOne({ user: req.user._id })
+      .select("privacy")
+      .lean();
+
+    const privacy = settings?.privacy || {};
+    return res.status(200).json({
+      // Defaults, not undefined: an account created before a setting existed
+      // has no value for it, and the client shouldn't have to know that.
+      whoCanMention: privacy.whoCanMention || "everyone",
+    });
+  } catch (error) {
+    console.error("getPrivacySettings error:", error);
+    return res.status(500).json({ error: "Failed to load settings" });
+  }
+};
+
+/** PATCH /user/privacy-settings */
+export const updatePrivacySettings = async (req, res) => {
+  try {
+    const updates = {};
+    for (const [key, allowed] of Object.entries(EDITABLE_PRIVACY)) {
+      if (!(key in req.body)) continue;
+      const value = req.body[key];
+      if (!allowed.includes(value)) {
+        return res.status(400).json({ error: `Invalid value for ${key}` });
+      }
+      updates[`privacy.${key}`] = value;
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ error: "No valid settings to update" });
+    }
+
+    // Upsert: the settings row is created at signup, but an account that
+    // predates that shouldn't be unable to change its own settings.
+    const settings = await UserSettings.findOneAndUpdate(
+      { user: req.user._id },
+      { $set: updates, $setOnInsert: { user: req.user._id } },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+    )
+      .select("privacy")
+      .lean();
+
+    return res.status(200).json({
+      message: "Settings saved",
+      whoCanMention: settings?.privacy?.whoCanMention || "everyone",
+    });
+  } catch (error) {
+    console.error("updatePrivacySettings error:", error);
+    return res.status(500).json({ error: "Failed to save settings" });
   }
 };

@@ -90,6 +90,12 @@ const userSchema = new Schema(
 
     // ── Profile ───────────────────────────────────────────────
     bio:        { type: String, default: "", maxlength: 250 },
+    /*
+     * Accounts @mentioned in the bio who permit it, resolved when the bio is
+     * saved. Same contract as Post.mentions: a handle not in here renders as
+     * plain text, which is what "doesn't allow @mentions" looks like.
+     */
+    bioMentions: [{ type: Schema.Types.ObjectId, ref: "User" }],
     link: {
       type: String,
       default: "",

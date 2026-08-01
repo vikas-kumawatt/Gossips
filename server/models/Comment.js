@@ -45,8 +45,23 @@ const commentSchema = new Schema(
       enum: ["anyone", "followers", "following", "mentioned"],
       default: "anyone",
     },
-    // Users @mentioned in the content (resolved at create time).
+    /*
+     * Accounts @mentioned here, resolved and permission-checked at write time.
+     *
+     * Only the ones who *allow* the mention are stored, which makes this list
+     * do double duty: it enforces whoCanReply === "mentioned", and it's what
+     * the renderer links. A handle in the text that isn't in this list renders
+     * as plain grey text — that's how "this person doesn't allow @mentions"
+     * looks, rather than a link that goes somewhere they didn't consent to.
+     */
     mentions: [{ type: Schema.Types.ObjectId, ref: "User" }],
+
+    /*
+     * Hashtags, lowercased, blocked ones already removed. Denormalised out of
+     * the content so the tag page is an index lookup rather than a regex scan
+     * of every post ever written.
+     */
+    hashtags: { type: [String], default: [], lowercase: true },
 
     // Author's own disclosure that this was made with AI. See Post.isAiGenerated.
     isAiGenerated: { type: Boolean, default: false },
@@ -92,6 +107,8 @@ commentSchema.index({ parent: 1, createdAt: 1 });
 
 // Author's comment history
 commentSchema.index({ author: 1, createdAt: -1 });
+// The hashtag page's replies tab.
+commentSchema.index({ hashtags: 1, createdAt: -1 });
 
 // Content search across all replies. Mirrors Post's { isDeleted, createdAt }
 // index: search has no author to narrow by, so a date-windowed query ("past 24
@@ -104,7 +121,7 @@ commentSchema.index({ scheduleStatus: 1, scheduledFor: 1 });
 // Mirrors Post.editContent — see the notes there.
 export const MAX_EDIT_HISTORY = 20;
 
-commentSchema.methods.editContent = async function (newContent, mentions) {
+commentSchema.methods.editContent = async function (newContent, mentions, hashtags) {
   this.editHistory.push({
     content: this.content || "",
     editedAt: this.editedAt || this.createdAt,
@@ -118,6 +135,7 @@ commentSchema.methods.editContent = async function (newContent, mentions) {
   }
   this.content = newContent;
   this.mentions = mentions;
+  if (Array.isArray(hashtags)) this.hashtags = hashtags;
   this.isEdited = true;
   this.editedAt = new Date();
   await this.save();

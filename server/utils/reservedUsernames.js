@@ -42,6 +42,10 @@ const RESERVED_USERNAMES = new Set([
   "privacy",
   "cookies",
   "ai-labels",
+  "tag",
+  "tags",
+  "hashtag",
+  "hashtags",
 
   // ── 2. Platform identity and support-desk impersonation ───────────────────
   "gossip",

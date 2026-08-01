@@ -89,6 +89,24 @@ const parseReserved = (text) =>
 
 const formatReserved = (list) => (Array.isArray(list) ? [...list].sort().join("\n") : "");
 
+/*
+ * Hashtags follow different rules from usernames: one character is fine, up to
+ * a hundred, and a tag must contain a non-digit — `#2024` is a year. Mirrors
+ * normalizeBlockedHashtags on the server so the counter below and the list
+ * that actually gets stored are the same list.
+ */
+const parseTags = (text) =>
+  [
+    ...new Set(
+      text
+        .split(/[\s,#]+/)
+        .map((entry) => entry.trim().toLowerCase())
+        .filter((entry) => /^[a-z0-9_]{1,100}$/.test(entry) && !/^\d+$/.test(entry))
+    ),
+  ]
+    .sort()
+    .slice(0, 2000);
+
 const AdminSettings = () => {
   const { session } = useOutletContext();
   const [settings, setSettings] = useState(null);
@@ -105,6 +123,9 @@ const AdminSettings = () => {
   // a code change with a code review, not a form submission.
   const [builtIn, setBuiltIn] = useState([]);
   const [showBuiltIn, setShowBuiltIn] = useState(false);
+  const [tagText, setTagText] = useState("");
+  const [builtInTags, setBuiltInTags] = useState([]);
+  const [showBuiltInTags, setShowBuiltInTags] = useState(false);
 
   const readOnly = !session?.isSuperAdmin;
 
@@ -117,6 +138,8 @@ const AdminSettings = () => {
       setDraft(res.settings);
       setReservedText(formatReserved(res.settings.reservedUsernames));
       setBuiltIn(res.builtInReservedUsernames || []);
+      setTagText(formatReserved(res.settings.blockedHashtags));
+      setBuiltInTags(res.builtInBlockedHashtags || []);
     } catch {
       setError("Couldn't load settings.");
     } finally {
@@ -131,6 +154,9 @@ const AdminSettings = () => {
   const reservedDirty =
     settings && formatReserved(parseReserved(reservedText)) !== formatReserved(settings.reservedUsernames);
 
+  const tagsDirty =
+    settings && formatReserved(parseTags(tagText)) !== formatReserved(settings.blockedHashtags);
+
   const dirty =
     (draft &&
       settings &&
@@ -140,9 +166,11 @@ const AdminSettings = () => {
           k !== "updatedBy" &&
           // Compared separately above; an array is never === its own copy.
           k !== "reservedUsernames" &&
+          k !== "blockedHashtags" &&
           draft[k] !== settings[k]
       )) ||
-    reservedDirty;
+    reservedDirty ||
+    tagsDirty;
 
   const save = async () => {
     setSaving(true);
@@ -154,13 +182,15 @@ const AdminSettings = () => {
       for (const { key } of NUMBERS) payload[key] = Number(draft[key]);
       payload.maintenanceMessage = String(draft.maintenanceMessage || "");
       payload.reservedUsernames = parseReserved(reservedText);
+      payload.blockedHashtags = parseTags(tagText);
 
       const res = await adminAPI.updateSettings(payload);
       setSettings(res.settings);
       setDraft(res.settings);
       // Echo back what the server kept — it drops anything that couldn't be a
-      // username, so the box shouldn't keep showing the rejects.
+      // username or a tag, so the boxes shouldn't keep showing the rejects.
       setReservedText(formatReserved(res.settings.reservedUsernames));
+      setTagText(formatReserved(res.settings.blockedHashtags));
       toast.success(res.message);
     } catch (e) {
       toast.error(e.response?.data?.error || "Couldn't save settings");
@@ -193,6 +223,7 @@ const AdminSettings = () => {
               onClick={() => {
                 setDraft(settings);
                 setReservedText(formatReserved(settings.reservedUsernames));
+                setTagText(formatReserved(settings.blockedHashtags));
               }}
               disabled={saving}
             >
@@ -319,6 +350,60 @@ const AdminSettings = () => {
                   </div>
                 </div>
               </>
+            )}
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title="Blocked hashtags"
+        subtitle="Tags the app won't index or link, on top of the built-in list"
+      >
+        <p className="text-[12px] text-neutral-500 mb-2">
+          One per line, or comma-separated; the # is optional. A blocked tag
+          doesn't block the post — it publishes as normal, but the tag renders
+          as plain text, isn't indexed, and its page says it's restricted.
+          Losing someone's whole post over one word is worse than the word.
+        </p>
+        <textarea
+          value={tagText}
+          onChange={(e) => setTagText(e.target.value)}
+          disabled={readOnly}
+          spellCheck={false}
+          placeholder={"somebrand\nsomecampaign"}
+          className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded-xl p-3 text-[13px] text-white outline-none resize-y font-mono focus:border-neutral-600 disabled:opacity-60"
+        />
+        <p className="text-[12px] text-neutral-500 mt-2">
+          {parseTags(tagText).length} blocked · 2000 max
+        </p>
+
+        {builtInTags.length > 0 && (
+          <div className="mt-4 border-t border-neutral-800 pt-3">
+            <button
+              type="button"
+              onClick={() => setShowBuiltInTags((v) => !v)}
+              className="flex w-full items-center justify-between text-left cursor-pointer"
+            >
+              <span className="text-[13px] font-medium text-white">
+                Blocked in code ({builtInTags.length})
+              </span>
+              <span className="text-[12px] text-neutral-500">
+                {showBuiltInTags ? "Hide" : "Show"}
+              </span>
+            </button>
+            {showBuiltInTags && (
+              <div className="mt-2 max-h-48 overflow-y-auto custom-scrollbar rounded-xl bg-neutral-900 p-3">
+                <div className="flex flex-wrap gap-1.5">
+                  {builtInTags.map((name) => (
+                    <span
+                      key={name}
+                      className="rounded-md bg-neutral-800 px-1.5 py-0.5 font-mono text-[11px] text-neutral-400"
+                    >
+                      #{name}
+                    </span>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         )}

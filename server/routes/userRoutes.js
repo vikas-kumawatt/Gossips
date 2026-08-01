@@ -28,6 +28,8 @@ import {
   getUsernameAvailability,
   getUsernameStatus,
   changeUsername,
+  getPrivacySettings,
+  updatePrivacySettings,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import upload from "../config/multerConfig.js";
@@ -68,6 +70,9 @@ router.get("/search", protect, getUsers);
  */
 router.get("/username-availability", protect, availabilityLimiter, getUsernameAvailability);
 router.get("/username-status", protect, getUsernameStatus);
+// Hyphenated, so neither can be mistaken for a profile route.
+router.get("/privacy-settings", protect, getPrivacySettings);
+router.patch("/privacy-settings", protect, updatePrivacySettings);
 router.patch("/username", protect, changeLimiter, changeUsername);
 router.get("/users", protect, getUsers);
 router.get("/muted", protect, getMutedUsers);

@@ -25,8 +25,8 @@ import { decorateContent, openPollClock, parseAttachments } from "../utils/attac
 import { loadRepostFeedEntries, mergeFeedEntries } from "../utils/feedReposts.js";
 import { normalizeMedia } from "../utils/mediaTypes.js";
 import { getOrSet, del, CacheKeys } from "../utils/cache.js";
-import { resolveMentions } from "../utils/mentions.js";
-import { parseHashtags } from "../utils/hashtags.js";
+import { indexContent, bumpHashtagCounts, hashtagDelta } from "../utils/contentIndex.js";
+import { parseHashtags } from "../utils/richText.js";
 import { MAX_CONTENT_LENGTH, buildVersionList } from "../utils/editHistory.js";
 import { parseBooleanFlag } from "../utils/booleanFlag.js";
 import {
@@ -59,7 +59,7 @@ const populatePost = (postId) =>
     })
     .populate({
       path: "quotedComment",
-      select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
+      select: "content media poll location author createdAt post counts mentions isEdited editedAt isAiGenerated",
       populate: { path: "author", select: AUTHOR_SELECT },
     })
     .lean();
@@ -217,6 +217,8 @@ export const createPost = async (req, res) => {
     }
     const media = attached.media.length ? attached.media : reused.media;
 
+    const composed = await indexContent(content || "", userId);
+
     const newPost = {
       author: userId,
       content: content || "",
@@ -227,7 +229,11 @@ export const createPost = async (req, res) => {
       isQuoteRepost: isQuoteRepost || false,
       isQuoteComment: isQuoteComment || false,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
-      mentions: await resolveMentions(content || ""),
+      // Permission-checked mentions and unblocked tags. Resolved now, at
+      // write time, even for a scheduled post — the rules that applied when
+      // you composed it are the ones that count.
+      mentions: composed.mentionIds,
+      hashtags: composed.hashtags,
       isAiGenerated: parseBooleanFlag(isAiGenerated),
       media,
       location: attached.location,
@@ -317,6 +323,8 @@ export const saveDraft = async (req, res) => {
     }
     const media = attached.media.length ? attached.media : reused.media;
 
+    const draftComposed = await indexContent(content || "", userId);
+
     const newDraft = {
       author: userId,
       content: content || "",
@@ -325,7 +333,8 @@ export const saveDraft = async (req, res) => {
       isQuoteRepost: isQuoteRepost || false,
       isQuoteComment: isQuoteComment || false,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
-      mentions: await resolveMentions(content || ""),
+      mentions: draftComposed.mentionIds,
+      hashtags: draftComposed.hashtags,
       media,
       location: attached.location,
       // Left unopened — a draft's poll starts counting down when it's posted,
@@ -379,7 +388,7 @@ export const getDrafts = async (req, res) => {
       })
       .populate({
         path: "quotedComment",
-        select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
+        select: "content media poll location author createdAt post counts mentions isEdited editedAt isAiGenerated",
         populate: { path: "author", select: AUTHOR_SELECT },
       })
       .sort({ createdAt: -1 })
@@ -587,12 +596,12 @@ export const getHomeFeed = async (req, res) => {
           .populate("author", AUTHOR_SELECT)
           .populate({
             path: "quotedPost",
-            select: "_id author content media poll location counts isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
+            select: "_id author content media poll location counts mentions isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .populate({
             path: "quotedComment",
-            select: "_id content media poll location counts author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
+            select: "_id content media poll location counts mentions author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .lean()
@@ -751,7 +760,7 @@ export const getUserPosts = async (req, res) => {
         })
         .populate({
           path: "quotedComment",
-          select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
+          select: "content media poll location author createdAt post counts mentions isEdited editedAt isAiGenerated",
           populate: { path: "author", select: AUTHOR_SELECT },
         })
         .sort({ createdAt: -1 })
@@ -842,7 +851,7 @@ export const getPost = async (req, res) => {
       })
       .populate({
         path: "quotedComment",
-        select: "content media poll location author createdAt post counts isEdited editedAt isAiGenerated",
+        select: "content media poll location author createdAt post counts mentions isEdited editedAt isAiGenerated",
         populate: { path: "author", select: AUTHOR_SELECT },
       })
       .lean();
@@ -985,7 +994,8 @@ export const deletePost = async (req, res) => {
     const { id } = req.params;
     const userId = req.user.id;
 
-    const post = await Post.findById(id).select("author isDeleted isDraft scheduleStatus").lean();
+    const post = await Post.findById(id)// hashtags: without it the decrement below silently does nothing.
+      .select("author isDeleted isDraft scheduleStatus hashtags").lean();
     if (!post) return res.status(404).json({ message: "Post not found" });
     if (post.author.toString() !== userId) {
       return res.status(403).json({ message: "You are not authorized to delete this post" });
@@ -1003,7 +1013,19 @@ export const deletePost = async (req, res) => {
     const repostDocs = await Post.find({ quotedPost: id, isQuoteRepost: false }).select("_id").lean();
     repostDocs.forEach((r) => relatedPostIds.push(r._id.toString()));
 
+    /*
+     * Read the replies' tags before the rows go. deleteComment is careful about
+     * this; the cascade here was not, so deleting a post left every tag its
+     * thread used counted forever.
+     */
+    const goneReplyTags = (
+      await Comment.find({ post: { $in: relatedPostIds }, isScheduled: { $ne: true } })
+        .select("hashtags")
+        .lean()
+    ).flatMap((c) => c.hashtags || []);
+
     await Comment.deleteMany({ post: { $in: relatedPostIds } });
+    bumpHashtagCounts(goneReplyTags, -1);
     await Notification.deleteMany({ entity: { $in: relatedPostIds }, entityType: "Post" });
     // Votes outlive the post otherwise, and the unique index would then stop
     // anyone voting again if the id were ever reused.
@@ -1014,6 +1036,8 @@ export const deletePost = async (req, res) => {
     // they actually have.
     if (!post.isDraft) {
       await User.updateOne({ _id: userId }, { $inc: { "counts.posts": -1 } });
+      // Same reasoning: only a post that was counted gives its tags back.
+      bumpHashtagCounts(post.hashtags || [], -1);
     }
 
     await del(CacheKeys.userPosts(req.user.username));
@@ -1419,7 +1443,22 @@ export const editPost = async (req, res) => {
     // otherwise be marked "edited" for re-submitting identical visible text.
     const contentChanged = (post.content || "").trim() !== trimmed;
     if (contentChanged) {
-      await post.editContent(trimmed, await resolveMentions(trimmed));
+      const before = post.hashtags || [];
+      const edited = await indexContent(trimmed, post.author?._id || post.author);
+      await post.editContent(trimmed, edited.mentionIds, edited.hashtags);
+
+      /*
+       * Only the difference. A post that keeps #coffee through an edit must
+       * not count for it twice, and one that loses it has to give the count
+       * back.
+       *
+       * No new mention notifications on edit, deliberately: otherwise adding a
+       * comma to a post re-pings everyone in it, and editing becomes a way to
+       * notify someone repeatedly.
+       */
+      const { added, removed } = hashtagDelta(before, edited.hashtags);
+      bumpHashtagCounts(added, 1);
+      bumpHashtagCounts(removed, -1);
     }
 
     // The AI label rides along with the edit but is tracked separately: adding

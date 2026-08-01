@@ -14,6 +14,9 @@ export const REPORT_TARGET_TYPES = [
   "message",
   "conversation",
   "user",
+  // Not a document — keyed by the tag itself on Report.targetKey, the same way
+  // a conversation is keyed by its conversation id.
+  "hashtag",
 ];
 
 // `appliesTo` is the list of target types the category is offered for.
@@ -23,7 +26,7 @@ export const REPORT_CATEGORIES = [
     id: "spam",
     label: "Spam",
     description: "Repetitive, misleading or bot-driven content",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "unwanted_commercial", label: "Unwanted commercial content" },
       { id: "bots_fake_engagement", label: "Bots or fake engagement" },
@@ -35,7 +38,7 @@ export const REPORT_CATEGORIES = [
     id: "nudity",
     label: "Nudity or sexual activity",
     description: "Sexual content, or content shared without consent",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "adult_nudity", label: "Adult nudity or sexual acts" },
       { id: "sexual_services", label: "Sexual services or solicitation" },
@@ -47,7 +50,7 @@ export const REPORT_CATEGORIES = [
     id: "hate",
     label: "Hate speech or symbols",
     description: "Attacks on people based on who they are",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "slurs", label: "Slurs or degrading language" },
       { id: "hate_symbols", label: "Hate symbols or imagery" },
@@ -59,7 +62,7 @@ export const REPORT_CATEGORIES = [
     id: "violence",
     label: "Violence or dangerous organisations",
     description: "Threats, graphic violence or extremism",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "violent_threats", label: "Threats of violence" },
       { id: "graphic_violence", label: "Extremely graphic violence" },
@@ -71,7 +74,7 @@ export const REPORT_CATEGORIES = [
     id: "bullying",
     label: "Bullying or harassment",
     description: "Targeting someone to demean or intimidate them",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "targeted_harassment", label: "Harassing me or someone I know" },
       { id: "unwanted_contact", label: "Unwanted or repeated contact" },
@@ -83,7 +86,7 @@ export const REPORT_CATEGORIES = [
     id: "false_info",
     label: "False information",
     description: "Misleading claims or manipulated media",
-    appliesTo: ["post", "comment", "user"],
+    appliesTo: ["post", "comment", "user", "hashtag"],
     subcategories: [
       { id: "health_misinformation", label: "Health misinformation" },
       { id: "election_misinformation", label: "Election or political misinformation" },
@@ -95,7 +98,7 @@ export const REPORT_CATEGORIES = [
     id: "scam",
     label: "Scam or fraud",
     description: "Attempts to trick people out of money or data",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "phishing", label: "Phishing or stealing account details" },
       { id: "fake_giveaway", label: "Fake giveaway or prize" },
@@ -108,7 +111,7 @@ export const REPORT_CATEGORIES = [
     id: "illegal",
     label: "Sale of illegal or regulated goods",
     description: "Buying or selling restricted items",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "drugs", label: "Drugs" },
       { id: "weapons", label: "Weapons or firearms" },
@@ -120,7 +123,7 @@ export const REPORT_CATEGORIES = [
     id: "self_harm",
     label: "Suicide, self-injury or eating disorders",
     description: "Content that could put someone at risk",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     subcategories: [
       { id: "suicide_self_injury", label: "Suicide or self-injury" },
       { id: "eating_disorder", label: "Disordered eating" },
@@ -131,7 +134,7 @@ export const REPORT_CATEGORIES = [
     id: "ip",
     label: "Intellectual property",
     description: "Use of your copyright or trademark",
-    appliesTo: ["post", "comment", "user"],
+    appliesTo: ["post", "comment", "user", "hashtag"],
     subcategories: [
       { id: "copyright", label: "Copyright infringement" },
       { id: "trademark", label: "Trademark infringement" },
@@ -159,7 +162,7 @@ export const REPORT_CATEGORIES = [
     id: "something_else",
     label: "Something else",
     description: "Tell us what's wrong",
-    appliesTo: ["post", "comment", "message", "conversation", "user"],
+    appliesTo: ["post", "comment", "message", "conversation", "user", "hashtag"],
     // No subcategories — the sheet goes straight to a free-text step.
     subcategories: [],
     requiresDetails: true,

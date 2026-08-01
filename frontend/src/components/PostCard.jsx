@@ -1252,7 +1252,7 @@ const PostCard = ({
               </div>
               <div className="mt-1">
                 {data?.location && <LocationChip location={data.location} />}
-                <PostContent content={content} />
+                <PostContent content={content} mentionUsernames={data?.mentionUsernames} />
                 {data?.poll?.question && (
                   <PollCard
                     type={isComment ? "comment" : "post"}
@@ -1408,7 +1408,7 @@ const PostCard = ({
                   </div>
                 )}
                 {data?.location && <LocationChip location={data.location} />}
-                <PostContent content={content} />
+                <PostContent content={content} mentionUsernames={data?.mentionUsernames} />
                 {data?.poll?.question && (
                   <PollCard
                     type={isComment ? "comment" : "post"}

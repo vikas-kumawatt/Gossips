@@ -19,6 +19,7 @@ import SharedPostCard from "../components/Chat/SharedPostCard";
 import { toast } from "react-hot-toast";
 import EmojiPicker from "emoji-picker-react";
 import GifPicker from "../components/GifPicker";
+import RichText from "../components/RichText";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -2070,7 +2071,10 @@ const MessageBubble = ({ message, isOwn, msgIndex = 0, groupLength = 1 }) => {
                 : "text-[14.5px] leading-[1.45]"
             } ${hasMedia ? "mb-2" : ""}`}
           >
-            {getMessageContent(message)}
+            {/* No mentionUsernames: in a DM every handle links. It's a
+                shortcut to a profile, not a way to summon a stranger, so
+                nothing is gated and nobody is notified. */}
+            <RichText content={getMessageContent(message)} />
             {message.isEdited && (
               <span className="text-[11px] opacity-40 ml-1.5">edited</span>
             )}

@@ -60,6 +60,16 @@ const userSettingsSchema = new Schema(
       whoCanSeeLastSeen:      { type: String, enum: audienceEnum,        default: "everyone" },
       whoCanSeeReadReceipts:  { type: String, enum: audienceEnum,        default: "everyone" },
       whoCanSeeProfile:       { type: String, enum: profileAudienceEnum, default: "everyone" },
+      /*
+       * Who may @mention you, linking your profile from their posts, replies
+       * or bio. "following" means the accounts *you* follow — the setting
+       * belongs to the person being mentioned, so it reads as "people I've
+       * chosen to hear from".
+       *
+       * Checked when the mention is written, not when it's read: see
+       * utils/mentions.js for why.
+       */
+      whoCanMention:          { type: String, enum: ["everyone", "following", "none"], default: "everyone" },
       whoCanSeeFollowers:     { type: String, enum: profileAudienceEnum, default: "everyone" },
       whoCanSeeFollowing:     { type: String, enum: profileAudienceEnum, default: "everyone" },
       whoCanSeeStories: {

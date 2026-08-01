@@ -35,6 +35,7 @@ const RESERVED_PATHS = new Set([
   "privacy",
   "cookies",
   "ai-labels",
+  "tag",
 ]);
 
 // Long enough for any real link, short enough that a malformed payload can't be

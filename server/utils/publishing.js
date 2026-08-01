@@ -3,6 +3,7 @@ import Comment from "../models/Comment.js";
 import User from "../models/User.js";
 import { sendNotification } from "./notifications.js";
 import { del, CacheKeys } from "./cache.js";
+import { bumpHashtagCounts, notifyMentions } from "./contentIndex.js";
 
 /**
  * The side effects of a post or comment becoming visible.
@@ -11,6 +12,16 @@ import { del, CacheKeys } from "./cache.js";
  * drift — a scheduled post has to bump exactly the same counters and fire
  * exactly the same notifications as one posted by hand, just later.
  */
+
+/**
+ * `mentions` is stored as bare ids, but notifyMentions wants documents so it
+ * can filter by each recipient's notification settings without a lookup per
+ * person. One query.
+ */
+const hydrateMentions = async (ids = []) => {
+  if (!ids?.length) return [];
+  return User.find({ _id: { $in: ids } }).select("_id username").lean();
+};
 
 export const SCHEDULE_MAX_DAYS = 30;
 // A minute of slack: the picker's minute column means "now + a few seconds"
@@ -97,6 +108,20 @@ export const applyPostPublishEffects = async (post, { authorUsername } = {}) => 
     }
   }
 
+  /*
+   * Mentions and hashtags were resolved when the post was written — a
+   * scheduled post's permissions are the ones that applied when it was
+   * composed. What waits until publication is telling people, because a
+   * notification about something nobody can see yet is a broken link.
+   */
+  await notifyMentions({
+    mentions: await hydrateMentions(post.mentions),
+    authorId,
+    entity: post._id,
+    entityType: "Post",
+  });
+  bumpHashtagCounts(post.hashtags || [], 1);
+
   const username = authorUsername || (await User.findById(authorId).select("username").lean())?.username;
   if (username) await del(CacheKeys.userPosts(username)).catch(() => {});
 };
@@ -135,9 +160,25 @@ export const applyCommentPublishEffects = async (comment) => {
     });
   };
 
+  /*
+   * Mentions after the reply notifications, and passing `notified` through, so
+   * that replying to someone while also @mentioning them sends one
+   * notification rather than two about the same sentence.
+   */
+  const notifyMentioned = async () =>
+    notifyMentions({
+      mentions: await hydrateMentions(comment.mentions),
+      authorId,
+      entity: comment._id,
+      entityType: "Comment",
+      alreadyNotified: [...notified],
+    });
+
   // Top-level comment on the post → tell the post author.
   if (!parentId) {
     await notify(post?.author);
+    await notifyMentioned();
+    bumpHashtagCounts(comment.hashtags || [], 1);
     return;
   }
 
@@ -149,4 +190,7 @@ export const applyCommentPublishEffects = async (comment) => {
   // the pre-flattening behaviour); a reply made on another reply notifies only
   // the person answered.
   if (String(replyToId) === String(parentId)) await notify(post?.author);
+
+  await notifyMentioned();
+  bumpHashtagCounts(comment.hashtags || [], 1);
 };

@@ -6,7 +6,7 @@ import Repost from "../models/Repost.js";
 import UserRelation from "../models/UserRelation.js";
 import PollVote from "../models/PollVote.js";
 import { sendNotification } from "../utils/notifications.js";
-import { resolveMentions } from "../utils/mentions.js";
+import { indexContent, bumpHashtagCounts, hashtagDelta } from "../utils/contentIndex.js";
 import { MAX_CONTENT_LENGTH, buildVersionList } from "../utils/editHistory.js";
 import { parseBooleanFlag } from "../utils/booleanFlag.js";
 import {
@@ -85,6 +85,8 @@ export const replyOnPost = async (req, res) => {
     // stops a client anchoring under an arbitrary comment.
     const thread = parentId ? resolveReplyThread(replyTarget, parentId) : { parent: null, replyTo: null };
 
+    const composed = await indexContent(content || "", userId);
+
     const newComment = {
       content: content || "",
       post: postId,
@@ -92,7 +94,8 @@ export const replyOnPost = async (req, res) => {
       parent: thread.parent,
       replyTo: thread.replyTo,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
-      mentions: await resolveMentions(content || ""),
+      mentions: composed.mentionIds,
+      hashtags: composed.hashtags,
       isAiGenerated: parseBooleanFlag(isAiGenerated),
       media: attached.media,
       location: attached.location,
@@ -172,6 +175,8 @@ export const createNestedComment = async (req, res) => {
     // comment actually answered.
     const { parent: effectiveParent, replyTo } = resolveReplyThread(originalComment, commentId);
 
+    const replyComposed = await indexContent(content || "", userId);
+
     const newComment = {
       content: content || "",
       post: postId,
@@ -179,7 +184,8 @@ export const createNestedComment = async (req, res) => {
       parent: effectiveParent,
       replyTo,
       whoCanReply: normalizeWhoCanReply(whoCanReply),
-      mentions: await resolveMentions(content || ""),
+      mentions: replyComposed.mentionIds,
+      hashtags: replyComposed.hashtags,
       isAiGenerated: parseBooleanFlag(isAiGenerated),
       media: attached.media,
       location: attached.location,
@@ -527,7 +533,14 @@ export const editComment = async (req, res) => {
     // Only a genuine change counts — see the note in editPost about why this
     // compares trimmed-to-trimmed.
     if ((comment.content || "").trim() !== trimmed) {
-      await comment.editContent(trimmed, await resolveMentions(trimmed));
+      const before = comment.hashtags || [];
+      const edited = await indexContent(trimmed, comment.author?._id || comment.author);
+      await comment.editContent(trimmed, edited.mentionIds, edited.hashtags);
+
+      // Difference only, and no fresh mention notifications — see editPost.
+      const { added, removed } = hashtagDelta(before, edited.hashtags);
+      bumpHashtagCounts(added, 1);
+      bumpHashtagCounts(removed, -1);
     }
 
     // Toggling the AI disclosure isn't a change to what the comment says, so
@@ -547,7 +560,14 @@ export const editComment = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Comment updated",
-      comment: populated,
+      /*
+       * Decorated, like editPost's response. EditContentSheet merges this over
+       * the card's existing data, so an undecorated doc overwrites the
+       * projected poll with live vote counts, the normalised media with the raw
+       * array, and leaves `mentionUsernames` absent — which, because a missing
+       * key doesn't overwrite, silently kept the pre-edit mention links.
+       */
+      comment: await decorateContent(populated, req.user._id),
     });
   } catch (error) {
     console.error("editComment error:", error);
@@ -623,8 +643,20 @@ export const deleteComment = async (req, res) => {
     });
     const totalDeleted = allIds.length - scheduledCount;
 
+    /*
+     * Read the tags before the rows go. A deleted reply's hashtags have to
+     * give their counts back or trending slowly fills with tags nothing
+     * carries any more.
+     */
+    const goneTags = (
+      await Comment.find({ _id: { $in: allIds }, isScheduled: { $ne: true } })
+        .select("hashtags")
+        .lean()
+    ).flatMap((c) => c.hashtags || []);
+
     await Comment.deleteMany({ _id: { $in: allIds } });
     await Notification.deleteMany({ entity: { $in: allIds }, entityType: "Comment" });
+    bumpHashtagCounts(goneTags, -1);
     await PollVote.deleteMany({ target: { $in: allIds } });
 
     // Decrement reply counts on post and parent comment

@@ -7,6 +7,7 @@ import {
 } from "./dropdown-menu";
 import ResponsiveSheet from "./responsive-sheet";
 import useWindow from "../../hooks/UseWindow";
+import { Icons } from "../icons";
 
 export const ACTIVITY_SORT_OPTIONS = [
   {
@@ -44,6 +45,12 @@ const SortMenu = ({
   options = ACTIVITY_SORT_OPTIONS,
   label = "Sort",
   title = "Sort by",
+  /*
+   * The sort glyph, on by default. It lives here rather than at each call site
+   * so the four sort triggers in the app can't drift apart — and so adding a
+   * fifth gets it for free. Pass `icon={null}` for a text-only trigger.
+   */
+  icon = <Icons.sort className="h-[15px] w-[15px] shrink-0" />,
 }) => {
   const { windowSize } = useWindow();
   const isMobile = (windowSize.width ?? window.innerWidth) < 768;
@@ -52,9 +59,11 @@ const SortMenu = ({
   const trigger = (
     <button
       type="button"
-      className="text-[15px] font-medium text-white hover:text-neutral-300 transition-colors cursor-pointer"
+      aria-label={`${title}: ${label}`}
+      className="flex items-center gap-1.5 rounded-full px-2 py-1.5 text-[15px] font-medium text-white transition-colors hover:bg-neutral-800 hover:text-neutral-300 cursor-pointer"
     >
-      {label}
+      {icon}
+      <span>{label}</span>
     </button>
   );
 

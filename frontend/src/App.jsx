@@ -50,6 +50,7 @@ import {
 } from "./services/authSession";
 import "./services/api";
 import UnreadNotificationsSync from "./components/UnreadNotificationsSync";
+import HashtagPage from "./pages/HashtagPage";
 
 function App() {
   const [userAuth, setUserAuth] = useState({ token: null, savedPosts: [] });
@@ -131,6 +132,16 @@ function App() {
               />
               <Route path="signup" element={<UserAuthForm type="signup" />} />
               <Route path="login" element={<UserAuthForm type="login" />} />
+              {/* Before the ":profileId" catch-all, and "tag" is on the
+                  reserved-username list so it can never be a real profile. */}
+              <Route
+                path="/tag/:tag"
+                element={
+                  <ProtectedRoute>
+                    <HashtagPage />
+                  </ProtectedRoute>
+                }
+              />
               <Route path=":profileId" element={<ProfilePage />} />
               <Route
                 path="/:username/post/:Postid"

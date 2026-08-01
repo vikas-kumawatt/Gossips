@@ -6,11 +6,13 @@ import { Icons } from "../components/icons";
 import { UserContext } from "../contexts/UserContext";
 import InPageNavigation from "../components/InPageNavigation";
 import BlockedAccountsModal from "../components/BlockedAccountsModal";
+import MentionSettingsSheet from "../components/MentionSettingsSheet";
 
 const SettingsPage = () => {
   const { userAuth } = useContext(UserContext);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
+  const [isMentionsOpen, setIsMentionsOpen] = useState(false);
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
   const layoutContext = { openCreateModal, closeCreateModal };
@@ -37,7 +39,10 @@ const SettingsPage = () => {
               </label>
       </div>
 
-      <div className="flex relative w-full items-center gap-4 mb-4">
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer"
+        onClick={() => setIsMentionsOpen(true)}
+      >
         <Icons.mentions className="h-6 w-6" />
         <p className="text-md">Mentions</p>
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
@@ -203,6 +208,9 @@ const SettingsPage = () => {
         isOpen={isBlockedModalOpen}
         onClose={() => setIsBlockedModalOpen(false)}
       />
+      {isMentionsOpen && (
+        <MentionSettingsSheet onClose={() => setIsMentionsOpen(false)} />
+      )}
     </div>
   );
 };

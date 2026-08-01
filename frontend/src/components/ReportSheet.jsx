@@ -26,6 +26,7 @@ const SUBJECT_NOUN = {
   message: "this message",
   conversation: "this chat",
   user: "this account",
+  hashtag: "this hashtag",
 };
 
 const STATUS_COPY = {
@@ -66,7 +67,17 @@ const formatReportedOn = (value) => {
  * mounting this directly.
  */
 const ReportSheet = ({ target, onClose }) => {
-  const { targetType, targetId, username, name, onNotInterested } = target;
+  const { targetType, targetId, username, hashtag, name, onNotInterested } = target;
+
+  /*
+   * A hashtag belongs to nobody, so there's no account to mute or block after
+   * reporting it — and the tag must never be treated as a handle. The API's
+   * non-id target slot is called `username`, so the tag travels in it, but
+   * only from here down.
+   */
+  const isHashtag = targetType === "hashtag";
+  const identifier = isHashtag ? hashtag : username;
+  const accountHandle = isHashtag ? null : username;
 
   const { requestBlock, isBlocked } = useBlock();
   const { mute, isMuted } = useMute();
@@ -93,7 +104,7 @@ const ReportSheet = ({ target, onClose }) => {
       .status({
         targetType,
         targetId: targetId || undefined,
-        username: username || undefined,
+        username: identifier || undefined,
       })
       .then((data) => {
         if (!active) return;
@@ -111,7 +122,7 @@ const ReportSheet = ({ target, onClose }) => {
     return () => {
       active = false;
     };
-  }, [targetType, targetId, username]);
+  }, [targetType, targetId, identifier]);
 
   const submit = async (subcategory, detailsText) => {
     setSubmitting(subcategory || "details");
@@ -119,7 +130,7 @@ const ReportSheet = ({ target, onClose }) => {
       const data = await reportAPI.create({
         targetType,
         targetId: targetId || undefined,
-        username: username || undefined,
+        username: identifier || undefined,
         category: categoryId,
         subcategory: subcategory || undefined,
         details: detailsText || undefined,
@@ -190,25 +201,25 @@ const ReportSheet = ({ target, onClose }) => {
           </button>
         )}
 
-        {username && !isMuted(username) && (
+        {accountHandle && !isMuted(accountHandle) && (
           <button type="button" onClick={handleMute} className={rowClass}>
-            <span className="truncate min-w-0">Mute @{username}</span>
+            <span className="truncate min-w-0">Mute @{accountHandle}</span>
             <Icons.mute />
           </button>
         )}
 
-        {username && !isBlocked(username) && (
+        {accountHandle && !isBlocked(accountHandle) && (
           <button
             type="button"
             // Block has its own confirmation dialog. Drop this sheet immediately
             // rather than animating out over the top of it.
             onClick={() => {
               onClose();
-              requestBlock({ username, name });
+              requestBlock({ username: accountHandle, name });
             }}
             className={`${rowClass} text-red-500`}
           >
-            <span className="truncate min-w-0">Block @{username}</span>
+            <span className="truncate min-w-0">Block @{accountHandle}</span>
             <Icons.block />
           </button>
         )}

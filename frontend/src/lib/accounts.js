@@ -19,7 +19,7 @@ const STORAGE_KEY = "accounts";
  * signed-in account is a refresh cookie sent on each /auth request, and a list
  * long enough to need scrolling stops being a quick switch.
  */
-export const MAX_ACCOUNTS = 5;
+export const MAX_ACCOUNTS = 10;
 
 const read = () => {
   try {

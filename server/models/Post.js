@@ -150,9 +150,23 @@ const postSchema = new Schema(
       enum: ["anyone", "followers", "following", "mentioned"],
       default: "anyone",
     },
-    // Users @mentioned in the content (resolved at create time).
-    // Used to enforce whoCanReply === "mentioned".
+    /*
+     * Accounts @mentioned here, resolved and permission-checked at write time.
+     *
+     * Only the ones who *allow* the mention are stored, which makes this list
+     * do double duty: it enforces whoCanReply === "mentioned", and it's what
+     * the renderer links. A handle in the text that isn't in this list renders
+     * as plain grey text — that's how "this person doesn't allow @mentions"
+     * looks, rather than a link that goes somewhere they didn't consent to.
+     */
     mentions: [{ type: Schema.Types.ObjectId, ref: "User" }],
+
+    /*
+     * Hashtags, lowercased, blocked ones already removed. Denormalised out of
+     * the content so the tag page is an index lookup rather than a regex scan
+     * of every post ever written.
+     */
+    hashtags: { type: [String], default: [], lowercase: true },
 
     isDraft:            { type: Boolean, default: false },
     hideLikeShareCount: { type: Boolean, default: false },
@@ -202,6 +216,8 @@ postSchema.index({ author: 1, isDraft: 1, isDeleted: 1, createdAt: -1 });
 postSchema.index({ quotedPost:   1, createdAt: -1 });
 postSchema.index({ parentGossip: 1, createdAt: -1 });
 postSchema.index({ isDeleted: 1, createdAt: -1 });
+// The hashtag page: newest first within one tag.
+postSchema.index({ hashtags: 1, createdAt: -1 });
 // The publisher polls this: due, still pending.
 postSchema.index({ scheduleStatus: 1, scheduledFor: 1 });
 
@@ -218,7 +234,7 @@ export const MAX_EDIT_HISTORY = 20;
  *
  * Requires the document to have been loaded with `.select("+editHistory")`.
  */
-postSchema.methods.editContent = async function (newContent, mentions) {
+postSchema.methods.editContent = async function (newContent, mentions, hashtags) {
   this.editHistory.push({
     content: this.content || "",
     editedAt: this.editedAt || this.createdAt,
@@ -232,6 +248,9 @@ postSchema.methods.editContent = async function (newContent, mentions) {
   }
   this.content = newContent;
   this.mentions = mentions;
+  // Undefined means "caller didn't recompute them", which would be a bug —
+  // an edit that changes the text has to change the index with it.
+  if (Array.isArray(hashtags)) this.hashtags = hashtags;
   this.isEdited = true;
   this.editedAt = new Date();
   await this.save();

@@ -65,8 +65,9 @@ export const getScheduled = async (req, res) => {
             "whoCanReply quotedPost quotedComment quotedSnapshot isQuoteRepost isQuoteComment createdAt"
         )
         .populate("author", AUTHOR_SELECT)
-        .populate({ path: "quotedPost", select: "content media author createdAt", populate: { path: "author", select: AUTHOR_SELECT } })
-        .populate({ path: "quotedComment", select: "content media author createdAt", populate: { path: "author", select: AUTHOR_SELECT } })
+        // `mentions` so decorateContent can decide which handles link.
+        .populate({ path: "quotedPost", select: "content media mentions author createdAt", populate: { path: "author", select: AUTHOR_SELECT } })
+        .populate({ path: "quotedComment", select: "content media mentions author createdAt", populate: { path: "author", select: AUTHOR_SELECT } })
         .sort({ scheduledFor: 1 })
         .lean(),
       Comment.find(filter)

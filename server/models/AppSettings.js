@@ -45,6 +45,13 @@ const appSettingsSchema = new Schema(
      */
     reservedUsernames: { type: [String], default: [] },
 
+    /*
+     * Hashtags the app won't index or link, on top of the built-in list in
+     * utils/blockedHashtags.js. A blocked tag doesn't block the post — it just
+     * stops being a route to more of the same.
+     */
+    blockedHashtags: { type: [String], default: [] },
+
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }
@@ -67,6 +74,26 @@ export const EDITABLE_SETTINGS = {
   autoFlagReportThreshold: "number",
   minAccountAgeHoursToPost: "number",
   reservedUsernames: "usernameList",
+  blockedHashtags: "tagList",
+};
+
+/**
+ * Normalises an admin-supplied hashtag list. Same shape as the reserved
+ * usernames one, different character rules: a tag may be a single character
+ * and may be up to 100 long.
+ */
+export const normalizeBlockedHashtags = (value) => {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const tag = entry.trim().replace(/^#/, "").toLowerCase();
+    // Must be a shape the parser could actually produce, or blocking it is a
+    // no-op that looks like it worked.
+    if (!/^[a-z0-9_]{1,100}$/.test(tag) || /^\d+$/.test(tag)) continue;
+    seen.add(tag);
+  }
+  return [...seen].sort().slice(0, 2000);
 };
 
 /**

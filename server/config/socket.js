@@ -8,6 +8,26 @@ import UserRelation from "../models/UserRelation.js";
 import UserSettings from "../models/UserSettings.js";
 import jwt from "jsonwebtoken";
 import { getSettings } from "../utils/settings.js";
+import { resolveMessageMentions } from "../utils/mentions.js";
+import { parseHashtags } from "../utils/richText.js";
+
+/**
+ * Mentions and hashtags inside a direct or group message.
+ *
+ * Resolved from the text, not taken from the payload — the client used to send
+ * a `mentions` array that nothing verified, which meant anyone could have
+ * written any user id into any message.
+ *
+ * No permission check and no notification, unlike a post. A mention in a
+ * message is a link to a profile between two people already talking, not a way
+ * to pull a stranger into a conversation, so there's nothing to gate. Blocked
+ * tags aren't filtered either: a private message isn't a discovery surface, and
+ * the tag is only ever rendered as text here.
+ */
+const messageEntities = async (content) => ({
+  mentions: (await resolveMessageMentions(content || "")).map((u) => u._id),
+  hashtags: parseHashtags(content || ""),
+});
 
 let io;
 const userSockets = new Map(); // userId -> Set<socketId>
@@ -113,7 +133,6 @@ export const initializeSocket = (server) => {
           tempId,
           isEphemeral = false,
           selfDestructTimer,
-          mentions = []
         } = data;
 
         // Validate sender
@@ -195,7 +214,7 @@ export const initializeSocket = (server) => {
           media: media || [],
           replyTo: replyTo || null,
           messageType,
-          mentions,
+          ...(await messageEntities(content)),
           isEphemeral,
           selfDestructSeconds: selfDestructTimer || null,
           status: "sent",
@@ -307,6 +326,7 @@ export const initializeSocket = (server) => {
           media: media || [],
           replyTo: replyTo || null,
           messageType,
+          ...(await messageEntities(content)),
           status: "sent",
         });
 

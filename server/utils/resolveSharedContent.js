@@ -43,7 +43,7 @@ export const attachSharedContent = async (messages, viewerId) => {
   const [posts, comments, profiles] = await Promise.all([
     postIds.length
       ? Post.find({ _id: { $in: postIds }, isDeleted: { $ne: true }, isDraft: { $ne: true } })
-          .select("content media counts createdAt isEdited isAiGenerated author")
+          .select("content media counts mentions createdAt isEdited isAiGenerated author")
           .populate("author", "username name profilePic isVerified isPrivate")
           .lean()
       : [],
@@ -53,7 +53,7 @@ export const attachSharedContent = async (messages, viewerId) => {
           isDeleted: { $ne: true },
           isScheduled: { $ne: true },
         })
-          .select("content media counts createdAt isEdited isAiGenerated author post")
+          .select("content media counts mentions createdAt isEdited isAiGenerated author post")
           .populate("author", "username name profilePic isVerified isPrivate")
           .lean()
       : [],

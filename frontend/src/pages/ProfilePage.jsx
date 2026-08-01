@@ -19,6 +19,7 @@ import ReplyThread from "../components/ReplyThread";
 import FollowersModal from "../components/FollowersModal";
 import ShareProfileSheet from "../components/ShareProfileSheet";
 import AboutProfileSheet from "../components/AboutProfileSheet";
+import RichText from "../components/RichText";
 import { buildProfileUrl } from "../lib/profileLink";
 import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
@@ -756,7 +757,12 @@ const ProfilePage = () => {
                     )}
                   </div>
                 </div>
-                <p className="text-white pt-3 max-w-200">{profile.bio || ""}</p>
+                <p className="text-white pt-3 max-w-200 whitespace-pre-line">
+                  <RichText
+                    content={profile.bio || ""}
+                    mentionUsernames={profile.bioMentionUsernames}
+                  />
+                </p>
                 <div className="pt-4 text-neutral-400 flex flex-row items-center relative w-full">
                   <div className="flex items-center space-x-1 md:space-x-2 min-w-0 flex-grow">
                     {profile.isPrivate && !canViewPrivateContent ? (

@@ -231,6 +231,14 @@ export const userAPI = {
   changeUsername: (username) =>
     api.patch("/user/username", { username }).then((r) => r.data),
 
+  getPrivacySettings: () =>
+    api
+      .get("/user/privacy-settings", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  updatePrivacySettings: (updates) =>
+    api.patch("/user/privacy-settings", updates).then((r) => r.data),
+
   // Uncached: rows carry the viewer's live follow state, and a 60-second
   // stale copy shows "Follow" on someone you just followed.
   getFollowers: (username, params) =>
@@ -294,6 +302,18 @@ export const userAPI = {
     api.post(`/user/unmute/${username}`).then((r) => r.data),
 
   getMuted: () => api.get(`/user/muted`).then((r) => r.data),
+};
+
+// ─── Hashtags ────────────────────────────────────────────────────────────────
+export const hashtagAPI = {
+  /**
+   * `params.sort` is "top" | "latest" | "oldest". One merged list of posts and
+   * replies; "top" pages on an offset, the other two on a keyset cursor.
+   */
+  getContent: (tag, params) =>
+    cachedGet(`/tags/${encodeURIComponent(tag)}`, { params }),
+
+  getTrending: (params) => cachedGet("/tags/trending", { params }),
 };
 
 // ─── Search ──────────────────────────────────────────────────────────────────

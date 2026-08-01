@@ -202,13 +202,13 @@ const hydrateResults = async ({ page, viewerId, followingSet }) => {
           .populate({
             path: "quotedPost",
             select:
-              "_id author content media counts isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
+              "_id author content media counts mentions isQuoteRepost isQuoteComment createdAt hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .populate({
             path: "quotedComment",
             select:
-              "_id content media counts author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
+              "_id content media counts mentions author createdAt post hideLikeShareCount isEdited editedAt isAiGenerated",
             populate: { path: "author", select: AUTHOR_SELECT },
           })
           .lean()

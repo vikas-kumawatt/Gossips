@@ -14,6 +14,7 @@ import {
   validateReportReason,
 } from "../utils/reportCategories.js";
 import { contentVersionAt } from "../utils/editHistory.js";
+import { normalizeTag } from "../utils/richText.js";
 
 export const createPlatformReport = async (req, res) => {
   try {
@@ -62,6 +63,7 @@ const validateTargetIdentifier = (targetType, targetId, username) => {
   if (ID_TARGETS.has(targetType)) {
     return mongoose.isValidObjectId(targetId) ? null : "Invalid report target";
   }
+  // conversation and user use it as a handle; hashtag uses it as the tag.
   return typeof username === "string" && username.trim()
     ? null
     : "Invalid report target";
@@ -134,6 +136,21 @@ const resolveTarget = async (targetType, { targetId, username }, reporterId) => 
       const user = await User.findOne({ username }).select("_id").lean();
       if (!user) return { error: "User not found" };
       return { targetId: user._id, targetKey: null, targetOwner: user._id };
+    }
+    /*
+     * A hashtag has no document and no owner — it isn't anybody's, which is
+     * rather the point of reporting one. Keyed by the tag, like a conversation
+     * is keyed by its id, so repeat reports on the same tag group together in
+     * the queue.
+     *
+     * The `username` field carries the tag: the request shape already has a
+     * string slot for non-id targets, and adding a third identifier for one
+     * case isn't worth it.
+     */
+    case "hashtag": {
+      const tag = normalizeTag(username);
+      if (!tag) return { error: "Invalid hashtag" };
+      return { targetId: null, targetKey: `tag:${tag}`, targetOwner: null };
     }
     default:
       return { error: "Unknown report target" };

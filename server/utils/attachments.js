@@ -1,5 +1,6 @@
 import { nanoid } from "nanoid";
 import PollVote from "../models/PollVote.js";
+import User from "../models/User.js";
 import { normalizeMedia } from "./mediaTypes.js";
 
 /**
@@ -354,6 +355,17 @@ export const loadMyVotes = async (viewerId, targetIds) => {
  * Nested quoted posts are decorated too; their polls are just as leakable.
  * Accepts one document or an array and returns the same shape.
  */
+/** ids → handles, one query, deduped. */
+const loadMentionUsernames = async (ids = []) => {
+  const unique = [...new Set(ids.map(String))].filter(Boolean);
+  if (!unique.length) return new Map();
+
+  const users = await User.find({ _id: { $in: unique } })
+    .select("_id username")
+    .lean();
+  return new Map(users.map((u) => [String(u._id), u.username]));
+};
+
 export const decorateContent = async (input, viewerId) => {
   const one = !Array.isArray(input);
   const items = (one ? [input] : input).filter(Boolean);
@@ -362,9 +374,22 @@ export const decorateContent = async (input, viewerId) => {
   // Collect every id that carries a poll, including nested quotes, so the
   // vote lookup is a single query for the whole page.
   const pollIds = [];
+  /*
+   * Mentions are stored as ids; the renderer needs handles, because what it
+   * actually decides is "is this @word in the text one of the allowed ones".
+   * Gathered here with the polls so a whole feed page costs one extra query
+   * rather than one per post.
+   */
+  const mentionIds = [];
   const collect = (doc) => {
     if (!doc) return;
     if (doc.poll?.question && doc._id) pollIds.push(doc._id);
+    if (Array.isArray(doc.mentions)) {
+      // Already populated by a caller that asked for it — nothing to look up.
+      doc.mentions.forEach((m) => {
+        if (m && !m.username) mentionIds.push(m._id || m);
+      });
+    }
     collect(doc.quotedPost);
     collect(doc.quotedComment);
     // `getCommentsWithReplies` embeds the first page of nested replies in the
@@ -374,11 +399,25 @@ export const decorateContent = async (input, viewerId) => {
   };
   items.forEach(collect);
 
-  const myVotes = await loadMyVotes(viewerId, pollIds);
+  const [myVotes, mentionNames] = await Promise.all([
+    loadMyVotes(viewerId, pollIds),
+    loadMentionUsernames(mentionIds),
+  ]);
 
   const decorate = (doc) => {
     if (!doc || typeof doc !== "object") return doc;
     doc.media = normalizeMedia(doc.media);
+    if (Array.isArray(doc.mentions)) {
+      /*
+       * A flat list of handles, which is all the renderer wants. A handle in
+       * the text that isn't here renders as plain text — that's both "they
+       * don't allow @mentions from you" and "they've since renamed", and both
+       * should stop being a link.
+       */
+      doc.mentionUsernames = doc.mentions
+        .map((m) => m?.username || mentionNames.get(String(m?._id || m)))
+        .filter(Boolean);
+    }
     if (doc.poll?.question) {
       doc.poll = projectPoll(doc.poll, myVotes.get(doc._id?.toString()));
     }

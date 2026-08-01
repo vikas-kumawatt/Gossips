@@ -22,6 +22,7 @@ import cookieParser from "cookie-parser";
 import { createServer } from "http";
 import { initializeSocket, getIO, getUserSocket } from "./config/socket.js";
 import { ALLOWED_ORIGINS } from "./config/origins.js";
+import hashtagRoutes from "./routes/hashtagRoutes.js";
 
 const app = express();
 
@@ -110,6 +111,7 @@ app.use("/chats", messageRoutes);
 app.use("/groups", groupRoutes);
 app.use("/reports", reportRoutes);
 app.use("/schedule", scheduleRoutes);
+app.use("/tags", hashtagRoutes);
 // Poll voting and place search — shared by the composer and the feed.
 app.use("/attachments", attachmentRoutes);
 // Content search (posts + replies) and recent-search history.

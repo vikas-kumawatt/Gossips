@@ -2097,6 +2097,28 @@ export const Icons = {
       </g>
     </svg>
   ),
+  /*
+   * Sort — the two opposing arrows.
+   *
+   * The source SVG had no `fill` on its paths, so it rendered SVG-default black
+   * and was invisible on a dark background; `currentColor` on the root makes it
+   * take the text colour of wherever it's used. The `id` and the deprecated
+   * `enable-background` are dropped: ids would collide if the icon appeared
+   * twice on a page, and the latter does nothing.
+   */
+  sort: (props) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 512 512"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="m254.6 171.4-107-107c-9.7-9.8-25.6-9.8-35.4-.1 0 0 0 0-.1.1l-104.8 104.9c-9.8 9.8-9.8 25.6 0 35.4s25.6 9.8 35.4 0l62.2-62.1v287.5c0 13.8 11.2 25 25.1 25s25.1-11.2 25.1-25v-287.5l64.2 64.2c9.8 9.8 25.6 9.8 35.4 0s9.7-25.6-.1-35.4z" />
+      <path d="m504.7 307.2c-9.7-9.8-25.6-9.8-35.4-.1 0 0 0 0-.1.1l-62.1 62.2v-287.5c0-13.8-11.2-25.1-25.1-25.1-13.8 0-25 11.2-25 25.1v287.5l-64.2-64.2c-9.8-9.8-25.6-9.8-35.4 0s-9.8 25.6 0 35.4l107 107c9.7 9.8 25.6 9.8 35.4.1 0 0 0 0 .1-.1l104.9-104.9c9.6-9.8 9.7-25.6-.1-35.5 0 .1 0 .1 0 0z" />
+    </svg>
+  ),
+
   filter: (props) => (
     <svg
       xmlns="http://www.w3.org/2000/svg"
