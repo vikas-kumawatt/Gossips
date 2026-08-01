@@ -4,6 +4,7 @@ import { Icons } from "../icons";
 import AiLabel from "../AiLabel";
 import AudioPlayer from "../AudioPlayer";
 import { normalizeMedia } from "../../lib/mediaTypes";
+import SharedProfileCard from "./SharedProfileCard";
 
 /**
  * A post or comment shared into a chat.
@@ -16,6 +17,16 @@ import { normalizeMedia } from "../../lib/mediaTypes";
  *  viewport, which is narrower than that on small phones. */
 const SharedPostCard = ({ sharedContent }) => {
   const navigate = useNavigate();
+
+  /*
+   * A shared profile travels as the same message type — the type is the envelope
+   * and `kind` says what's inside — so it's dispatched here rather than at both
+   * of the places that render this card.
+   */
+  if (sharedContent?.kind === "profile") {
+    return <SharedProfileCard sharedContent={sharedContent} />;
+  }
+
   const resolved = sharedContent?.resolved;
   const snapshot = sharedContent?.snapshot;
   const kind = sharedContent?.kind === "comment" ? "comment" : "post";

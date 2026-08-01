@@ -141,18 +141,30 @@ const messageSchema = new Schema(
     },
 
     /**
-     * A post or comment shared into the chat.
+     * A post, comment or profile shared into the chat.
      *
-     * `post` / `comment` is the live reference — the card renders the current
-     * version, so edits show up and the tap-through always lands on the real
-     * thing. `snapshot` is only a fallback: once the original is deleted the
+     * `post` / `comment` / `profile` is the live reference — the card renders the
+     * current version, so edits show up and the tap-through always lands on the
+     * real thing. `snapshot` is only a fallback: once the original is deleted the
      * reference resolves to nothing, and without it the bubble would go blank
      * and the conversation would stop making sense.
+     *
+     * A profile share carries no content of its own, so it reuses the author
+     * fields of the snapshot to name the account and nothing else — a shared
+     * profile must not freeze a copy of someone's bio or counts in a message
+     * document that outlives them.
+     *
+     * These all still travel as `messageType: "post_share"`. The type is the
+     * envelope ("this bubble is a shared-content card") and `kind` says what's
+     * inside; splitting the envelope per kind would mean revisiting every
+     * bubble, preview, forward and snapshot-stripping path for no behavioural
+     * gain. The type's name is now narrower than its meaning.
      */
     sharedContent: {
-      kind:    { type: String, enum: ["post", "comment"] },
+      kind:    { type: String, enum: ["post", "comment", "profile"] },
       post:    { type: Schema.Types.ObjectId, ref: "Post" },
       comment: { type: Schema.Types.ObjectId, ref: "Comment" },
+      profile: { type: Schema.Types.ObjectId, ref: "User" },
       snapshot: {
         authorId:       { type: Schema.Types.ObjectId, ref: "User" },
         authorUsername: String,

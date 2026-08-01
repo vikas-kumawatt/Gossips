@@ -1,12 +1,18 @@
 import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
+import User from "../models/User.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
 import { normalizeMedia } from "./mediaTypes.js";
 
+// Accounts whose profile card stops resolving, matching the rest of the app.
+const ACTIVE_ACCOUNT = {
+  accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
+};
+
 /**
- * Hydrates `post_share` messages with the live post/comment, evaluated for the
- * person reading the thread.
+ * Hydrates `post_share` messages with the live post/comment/profile, evaluated
+ * for the person reading the thread.
  *
  * The share is a reference, not a copy, so the card shows the current version
  * and edits appear. Two things can change after sending:
@@ -23,15 +29,18 @@ export const attachSharedContent = async (messages, viewerId) => {
 
   const postIds = [];
   const commentIds = [];
+  const profileIds = [];
   for (const m of shares) {
-    if (m.sharedContent.kind === "comment" && m.sharedContent.comment) {
+    if (m.sharedContent.kind === "profile") {
+      if (m.sharedContent.profile) profileIds.push(m.sharedContent.profile);
+    } else if (m.sharedContent.kind === "comment" && m.sharedContent.comment) {
       commentIds.push(m.sharedContent.comment);
     } else if (m.sharedContent.post) {
       postIds.push(m.sharedContent.post);
     }
   }
 
-  const [posts, comments] = await Promise.all([
+  const [posts, comments, profiles] = await Promise.all([
     postIds.length
       ? Post.find({ _id: { $in: postIds }, isDeleted: { $ne: true }, isDraft: { $ne: true } })
           .select("content media counts createdAt isEdited isAiGenerated author")
@@ -48,6 +57,16 @@ export const attachSharedContent = async (messages, viewerId) => {
           .populate("author", "username name profilePic isVerified isPrivate")
           .lean()
       : [],
+    /*
+     * Read live rather than from the snapshot, so the card follows the account:
+     * a renamed handle, a new picture or an edited bio all show through, and a
+     * deleted or suspended account stops resolving.
+     */
+    profileIds.length
+      ? User.find({ _id: { $in: profileIds }, ...ACTIVE_ACCOUNT })
+          .select("username name profilePic bio isVerified verificationBadge isPrivate counts")
+          .lean()
+      : [],
   ]);
 
   const liveById = new Map();
@@ -56,19 +75,27 @@ export const attachSharedContent = async (messages, viewerId) => {
   posts.forEach((p) => liveById.set(p._id.toString(), { ...p, media: normalizeMedia(p.media) }));
   comments.forEach((c) => liveById.set(c._id.toString(), { ...c, media: normalizeMedia(c.media) }));
 
-  // Work out visibility once per distinct author rather than per message.
+  const profileById = new Map(profiles.map((u) => [u._id.toString(), u]));
+
+  // Work out visibility once per distinct account rather than per message.
   const authorIds = [...new Set([...posts, ...comments].map((d) => d.author?._id?.toString()).filter(Boolean))];
+  const sharedProfileIds = [...new Set(profiles.map((u) => u._id.toString()))];
 
   const viewerKey = viewerId.toString();
   const foreignAuthors = authorIds.filter((id) => id !== viewerKey);
+  // Blocks gate both kinds; following only matters for a private author's posts,
+  // since a profile header is public either way.
+  const blockCandidates = [...new Set([...foreignAuthors, ...sharedProfileIds])].filter(
+    (id) => id !== viewerKey
+  );
 
   const [blockRows, followRows] = await Promise.all([
-    foreignAuthors.length
+    blockCandidates.length
       ? UserRelation.find({
           kind: "block",
           $or: [
-            { from: viewerId, to: { $in: foreignAuthors } },
-            { from: { $in: foreignAuthors }, to: viewerId },
+            { from: viewerId, to: { $in: blockCandidates } },
+            { from: { $in: blockCandidates }, to: viewerId },
           ],
         })
           .select("from to")
@@ -102,7 +129,50 @@ export const attachSharedContent = async (messages, viewerId) => {
   };
 
   for (const message of shares) {
-    const { kind, post, comment, snapshot } = message.sharedContent;
+    const { kind, post, comment, profile, snapshot } = message.sharedContent;
+
+    if (kind === "profile") {
+      const profileId = profile?.toString() || null;
+      const account = profileId ? profileById.get(profileId) : null;
+
+      /*
+       * One card for both failure modes, but only the deleted case names the
+       * account. When the reason is a block, confirming which handle it was
+       * would tell the reader that an account they can't reach still exists —
+       * the same thing the profile route withholds by answering "not found".
+       */
+      if (!account || blocked.has(profileId)) {
+        message.sharedContent.resolved = {
+          available: false,
+          locked: false,
+          kind: "profile",
+          id: profileId,
+          username: account ? "" : snapshot?.authorUsername || "",
+        };
+        delete message.sharedContent.snapshot;
+        continue;
+      }
+
+      message.sharedContent.resolved = {
+        available: true,
+        locked: false,
+        kind: "profile",
+        id: profileId,
+        username: account.username,
+        name: account.name || "",
+        profilePic: account.profilePic || "",
+        bio: account.bio || "",
+        isVerified: Boolean(
+          account.isVerified ||
+            (account.verificationBadge && account.verificationBadge !== "none")
+        ),
+        isPrivate: Boolean(account.isPrivate),
+        followerCount: account.counts?.followers ?? 0,
+      };
+      delete message.sharedContent.snapshot;
+      continue;
+    }
+
     const refId = (kind === "comment" ? comment : post)?.toString();
     const live = refId ? liveById.get(refId) : null;
 

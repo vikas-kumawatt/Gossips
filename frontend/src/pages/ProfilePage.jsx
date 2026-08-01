@@ -17,6 +17,8 @@ import FollowButton from "../components/FollowButton";
 import PostCard from "../components/PostCard";
 import ReplyThread from "../components/ReplyThread";
 import FollowersModal from "../components/FollowersModal";
+import ShareProfileSheet from "../components/ShareProfileSheet";
+import { buildProfileUrl } from "../lib/profileLink";
 import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
@@ -87,7 +89,17 @@ const ProfilePage = () => {
     });
   };
 
+  const handleCopyProfileLink = async () => {
+    try {
+      await navigator.clipboard.writeText(buildProfileUrl(profileId));
+      toast.success("Link copied");
+    } catch {
+      toast.error("Couldn't copy the link");
+    }
+  };
+
   const [profile, setProfile] = useState(profileDataStructure);
+  const [isShareProfileOpen, setIsShareProfileOpen] = useState(false);
   const [posts, setPosts] = useState([]);
   const [replies, setReplies] = useState([]);
   const [reposts, setReposts] = useState([]);
@@ -819,11 +831,18 @@ const ProfilePage = () => {
                         className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[250px] p-0 border border-neutral-700"
                       >
                         <DropdownMenuItem
-                          // onClick={(e) => handleIconClick(e, "copy-link")}
+                          onClick={handleCopyProfileLink}
                           className="flex justify-between items-center p-3 mx-2 tracking-normal select-none font-semibold mt-2 cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
                         >
                           <span>Copy link</span>
                           <Icons.copy />
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => setIsShareProfileOpen(true)}
+                          className="flex justify-between items-center p-3 mx-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                        >
+                          <span>Share profile</span>
+                          <Icons.shareTo />
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           // onClick={(e) => handleIconClick(e, "about")}
@@ -892,34 +911,15 @@ const ProfilePage = () => {
                     <span className="font-medium">Edit profile</span>
                   </Link>
 
-                  <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                      <div className="rounded-lg border border-neutral-800 bg-neutral-900 text-white text-bold py-2 cursor-pointer max-w-xl w-full text-center mt-4">
-                    <p className="font-medium">Share profile</p>
-                  </div>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent
-                        align="end"
-                        className="shadow-xl bg-[#181818] z-[999] rounded-2xl w-[250px] mt-1 p-0 border border-neutral-700"
-                      >
-                        <DropdownMenuItem
-                          // onClick={(e) => handleIconClick(e, "copy-link")}
-                          className="flex justify-between items-center p-3  tracking-normal select-none font-semibold m-2 cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                        >
-                          <span>Copy link</span>
-                          <Icons.copy />
-                        </DropdownMenuItem>
-                        <DropdownMenuSeparator />
-
-                        <DropdownMenuItem
-                          // onClick={(e) => handleIconClick(e, "share-to")}
-                          className="flex justify-between items-center cursor-pointer p-3  m-2 tracking-normal select-none font-semibold text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                        >
-                          <span>Share to</span>
-                          <Icons.shareTo />
-                        </DropdownMenuItem>
-                        </DropdownMenuContent>
-                        </DropdownMenu>
+                  {/* Copy link and Share to now live inside the sheet, next to
+                      the QR code, rather than in a menu of their own. */}
+                  <button
+                    type="button"
+                    onClick={() => setIsShareProfileOpen(true)}
+                    className="rounded-lg border border-neutral-800 bg-neutral-900 text-white text-bold py-2 cursor-pointer max-w-xl w-full text-center mt-4 hover:bg-neutral-800"
+                  >
+                    <span className="font-medium">Share profile</span>
+                  </button>
 
                   
                 </div>
@@ -1003,6 +1003,16 @@ const ProfilePage = () => {
         followerCount={profile.followerCount || 0}
         followingCount={profile.followingCount || 0}
       />
+      {/* Mounted only while open — the sheet animates itself in on mount and has
+          no isOpen prop. Waits for the profile's id, which "Share to" needs to
+          address the share. */}
+      {isShareProfileOpen && profile.username && profile._id && (
+        <ShareProfileSheet
+          username={profile.username}
+          userId={profile._id}
+          onClose={() => setIsShareProfileOpen(false)}
+        />
+      )}
       <MobileNavbar
         layoutContext={layoutContext}
         openCreateModal={() => setIsCreateModalOpen(true)}

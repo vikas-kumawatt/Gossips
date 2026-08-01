@@ -12,13 +12,17 @@ import {
   nativeShare,
   openShareTarget,
 } from "../lib/shareTargets";
+import { buildProfileUrl } from "../lib/profileLink";
 
 /**
- * ShareSheet — send a post or comment into DMs, or out to another app.
+ * ShareSheet — send a post, comment or profile into DMs, or out to another app.
  *
  * With people picked, the external row is hidden: the sheet is committed to
  * sending, and leaving nine other destinations on screen invites a misclick
  * that abandons the selection.
+ *
+ * For a profile share, `authorUsername` is the account being shared and there is
+ * no `postId`.
  */
 const ShareSheet = ({ targetType, targetId, postId, authorUsername, previewText, onClose }) => {
   const [query, setQuery] = useState("");
@@ -31,14 +35,22 @@ const ShareSheet = ({ targetType, targetId, postId, authorUsername, previewText,
   const [copied, setCopied] = useState(false);
   const [groupSheetOpen, setGroupSheetOpen] = useState(false);
 
-  // A comment lives on its parent post's page, so both link to the post.
+  const isProfile = targetType === "profile";
+
+  // A comment lives on its parent post's page, so both link to the post. A
+  // profile links to itself.
   const shareUrl = useMemo(
-    () => buildShareUrl({ username: authorUsername, postId: postId || targetId }),
-    [authorUsername, postId, targetId]
+    () =>
+      isProfile
+        ? buildProfileUrl(authorUsername)
+        : buildShareUrl({ username: authorUsername, postId: postId || targetId }),
+    [isProfile, authorUsername, postId, targetId]
   );
   const shareText = previewText?.trim()
     ? previewText.trim().slice(0, 120)
-    : "Check this out on Gossips";
+    : isProfile
+      ? `@${authorUsername} on Gossips`
+      : "Check this out on Gossips";
 
   const load = useCallback(async (q) => {
     setLoading(true);

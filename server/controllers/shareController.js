@@ -285,8 +285,12 @@ const searchableGroups = async (userId, nameRegex) => {
  * message document, which is a read-anything primitive.
  */
 const loadShareTarget = async (viewerId, targetType, targetId) => {
-  if (!["post", "comment"].includes(targetType)) return { error: "Unknown content type" };
+  if (!["post", "comment", "profile"].includes(targetType)) {
+    return { error: "Unknown content type" };
+  }
   if (!mongoose.isValidObjectId(targetId)) return { error: "Invalid content id" };
+
+  if (targetType === "profile") return loadProfileShareTarget(viewerId, targetId);
 
   const { doc, error } = await loadVisibleContent(viewerId, targetType, targetId);
   if (error) return { error };
@@ -311,6 +315,47 @@ const loadShareTarget = async (viewerId, targetType, targetId) => {
           .slice(0, 4)
           .map((m) => m.url),
         createdAt: doc.createdAt,
+      },
+    },
+  };
+};
+
+/**
+ * Same, for an account being shared.
+ *
+ * A profile header is public even for a private account — only its posts are
+ * gated — so there is no "private" case to handle here. A block is the one thing
+ * that makes an account unreachable, and it's checked in both directions:
+ * sharing must not become a way to hand someone a card for an account that has
+ * blocked them, or that they've blocked.
+ *
+ * Nothing about the account is frozen beyond who it is. The card is rendered
+ * from the live account on every read, so a bio edited after sending shows the
+ * new text and a deleted account stops resolving.
+ */
+const PROFILE_UNAVAILABLE = "That account is no longer available";
+
+const loadProfileShareTarget = async (viewerId, targetId) => {
+  const user = await User.findOne({ _id: targetId, ...ACTIVE_ACCOUNT })
+    .select("_id username name profilePic")
+    .lean();
+  if (!user) return { error: PROFILE_UNAVAILABLE };
+
+  if (user._id.toString() !== viewerId.toString()) {
+    const blocked = await blockedIdSet(viewerId, [user._id]);
+    if (blocked.has(user._id.toString())) return { error: PROFILE_UNAVAILABLE };
+  }
+
+  return {
+    doc: user,
+    sharedContent: {
+      kind: "profile",
+      profile: user._id,
+      snapshot: {
+        authorId: user._id,
+        authorUsername: user.username,
+        authorName: user.name || "",
+        authorPic: user.profilePic || "",
       },
     },
   };
