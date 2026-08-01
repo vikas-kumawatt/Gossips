@@ -3,12 +3,17 @@ import CreatePost from "../components/CreatePost";
 import SiteHeader from "../components/layouts/site-header";
 import MobileNavbar from "../components/layouts/mobile-navbar";
 import { Icons } from "../components/icons";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { UserContext } from "../contexts/UserContext";
 import { useSocket } from "../contexts/useSocket";
 import { notificationAPI } from "../services/api";
 import FollowButton from "../components/FollowButton";
 import { Clock } from "lucide-react";
+import NavigationMenu from "../menus/NavigationMenu";
+import {
+  emptyNotificationMessage,
+  visibleNotificationTabs,
+} from "../lib/notificationCategories";
 
 const ActivityPage = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -19,10 +24,49 @@ const ActivityPage = () => {
   const [isFetchingMore, setIsFetchingMore] = useState(false);
   const [loadMoreTrigger, setLoadMoreTrigger] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const [category, setCategory] = useState("all");
   const cursorRef = useRef(null);
   const hasMoreRef = useRef(true);
   const isFetchingRef = useRef(false);
+  /*
+   * Which tab is live, written synchronously — the socket handler and the
+   * scroll observer both read it in the same tick a tab change starts, when
+   * state still holds the previous value.
+   */
+  const categoryRef = useRef("all");
+  /*
+   * A generation counter, bumped on every reset. Comparing tab names isn't
+   * enough: switch A → B → A and a page-2 response from the *first* A still
+   * matches, and would append onto a freshly emptied list while overwriting
+   * the cursor. A number can only ever match the request that took it.
+   */
+  const generationRef = useRef(0);
   const navigate = useNavigate();
+  const location = useLocation();
+
+  /*
+   * Back to wherever you came from. `navigate(-1)` is right when there is a
+   * previous entry, but on a direct link, a refresh, or a fresh tab there
+   * isn't one and it silently does nothing — react-router marks that first
+   * entry with key "default", so fall back to the feed.
+   */
+  const handleBack = () => {
+    if (location.key !== "default") navigate(-1);
+    else navigate("/");
+  };
+
+  const tabs = visibleNotificationTabs(Boolean(userAuth?.isPrivate));
+
+  /*
+   * Switching to a public account removes the Follow requests tab. If it was
+   * the selected one, nothing would render as active while the list still
+   * showed it.
+   */
+  useEffect(() => {
+    if (!tabs.some((tab) => tab.id === category)) setCategory("all");
+    // tabs is rebuilt every render; the privacy flag is what actually changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userAuth?.isPrivate, category]);
 
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
@@ -40,13 +84,27 @@ const ActivityPage = () => {
       } else {
         setLoading(true);
       }
+      const generation = generationRef.current;
+
       try {
-        const params = { limit: 20 };
+        const params = { limit: 20, category: categoryRef.current };
         if (append && cursorRef.current) {
           params.cursor = cursorRef.current;
         }
 
-        const data = await notificationAPI.getNotifications(params);
+        /*
+         * First page bypasses the 60s GET cache. A cached page predates any
+         * notification that arrived since, yet still carries isRead:false on
+         * its rows — so the auto mark-all-read below would clear the badge for
+         * something that was never on screen. Subsequent pages are fine cached:
+         * they're keyed by cursor and can't go stale in the same way.
+         */
+        const data = await notificationAPI.getNotifications(params, {
+          bypassCache: !append,
+        });
+        // Superseded while in flight — these rows belong to a list that is
+        // already gone.
+        if (generationRef.current !== generation) return;
         const fetchedNotifications = data.notifications || [];
 
         setNotifications((prev) => {
@@ -64,21 +122,35 @@ const ActivityPage = () => {
         hasMoreRef.current = nextHasMore;
         setHasMore(nextHasMore);
       } catch (error) {
-        console.error("Error fetching notifications:", error);
+        if (generationRef.current === generation) {
+          console.error("Error fetching notifications:", error);
+        }
       } finally {
-        isFetchingRef.current = false;
-        if (append) {
-          setIsFetchingMore(false);
-        } else {
-          setLoading(false);
+        /*
+         * Guarded too, not just the data. A superseded request clearing
+         * `isFetchingRef` re-opens the door to a duplicate concurrent fetch,
+         * and its `setLoading(false)` lands while the new tab's list is still
+         * empty — which renders "No replies yet" for a moment before the rows
+         * arrive.
+         */
+        if (generationRef.current === generation) {
+          isFetchingRef.current = false;
+          if (append) {
+            setIsFetchingMore(false);
+          } else {
+            setLoading(false);
+          }
         }
       }
     },
     [userAuth?.token]
   );
 
+  // Reload from the top whenever the account or the tab changes.
   useEffect(() => {
     if (!userAuth?.token) return;
+    generationRef.current += 1;
+    categoryRef.current = category;
     cursorRef.current = null;
     hasMoreRef.current = true;
     isFetchingRef.current = false;
@@ -86,7 +158,7 @@ const ActivityPage = () => {
     setNotifications([]);
     setLoadMoreTrigger(0);
     fetchNotifications({ append: false });
-  }, [userAuth?.token, fetchNotifications]);
+  }, [userAuth?.token, category, fetchNotifications]);
 
   useEffect(() => {
     if (!userAuth?.token || loadMoreTrigger === 0) return;
@@ -115,8 +187,16 @@ const ActivityPage = () => {
     if (!socket) return;
 
     const handleNewNotification = (notification) => {
+      /*
+       * Only prepend it to a tab it belongs in. The categories are the
+       * server's to define, so rather than reimplement the mapping here, the
+       * narrow tabs simply don't take live rows — they pick it up on the next
+       * load. "All" is the tab people watch, and it takes everything.
+       *
+       * The badge is handled by UnreadNotificationsSync, not here.
+       */
+      if (categoryRef.current !== "all") return;
       setNotifications((prev) => [notification, ...prev]);
-      // Note: We do NOT increment unreadNotificationCount here because the Navigation component handles the global count via its own socket listener.
     };
 
     socket.on("newNotification", handleNewNotification);
@@ -131,6 +211,10 @@ const ActivityPage = () => {
       try {
         const unreadNotifications = notifications.filter((n) => !n.isRead);
         if (unreadNotifications.length > 0) {
+          /*
+           * markAllRead clears the whole inbox, not just this tab, so zeroing
+           * the badge is correct even when a narrow tab is open.
+           */
           await notificationAPI.markAllRead();
           setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
           setUnreadNotificationCount(0);
@@ -230,6 +314,10 @@ const ActivityPage = () => {
         return "followed you";
       case "follow_request":
         return "requested to follow you";
+      case "mention":
+        return notification.entityType === "Comment"
+          ? "mentioned you in a reply"
+          : "mentioned you in a gossip";
       case "follow_request_accepted":
         return "accepted your follow request";
       case "reply":
@@ -259,8 +347,40 @@ const ActivityPage = () => {
 
   return (
     <div className="w-full bg-neutral-950 mb-16">
-      <SiteHeader layoutContext={layoutContext} />
+      {/*
+        On a phone the site header is a logo and a menu button — on a page whose
+        whole job is one list, that's a row of chrome telling you nothing. It's
+        replaced by a bar that says where you are. On desktop the header carries
+        the nav, so it stays and the page gets a heading instead.
+      */}
+      <div className="hidden sm:contents">
+        <SiteHeader layoutContext={layoutContext} />
+      </div>
+
+      <div className="sm:hidden sticky top-0 z-[100] bg-[#101010D9] backdrop-blur-2xl border-b border-neutral-800">
+        <div className="relative flex h-11 items-center justify-center px-2">
+          <button
+            type="button"
+            onClick={handleBack}
+            aria-label="Back"
+            className="absolute left-1 top-1/2 -translate-y-1/2 cursor-pointer rounded-full p-2 hover:bg-neutral-800"
+          >
+            <Icons.back className="h-5 w-5 text-white" />
+          </button>
+
+          <h1 className="text-[16px] font-semibold text-white">Activity</h1>
+
+          {/* The header we just hid was the only way to reach the main menu on
+              a phone — without this, /activity is a dead end. */}
+          <div className="absolute right-2 top-1/2 -translate-y-1/2">
+            <NavigationMenu />
+          </div>
+        </div>
+      </div>
+
       <main className="container max-w-[620px] px-4 sm:px-6 bg-neutral-950 mx-auto mt-2">
+        <h1 className="hidden sm:block text-[26px] font-bold text-white mb-4">Activity</h1>
+
         {userAuth.isPrivate && (
           <button
             className="bg-neutral-900 rounded-xl w-full p-4 flex flex-row items-center justify-between font-medium mb-4"
@@ -270,6 +390,37 @@ const ActivityPage = () => {
             <Icons.chevronRight />
           </button>
         )}
+
+        {/*
+          A scrolling pill row rather than the underlined InPageNavigation used
+          elsewhere: that one measures tab widths to position a sliding rule and
+          assumes they all fit, which eight labels don't on a phone.
+          `scrollbar-none` keeps the strip clean; it still scrolls by drag.
+        */}
+        <div
+          role="tablist"
+          aria-label="Notification categories"
+          className="flex gap-2 overflow-x-auto pb-3 -mx-4 px-4 sm:mx-0 sm:px-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        >
+          {tabs.map((tab) => {
+            const active = category === tab.id;
+            return (
+              <button
+                key={tab.id}
+                role="tab"
+                aria-selected={active}
+                onClick={() => setCategory(tab.id)}
+                className={`shrink-0 cursor-pointer rounded-full px-3.5 py-1.5 text-[14px] font-medium transition-colors ${
+                  active
+                    ? "bg-white text-black"
+                    : "bg-neutral-900 text-neutral-400 hover:bg-neutral-800 hover:text-white"
+                }`}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
 
         <div className="flex flex-col">
           {loading && notifications.length === 0 ? (
@@ -387,7 +538,7 @@ const ActivityPage = () => {
             </>
           ) : (
             <p className="text-neutral-400 text-center py-10">
-              No notifications yet.
+              {emptyNotificationMessage(category)}
             </p>
           )}
         </div>

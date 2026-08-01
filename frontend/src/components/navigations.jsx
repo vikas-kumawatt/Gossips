@@ -1,16 +1,13 @@
-import React, { useContext, useEffect } from "react";
+import React, { useContext } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Icons } from "./icons";
 import { UserContext } from "../contexts/UserContext";
-import { useSocket } from "../contexts/useSocket";
 import { useNavigate } from "react-router-dom";
 
 export default function Navigation({ layoutContext }) {
   const location = useLocation();
   const path = location.pathname;
-  const { userAuth, unreadNotificationCount, setUnreadNotificationCount } =
-    useContext(UserContext);
-  const { socket } = useSocket();
+  const { userAuth, unreadNotificationCount } = useContext(UserContext);
   const navigate = useNavigate();
 
   const openCreateModal =
@@ -39,20 +36,6 @@ export default function Navigation({ layoutContext }) {
       navigate("/activity");
     }
   };
-
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleNewNotification = () => {
-      setUnreadNotificationCount((prev) => prev + 1);
-    };
-
-    socket.on("newNotification", handleNewNotification);
-
-    return () => {
-      socket.off("newNotification", handleNewNotification);
-    };
-  }, [socket, setUnreadNotificationCount]);
 
   return (
     <>
@@ -94,19 +77,30 @@ export default function Navigation({ layoutContext }) {
         onClick={handleActivityClick}
         className="hover:bg-zinc-800 p-4 sm:py-5 sm:px-8 rounded-lg transform transition-all duration-150 ease-out hover:scale-100 active:scale-90 flex items-center justify-center w-full"
       >
-        {unreadNotificationCount > 0 ? (
-          <Icons.unread
-            className="h-[28px] w-[28px] text-lg"
-            strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
-            fill={path === "/activity" ? "white" : "transparent"}
-          />
-        ) : (
-          <Icons.activity
-            className="h-[26px] w-[26px] text-lg"
-            strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
-            fill={path === "/activity" ? "white" : "transparent"}
-          />
-        )}
+        <span className="relative flex items-center justify-center">
+          {unreadNotificationCount > 0 ? (
+            <Icons.unread
+              className="h-[28px] w-[28px] text-lg"
+              strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
+              fill={path === "/activity" ? "white" : "transparent"}
+            />
+          ) : (
+            <Icons.activity
+              className="h-[26px] w-[26px] text-lg"
+              strokeColor={path === "/activity" ? "white" : "#4d4d4d"}
+              fill={path === "/activity" ? "white" : "transparent"}
+            />
+          )}
+          {/* The count-swapped icon alone is too subtle — both states are a
+              bell of the same weight. The dot is the part people look for. */}
+          {unreadNotificationCount > 0 && (
+            <span
+              role="status"
+              aria-label={`${unreadNotificationCount} unread notifications`}
+              className="absolute -right-1 -top-0.5 min-w-[9px] h-[9px] rounded-full bg-rose-500 ring-2 ring-neutral-950"
+            />
+          )}
+        </span>
       </Link>
 
       <Link

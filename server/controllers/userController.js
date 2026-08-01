@@ -3,6 +3,7 @@ import { sendNotification } from "../utils/notifications.js";
 import { getOrSet, del, CacheKeys } from "../utils/cache.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
+import Notification from "../models/Notification.js";
 import Repost from "../models/Repost.js";
 import User from "../models/User.js";
 import Post from "../models/Post.js";
@@ -27,6 +28,18 @@ import {
 const ACTIVE_ACCOUNT_FILTER = {
   accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
 };
+
+/**
+ * Drops the "requested to follow you" row once the request is no longer
+ * pending — accepted, rejected, or withdrawn. Without this the recipient's
+ * Activity keeps offering a decision that has already been made.
+ */
+const clearFollowRequestNotification = (recipientId, senderId) =>
+  Notification.deleteMany({
+    recipient: recipientId,
+    sender: senderId,
+    type: "follow_request",
+  }).catch((error) => console.error("clearFollowRequestNotification error:", error));
 
 const invalidateFollowRelatedCaches = async (...usernames) => {
   const unique = [...new Set(usernames.filter(Boolean))];
@@ -163,6 +176,14 @@ export const setupProfile = async (req, res) => {
             { _id: { $in: followerIds } },
             { $inc: { "counts.following": 1 } }
           );
+
+          // Every request just became a follow, so none of them is still a
+          // decision waiting on this account.
+          await Notification.deleteMany({
+            recipient: req.user,
+            sender: { $in: followerIds },
+            type: "follow_request",
+          });
 
           // Notify each requester that their request was auto-accepted
           followerIds.forEach((followerId) => {
@@ -625,6 +646,13 @@ export const followUser = async (req, res) => {
         status: "pending",
       });
 
+      /*
+       * A pending request was silent until now: the edge was written and the
+       * recipient learned about it only if they happened to open the follow
+       * requests page. The Activity tab reads notifications, so it needs one.
+       */
+      await sendNotification(userToFollow._id, req.user._id, "follow_request");
+
       const sockets = getUserSocket(req.user._id.toString());
       sockets?.forEach((id) =>
         io.to(id).emit("followStatusUpdate", {
@@ -755,7 +783,12 @@ export const acceptFollowRequest = async (req, res) => {
     await Promise.all([
       User.updateOne({ _id: req.user._id }, { $inc: { "counts.followers": 1 } }),
       User.updateOne({ _id: edge.follower }, { $inc: { "counts.following": 1 } }),
+      // The request is answered; leaving "requested to follow you" in the
+      // recipient's Activity implies it still needs a decision.
+      clearFollowRequestNotification(req.user._id, edge.follower),
     ]);
+
+    await sendNotification(edge.follower, req.user._id, "follow_request_accepted");
 
     const requester = await User.findById(edge.follower).select("username").lean();
     await invalidateFollowRelatedCaches(req.user.username, requester?.username);
@@ -779,6 +812,8 @@ export const rejectFollowRequest = async (req, res) => {
     }
 
     await Follow.deleteOne({ _id: edge._id });
+    // Silently — a rejection is not something the requester is told about.
+    await clearFollowRequestNotification(req.user._id, edge.follower);
 
     const requester = await User.findById(edge.follower).select("username").lean();
     await invalidateFollowRelatedCaches(req.user.username, requester?.username);
@@ -801,6 +836,9 @@ export const cancelFollowRequest = async (req, res) => {
     });
 
     if (!deleted) return res.status(404).json({ message: "No pending follow request found" });
+
+    // Withdrawn — the recipient shouldn't still be asked to decide.
+    await clearFollowRequestNotification(userToFollow._id, req.user._id);
 
     const sockets = getUserSocket(req.user._id.toString());
     sockets?.forEach((id) =>

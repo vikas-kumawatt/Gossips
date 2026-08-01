@@ -49,6 +49,7 @@ import {
   safeParseUser,
 } from "./services/authSession";
 import "./services/api";
+import UnreadNotificationsSync from "./components/UnreadNotificationsSync";
 
 function App() {
   const [userAuth, setUserAuth] = useState({ token: null, savedPosts: [] });
@@ -91,6 +92,8 @@ function App() {
       }}
     >
       <SocketProvider>
+        {/* Renders nothing; owns the unread count in one place. */}
+        <UnreadNotificationsSync />
         <ChatProvider>
           <PostInteractionProvider>
             <FollowProvider>

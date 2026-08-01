@@ -245,6 +245,12 @@ userSchema.index({ username: "text", name: "text", bio: "text" });
 // which without this is a collection scan on the hottest keystroke path there
 // is. Sparse: only accounts that have ever renamed carry the array.
 userSchema.index({ "usernameHistory.username": 1 }, { sparse: true });
+/*
+ * The Verified activity tab resolves "who is verified" on every page it loads.
+ * Without this that's a collection scan; partial, because the false rows are
+ * the overwhelming majority and indexing them would buy nothing.
+ */
+userSchema.index({ isVerified: 1 }, { partialFilterExpression: { isVerified: true } });
 
 // ── Virtuals ──────────────────────────────────────────────────
 userSchema.virtual("age").get(function () {

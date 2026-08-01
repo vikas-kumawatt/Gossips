@@ -557,8 +557,22 @@ export const commentAPI = {
 
 // ─── Notifications ────────────────────────────────────────────────────────────
 export const notificationAPI = {
-  getNotifications: (params) =>
-    cachedGet("/notification/notifications", { params }),
+  /**
+   * `params.category` picks the tab: all, follow_requests, follows, replies,
+   * mentions, quotes, reposts, verified. Filtered by the query rather than in
+   * the browser, so each tab paginates on its own.
+   */
+  getNotifications: (params, { bypassCache = false } = {}) =>
+    cachedGet("/notification/notifications", { params }, { bypassCache }),
+
+  /*
+   * Never cached. This is the number the badge is drawn from and the whole
+   * reason it's fetched is that a stale one is what was wrong before.
+   */
+  getUnreadCount: () =>
+    api
+      .get("/notification/unread-count", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
 
   markAllRead: () =>
     api.put("/notification/mark-all-read").then((r) => r.data),
