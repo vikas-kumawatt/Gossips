@@ -1,5 +1,5 @@
 import { Routes, Route, Navigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import { UserContext } from "./contexts/UserContext";
 import UserAuthForm from "./pages/UserAuthForm";
@@ -54,6 +54,9 @@ import UnreadNotificationsSync from "./components/UnreadNotificationsSync";
 function App() {
   const [userAuth, setUserAuth] = useState({ token: null, savedPosts: [] });
   const [unreadNotificationCount, setUnreadNotificationCount] = useState(0);
+  // Read by the cross-tab listener below, which is registered once and would
+  // otherwise close over the first render's value forever.
+  const currentUserIdRef = useRef(null);
 
   useEffect(() => {
     attachAuthInterceptors(axios);
@@ -62,6 +65,21 @@ function App() {
 
     const syncAuthState = () => {
       const nextUser = safeParseUser();
+
+      /*
+       * localStorage is shared across tabs, so switching account in one tab
+       * fires this in all the others. Swapping identity in place there would
+       * leave every provider, cache, socket and open composer belonging to the
+       * account we just left — a reply typed as A would send as B. The tab
+       * that did the switching reloads itself; this reloads the rest.
+       */
+      const nextId = String(nextUser?.id || nextUser?._id || "");
+      const currentId = String(currentUserIdRef.current || "");
+      if (nextUser?.token && currentId && nextId && nextId !== currentId) {
+        window.location.reload();
+        return;
+      }
+
       setUserAuth(nextUser?.token ? nextUser : { token: null, savedPosts: [] });
     };
 
@@ -75,6 +93,7 @@ function App() {
   }, []);
 
   useEffect(() => {
+    currentUserIdRef.current = userAuth?.id || userAuth?._id || null;
     if (userAuth && userAuth.token) {
       persistUser(userAuth, false);
     } else {

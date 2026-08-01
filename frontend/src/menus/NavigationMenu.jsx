@@ -1,6 +1,6 @@
 import React, { useContext, useState } from "react";
-import axios from "axios";
 import { Icons } from "../components/icons";
+import { UserPlus } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -13,24 +13,65 @@ import { UserContext } from "../contexts/UserContext";
 import { useNavigate } from "react-router-dom";
 import ReportProblemModal from "../components/ReportProblemModal";
 import AboutProfileSheet from "../components/AboutProfileSheet";
+import AccountSwitcherSheet from "../components/AccountSwitcherSheet";
+import { authAPI } from "../services/api";
+import { getAccounts, removeAccount } from "../lib/accounts";
+import { clearCachedRequestsByPrefix } from "../utils/requestCache";
+import { deleteFeedCacheForUser } from "../utils/feedCache";
 
 export default function NavigationMenu() {
   const { userAuth, setUserAuth } = useContext(UserContext);
   const navigate = useNavigate();
   const [isProblemOpen, setIsProblemOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [isSwitcherOpen, setIsSwitcherOpen] = useState(false);
   // Only affects whether the entry is shown. The panel itself is gated by the
   // server, so a tampered role here gets a "nothing here" screen.
   const isStaff = ["admin", "super_admin"].includes(userAuth?.role);
 
-  const handleLogOut = () => {
-    axios
-      .post(`${import.meta.env.VITE_SERVER}/auth/logout`, {}, { withCredentials: true })
-      .catch(() => null)
-      .finally(() => {
-        removeFromSession("user");
-        setUserAuth({ token: null, savedPosts: [] });
-      });
+  /**
+   * Signs this account out of the device, and *forgets* it.
+   *
+   * The distinction matters with several accounts signed in: the others keep
+   * their sessions, but this one has to become un-switchable rather than just
+   * hidden — so the server drops its session row and clears its cookie, and
+   * the local list drops the row. Logging back in is a password away, as it
+   * should be.
+   */
+  const handleLogOut = async () => {
+    const accountId = userAuth?.id || userAuth?._id || null;
+
+    try {
+      await authAPI.logout(accountId);
+    } catch {
+      // The cookie may already be gone. Clearing the client side regardless is
+      // the safer failure: never leave someone looking signed in when they
+      // asked not to be.
+    }
+
+    if (accountId) {
+      removeAccount(accountId);
+      /*
+       * And take this account's content off the device. Caches are keyed by
+       * user so nothing leaks *between* accounts, but leaving a signed-out
+       * account's feed and conversations in IndexedDB on a shared computer
+       * makes "logged out" a half-truth. Best effort — a failure here must not
+       * stop the sign-out.
+       */
+      await Promise.allSettled([
+        clearCachedRequestsByPrefix(`v1::${accountId}::`),
+        deleteFeedCacheForUser(accountId),
+      ]);
+    }
+    removeFromSession("user");
+    setUserAuth({ token: null, savedPosts: [] });
+
+    /*
+     * Straight to login rather than silently becoming whoever is next in the
+     * list — being signed in as an account you didn't choose is worse than an
+     * extra tap.
+     */
+    navigate("/login");
   };
 
   const handleSavedPosts = () => {
@@ -119,6 +160,19 @@ export default function NavigationMenu() {
 
           <DropdownMenuSeparator className="h-[1.4px] my-0" />
 
+          {/* The long press on the nav avatar is the phone gesture; this is how
+              you find the same thing with a mouse. */}
+          <DropdownMenuItem
+            onClick={() => setIsSwitcherOpen(true)}
+            className="flex justify-between items-center p-3 mx-2 mt-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+          >
+            <span>
+              Switch account
+              {getAccounts().length > 1 ? ` (${getAccounts().length})` : ""}
+            </span>
+            <UserPlus className="h-[18px] w-[18px]" />
+          </DropdownMenuItem>
+
           <DropdownMenuItem
             onClick={() => setIsProblemOpen(true)}
             className="flex justify-between items-center p-3 mx-2 mt-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950   hover:bg-neutral-800 hover:rounded-xl outline-none"
@@ -147,6 +201,10 @@ export default function NavigationMenu() {
           username={userAuth.username}
           onClose={() => setIsAboutOpen(false)}
         />
+      )}
+
+      {isSwitcherOpen && (
+        <AccountSwitcherSheet onClose={() => setIsSwitcherOpen(false)} />
       )}
     </>
   );

@@ -1,5 +1,5 @@
 import React, { useContext, useRef, useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
+import { useNavigate, Navigate, useSearchParams } from "react-router-dom";
 import InputBox from "../components/InputBox";
 import { Link } from "react-router-dom";
 import { UserContext } from "../contexts/UserContext";
@@ -15,6 +15,18 @@ import ReportProblemModal from "../components/ReportProblemModal";
 const UserAuthForm = ({ type }) => {
   const { userAuth: { token }, setUserAuth } = useContext(UserContext);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+
+  /*
+   * "Add account" mode. The guard below sends a signed-in visitor straight
+   * home, which is right for someone who wandered onto /login — and exactly
+   * wrong for someone who is signed in and deliberately adding a second
+   * account. `?add=1` is the switcher saying it meant this.
+   */
+  const isAddingAccount =
+    type === "login" && searchParams.get("add") === "1" && Boolean(token);
+  // Prefilled when re-authenticating an account whose session expired.
+  const prefillLogin = searchParams.get("username") || "";
   const formRef = useRef(null);
   const [loading, setLoading] = useState(false);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
@@ -30,6 +42,7 @@ const UserAuthForm = ({ type }) => {
         { withCredentials: true }
       );
 
+      // Also records the account in this device's switcher list.
       persistUser(data);
 
       setUserAuth((prevAuth) => ({
@@ -38,8 +51,31 @@ const UserAuthForm = ({ type }) => {
         token: data.token,
       }));
 
+      const goingToSetup = Boolean(data.newUser) || type === "signup";
+
+      /*
+       * Even on the way to profile setup, adding an account has to be a hard
+       * navigation — the providers, socket and caches in memory belong to the
+       * account we just left.
+       */
+      if (isAddingAccount && goingToSetup) {
+        window.location.assign("/profile-setup");
+        return;
+      }
+
+      if (isAddingAccount) {
+        toast.success(`Switched to @${data.username}`);
+        /*
+         * A hard navigation, matching the switcher: every provider, cache and
+         * socket belongs to the account we just left, and a request issued as
+         * one account resolving as another is not a bug worth risking.
+         */
+        window.location.assign("/");
+        return;
+      }
+
       toast.success(type === "signup" ? "Signed up successfully!" : "Logged in successfully!");
-      navigate(data.newUser || type === "signup" ? "/profile-setup" : "/", {
+      navigate(goingToSetup ? "/profile-setup" : "/", {
         state: {
           from: "google-auth",
           newUser: data.newUser,
@@ -134,7 +170,8 @@ const UserAuthForm = ({ type }) => {
     }
   };
 
-  if (token && type === "login") {
+  // Signed in and not deliberately adding another account — nothing to do here.
+  if (token && type === "login" && !isAddingAccount) {
     return <Navigate to="/" />;
   }
 
@@ -178,11 +215,22 @@ const UserAuthForm = ({ type }) => {
           className="w-[80%] max-w-[400px] flex flex-col items-center"
         >
           <Icons.logo className="w-20 h-20 mb-4 mx-auto" />
-          <h1 className="text-white font-bold mb-4">
-            {type === "login"
-              ? "Log in with your Gossips account"
-              : "Create your Gossips account"}
+          <h1 className="text-white font-bold mb-4 text-center">
+            {type !== "login"
+              ? "Create your Gossips account"
+              : isAddingAccount
+                ? "Add another account"
+                : "Log in with your Gossips account"}
           </h1>
+
+          {/* Signing in here doesn't sign the current account out — worth
+              saying, because every other login screen in existence does. */}
+          {isAddingAccount && (
+            <p className="text-neutral-400 text-sm text-center mb-4">
+              You'll stay logged in to your other accounts and can switch back
+              at any time.
+            </p>
+          )}
 
           {type === "signup" ? (
             <>
@@ -194,6 +242,9 @@ const UserAuthForm = ({ type }) => {
               name="loginmethod"
               type="text"
               placeholder="Username, Phone or Email"
+              // Filled in when re-authenticating an account whose session
+              // expired, so it's a password away rather than a retype.
+              value={prefillLogin}
             />
           )}
           <InputBox name="password" type="password" placeholder="Password" />

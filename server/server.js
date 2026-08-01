@@ -21,13 +21,21 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { createServer } from "http";
 import { initializeSocket, getIO, getUserSocket } from "./config/socket.js";
+import { ALLOWED_ORIGINS } from "./config/origins.js";
 
 const app = express();
 
-const allowedOrigins = [
-  "http://localhost:5173",
-  "https://gossipsss.netlify.app",
-];
+/*
+ * Render (and any CDN) terminates the connection, so without this every
+ * request reports the edge's address as req.ip — and the rate limiters key on
+ * that, turning a per-user limit into a platform-wide one. 1 = trust exactly
+ * one hop, which is what a single reverse proxy warrants; trusting all hops
+ * would let a client forge its own address via X-Forwarded-For.
+ */
+app.set("trust proxy", 1);
+
+// Shared with the CSRF guard on the auth routes — see config/origins.js.
+const allowedOrigins = ALLOWED_ORIGINS;
 
 app.use(
   cors({
@@ -51,6 +59,9 @@ app.use(
       // header nor an IP lookup resolved a country. See utils/geo.js.
       "X-Client-Timezone",
       "X-Client-Locale",
+      // Names the browser so a session row can mean "this account on this
+      // device". Not a credential — see requestDeviceId in authController.
+      "X-Device-Id",
     ],
     /*
      * Those two custom headers ride on every request, which makes even an

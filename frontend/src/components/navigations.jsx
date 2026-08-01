@@ -1,14 +1,29 @@
-import React, { useContext } from "react";
+import React, { useContext, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { Icons } from "./icons";
 import { UserContext } from "../contexts/UserContext";
 import { useNavigate } from "react-router-dom";
+import AccountSwitcherSheet from "./AccountSwitcherSheet";
+import { useLongPress } from "../hooks/useLongPress";
 
 export default function Navigation({ layoutContext }) {
   const location = useLocation();
   const path = location.pathname;
   const { userAuth, unreadNotificationCount } = useContext(UserContext);
   const navigate = useNavigate();
+  const [isSwitcherOpen, setIsSwitcherOpen] = useState(false);
+
+  /*
+   * Long press on your own avatar opens the switcher — the Instagram gesture.
+   * The hook also swallows the click that ends the press, so the nav doesn't
+   * navigate to the profile behind the sheet that just opened.
+   */
+  const { handlers: longPressHandlers, consumeClick } = useLongPress(() =>
+    setIsSwitcherOpen(true)
+  );
+
+  const profilePath = `/${userAuth?.username || "profile"}`;
+  const isOwnProfile = path === profilePath;
 
   const openCreateModal =
     layoutContext?.openCreateModal ||
@@ -104,23 +119,48 @@ export default function Navigation({ layoutContext }) {
       </Link>
 
       <Link
-        to={`/${userAuth?.username || "profile"}`}
+        to={profilePath}
+        {...longPressHandlers}
+        onClick={consumeClick}
+        aria-label="Your profile. Press and hold to switch account."
         className="hover:bg-zinc-800 p-4 sm:py-5 sm:px-8 rounded-lg transform transition-all duration-150 ease-out hover:scale-100 active:scale-90 flex items-center justify-center w-full"
       >
+        {/*
+          Your own face on phones, where this doubles as the account switcher —
+          a generic glyph gives no hint that which account you're in is a thing
+          you can change. Desktop keeps the outline icon: it sits in a row of
+          line icons and an avatar there just looks misaligned.
+        */}
+        {userAuth?.profilePic ? (
+          <img
+            src={userAuth.profilePic}
+            alt=""
+            referrerPolicy="no-referrer"
+            draggable={false}
+            className={`sm:hidden h-[26px] w-[26px] rounded-full object-cover transition-all ${
+              isOwnProfile
+                ? "ring-2 ring-white"
+                : "ring-1 ring-neutral-700 opacity-80"
+            }`}
+          />
+        ) : (
+          <Icons.profile
+            className="sm:hidden h-[26px] w-[26px] text-lg"
+            strokeColor={isOwnProfile ? "white" : "#4d4d4d"}
+            fill={isOwnProfile ? "white" : "transparent"}
+          />
+        )}
+
         <Icons.profile
-          className="h-[26px] w-[26px] text-lg"
-          strokeColor={
-            path.match(new RegExp(`^/${userAuth?.username || "profile"}$`))
-              ? "white"
-              : "#4d4d4d"
-          }
-          fill={
-            path.match(new RegExp(`^/${userAuth?.username || "profile"}$`))
-              ? "white"
-              : "transparent"
-          }
+          className="hidden sm:block h-[26px] w-[26px] text-lg"
+          strokeColor={isOwnProfile ? "white" : "#4d4d4d"}
+          fill={isOwnProfile ? "white" : "transparent"}
         />
       </Link>
+
+      {isSwitcherOpen && (
+        <AccountSwitcherSheet onClose={() => setIsSwitcherOpen(false)} />
+      )}
 
       <Link
         to="/chat"

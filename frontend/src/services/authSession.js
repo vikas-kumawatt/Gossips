@@ -1,4 +1,5 @@
 import axios from "axios";
+import { upsertAccount } from "../lib/accounts";
 
 const AUTH_EVENT = "auth:updated";
 const BASE_URL = import.meta.env.VITE_SERVER;
@@ -24,12 +25,21 @@ const safeParseUser = () => {
 
 const persistUser = (user, emitEvent = true) => {
   if (!user?.token) {
+    /*
+     * Only the *active* user is cleared. The account list is deliberately left
+     * alone: an expired access token is not a sign-out, and wiping the list
+     * here would silently un-add every other account any time a refresh
+     * failed. Removing an account is an explicit act — see signOutAccount.
+     */
     localStorage.removeItem("user");
     if (emitEvent) window.dispatchEvent(new Event(AUTH_EVENT));
     return;
   }
 
   localStorage.setItem("user", JSON.stringify(user));
+  // Signing in, switching and refreshing all funnel through here, so this is
+  // the one place that has to remember who's on this device.
+  if (user.id || user._id) upsertAccount(user);
   if (emitEvent) window.dispatchEvent(new Event(AUTH_EVENT));
 };
 
@@ -38,9 +48,26 @@ const isRefreshRequest = (requestUrl = "") =>
 
 const refreshAccessToken = async () => {
   if (!refreshRequest) {
+    /*
+     * Name the account. With several signed in, the shared cookie points at
+     * whoever was switched to last — so a tab still showing account A would
+     * otherwise be handed a session for account B and start acting as them.
+     * The server rejects a mismatch; the assertion below is the second belt.
+     */
+    const accountId = safeParseUser()?.id || safeParseUser()?._id || null;
+
     refreshRequest = refreshClient
-      .post("/auth/refresh", {})
-      .then(({ data }) => data.token)
+      .post(
+        "/auth/refresh",
+        { accountId },
+        deviceId ? { headers: { "X-Device-Id": deviceId } } : undefined
+      )
+      .then(({ data }) => {
+        if (accountId && data.accountId && String(data.accountId) !== String(accountId)) {
+          throw new Error("Refreshed a different account");
+        }
+        return data.token;
+      })
       .finally(() => {
         refreshRequest = null;
       });
@@ -62,6 +89,32 @@ const refreshAccessToken = async () => {
  * are only read on sign-in. Attaching them to one instance meant the fallback
  * silently never fired.
  */
+/**
+ * A stable id for this browser.
+ *
+ * The server keys one session row per (account, device) on it, which is what
+ * makes signing in on a phone stop evicting the laptop. It names a device and
+ * authorises nothing, so it lives in plain localStorage and forging one buys
+ * an attacker only a session row of their own.
+ */
+const deviceId = (() => {
+  try {
+    const existing = localStorage.getItem("deviceId");
+    if (existing && /^[A-Za-z0-9_-]{8,64}$/.test(existing)) return existing;
+
+    const fresh =
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID().replace(/-/g, "")
+        : Math.random().toString(36).slice(2) + Date.now().toString(36);
+    localStorage.setItem("deviceId", fresh);
+    return fresh;
+  } catch {
+    // Private mode: the server falls back to a random per-sign-in id, which
+    // costs a spare session row and nothing else.
+    return "";
+  }
+})();
+
 const deviceHints = (() => {
   try {
     return {
@@ -86,6 +139,7 @@ const attachAuthInterceptors = (client) => {
     }
     if (deviceHints.timeZone) config.headers["X-Client-Timezone"] = deviceHints.timeZone;
     if (deviceHints.locale) config.headers["X-Client-Locale"] = deviceHints.locale;
+    if (deviceId) config.headers["X-Device-Id"] = deviceId;
     return config;
   });
 

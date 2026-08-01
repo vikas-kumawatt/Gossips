@@ -64,6 +64,34 @@ const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
 const REFRESH_TOKEN_COOKIE_NAME = "refreshToken";
 
+/*
+ * Multi-account sessions.
+ *
+ * Instagram-style switching needs a live session per account on this device,
+ * not just the one. The refresh token stays where it belongs — an httpOnly
+ * cookie the page's JavaScript can't read — so instead of one cookie there is
+ * one *per account*: `rt_<userId>`. Switching is then the server reading the
+ * cookie for the account you asked for and minting a fresh access token from
+ * it. Nothing that could be stolen by XSS ever reaches localStorage; the list
+ * the client keeps is names and avatars, and it is not what authorises
+ * anything.
+ *
+ * Scoped to /auth so they ride only on the four routes that read them.
+ * Otherwise five signed-in accounts would attach five refresh tokens to every
+ * image request and API call on the site.
+ */
+const ACCOUNT_COOKIE_PREFIX = "rt_";
+const ACCOUNT_COOKIE_PATH = "/auth";
+// Mirrors MAX_ACCOUNTS in frontend/src/lib/accounts.js.
+const MAX_SWITCHABLE_ACCOUNTS = 5;
+
+const accountCookieName = (userId) => `${ACCOUNT_COOKIE_PREFIX}${userId}`;
+
+const getAccountCookieOptions = () => ({
+  ...getRefreshTokenCookieOptions(),
+  path: ACCOUNT_COOKIE_PATH,
+});
+
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
@@ -91,14 +119,51 @@ const createRefreshToken = (userId) =>
  * Store a refresh token in UserSession (hash only — never plaintext).
  * If a stale session with the same hash exists, replace it.
  */
-const storeRefreshToken = async (userId, refreshToken, deviceId = null) => {
+/**
+ * A browser's own id, so a session row means "this account on this device".
+ *
+ * The client mints one and keeps it; a request without the header gets a
+ * random one, which simply means that sign-in occupies a row of its own until
+ * the TTL reaps it. Either way it is *not* a credential — it names a device,
+ * it doesn't authorise anything, and forging one buys nothing.
+ */
+const requestDeviceId = (req) => {
+  const header = req?.headers?.["x-device-id"];
+  if (typeof header === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(header)) return header;
+  return `srv_${crypto.randomBytes(12).toString("hex")}`;
+};
+
+/**
+ * Store a refresh token in UserSession (hash only — never plaintext).
+ *
+ * The filter has to include a real device id. It used to be
+ * `{ user, deviceId: null }` while nothing ever set a device id, so the upsert
+ * always matched the account's single existing row and overwrote it — one
+ * session per user across every device they owned. Signing in on a phone
+ * silently logged out the laptop, and with account switching that fires on
+ * every switch. The unique {user, deviceId} index gives the intended "one
+ * session per account per device" once the id is actually populated.
+ */
+const storeRefreshToken = async (userId, refreshToken, deviceId) => {
   const expiresAt = new Date(
     Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
   );
   const tokenHash = hashToken(refreshToken);
 
+  /*
+   * Never let the filter go device-less. Mongoose strips undefined keys, so a
+   * caller that forgot to pass one would silently turn this into
+   * `{ user }` — matching *any* session the account has anywhere and
+   * overwriting it. That is exactly the bug this function was rewritten to
+   * fix, and it fails invisibly, so it gets a guard rather than a comment.
+   */
+  const device =
+    typeof deviceId === "string" && deviceId
+      ? deviceId
+      : `srv_${crypto.randomBytes(12).toString("hex")}`;
+
   await UserSession.findOneAndUpdate(
-    { user: userId, deviceId: deviceId ?? null },
+    { user: userId, deviceId: device },
     {
       $set: {
         refreshTokenHash: tokenHash,
@@ -112,19 +177,97 @@ const storeRefreshToken = async (userId, refreshToken, deviceId = null) => {
   );
 };
 
-const issueAuthTokens = async (userId, res) => {
+/**
+ * @param {object} [options]
+ * @param {boolean} [options.makeActive] whether this account becomes the one
+ *        the shared `refreshToken` cookie points at. False when merely
+ *        refreshing a background account: otherwise the pointer drifts to
+ *        "whoever refreshed last", and logout then compares the wrong tokens.
+ */
+const issueAuthTokens = async (userId, res, { makeActive = true, deviceId } = {}) => {
   const token = createAccessToken(userId);
   const refreshToken = createRefreshToken(userId);
 
-  await storeRefreshToken(userId, refreshToken);
-  res.cookie(
-    REFRESH_TOKEN_COOKIE_NAME,
-    refreshToken,
-    getRefreshTokenCookieOptions(),
-  );
+  await storeRefreshToken(userId, refreshToken, deviceId);
+
+  /*
+   * Two cookies, same token. `refreshToken` marks the account that is
+   * currently active — it is what a client with no idea about switching
+   * (or an older tab) falls back to. `rt_<id>` is the per-account copy that
+   * survives switching away and back.
+   */
+  if (makeActive) {
+    res.cookie(REFRESH_TOKEN_COOKIE_NAME, refreshToken, getRefreshTokenCookieOptions());
+  }
+  res.cookie(accountCookieName(userId), refreshToken, getAccountCookieOptions());
 
   return token;
 };
+
+/**
+ * Reads and validates the stored session for one account on this device.
+ *
+ * Four things have to hold, and each of them is a way a stale switcher entry
+ * goes wrong in practice: the cookie exists, the JWT verifies and is a
+ * *refresh* token for that exact account, a matching un-expired session row
+ * still exists (so a "log out everywhere" really did), and the account is
+ * still usable.
+ *
+ * @returns {Promise<{user: object, refreshToken: string}|null>}
+ */
+const readAccountSession = async (req, userId) => {
+  const refreshToken = req.cookies?.[accountCookieName(userId)];
+  if (!refreshToken) return null;
+
+  let decoded;
+  try {
+    decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+  } catch {
+    return null;
+  }
+
+  // The cookie name is attacker-controllable in the sense that anyone can set
+  // a cookie; the signature and this check are what make it meaningless to.
+  if (decoded.typ !== "refresh" || String(decoded.id) !== String(userId)) return null;
+
+  const session = await UserSession.findOne({
+    refreshTokenHash: hashToken(refreshToken),
+    refreshTokenExpiresAt: { $gt: new Date() },
+  }).lean();
+  if (!session || session.revokedAt) return null;
+
+  const user = await User.findById(decoded.id).select(
+    "username name email profilePic bio link isPrivate isVerified role counts accountStatus",
+  );
+  // Same rule as the auth middleware: deleted and deactivated accounts can't
+  // be signed into. A suspension is handled per-route, so it stays switchable.
+  if (!user || ["deleted", "deactivated"].includes(user.accountStatus)) return null;
+
+  return { user, refreshToken };
+};
+
+/** Every account id that has a cookie on this device, valid or not. */
+const cookieAccountIds = (req) =>
+  Object.keys(req.cookies || {})
+    .filter((name) => name.startsWith(ACCOUNT_COOKIE_PREFIX))
+    .map((name) => name.slice(ACCOUNT_COOKIE_PREFIX.length))
+    // A cookie name is free-form; only look up things shaped like an id.
+    .filter((id) => /^[a-f\d]{24}$/i.test(id));
+
+const sessionPayload = (user, token) => ({
+  id: user._id,
+  name: user.name,
+  email: user.email,
+  username: user.username,
+  profilePic: user.profilePic,
+  bio: user.bio,
+  link: user.link,
+  isPrivate: user.isPrivate,
+  isVerified: user.isVerified,
+  role: user.role,
+  counts: user.counts,
+  token,
+});
 
 /*
  * Was a local loop appending 1, 2, 3… to the email's local part. Two problems:
@@ -182,7 +325,9 @@ export const signupUser = async (req, res) => {
         existingUser.name = name || existingUser.name;
         await existingUser.save();
 
-        const token = await issueAuthTokens(existingUser._id, res);
+        const token = await issueAuthTokens(existingUser._id, res, {
+          deviceId: requestDeviceId(req),
+        });
         return res.status(200).json({
           message: "Account updated successfully",
           id: existingUser._id,
@@ -223,7 +368,9 @@ export const signupUser = async (req, res) => {
 
     recordSignInCountry(req, newUser._id);
 
-    const token = await issueAuthTokens(newUser._id, res);
+    const token = await issueAuthTokens(newUser._id, res, {
+      deviceId: requestDeviceId(req),
+    });
     return res.status(201).json({
       message: "User registered successfully",
       id: newUser._id,
@@ -282,7 +429,9 @@ export const loginUser = async (req, res) => {
 
     recordSignInCountry(req, user._id);
 
-    const token = await issueAuthTokens(user._id, res);
+    const token = await issueAuthTokens(user._id, res, {
+      deviceId: requestDeviceId(req),
+    });
 
     res.status(200).json({
       message: "Login successful",
@@ -344,7 +493,9 @@ export const googleLogin = async (req, res) => {
 
     recordSignInCountry(req, user._id);
 
-    const token = await issueAuthTokens(user._id, res);
+    const token = await issueAuthTokens(user._id, res, {
+      deviceId: requestDeviceId(req),
+    });
 
     res.status(200).json({
       message: "Login successful",
@@ -542,7 +693,18 @@ export const resetPassword = async (req, res) => {
 
 export const refreshAccessToken = async (req, res) => {
   try {
-    const refreshToken = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    /*
+     * The client sends the account it believes is signed in. Without that this
+     * would always refresh whoever the `refreshToken` cookie last pointed at —
+     * so after switching to B, an older tab still showing A would silently be
+     * handed B's session. Falls back to the shared cookie for clients that
+     * predate switching.
+     */
+    const requestedId = req.body?.accountId;
+    const accountCookie = requestedId ? req.cookies?.[accountCookieName(requestedId)] : null;
+    const sharedCookie = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    const refreshToken = accountCookie || sharedCookie;
+
     if (!refreshToken) {
       return res.status(401).json({ message: "Refresh token missing" });
     }
@@ -551,6 +713,15 @@ export const refreshAccessToken = async (req, res) => {
     try {
       decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
     } catch {
+      return res.status(401).json({ message: "Invalid refresh token" });
+    }
+
+    /*
+     * If the client named an account, the token had better belong to it. This
+     * is what stops the fallback above from quietly upgrading tab A into a
+     * session for account B.
+     */
+    if (requestedId && String(decoded.id) !== String(requestedId)) {
       return res.status(401).json({ message: "Invalid refresh token" });
     }
 
@@ -574,40 +745,191 @@ export const refreshAccessToken = async (req, res) => {
       return res.status(401).json({ message: "User not found" });
     }
 
-    const token = await issueAuthTokens(user._id, res);
-    return res.status(200).json({ token });
+    const token = await issueAuthTokens(user._id, res, {
+      /*
+       * A background account refreshing must not become "the active account".
+       * Only a refresh that came through the shared cookie — i.e. was already
+       * the active one — is allowed to rewrite that pointer.
+       */
+      makeActive: refreshToken === sharedCookie,
+      deviceId: requestDeviceId(req),
+    });
+    // The id goes back so the client can assert it got what it asked for.
+    return res.status(200).json({ token, accountId: user._id });
   } catch (error) {
     console.error("refreshAccessToken error:", error);
     return res.status(500).json({ error: "Failed to refresh token" });
   }
 };
 
+/**
+ * POST /auth/logout — signs one account out of this device.
+ *
+ * `accountId` names which; without it, the active one. The distinction is the
+ * whole point of the switcher: logging out of a second account must leave the
+ * others signed in, and must make the one you left un-switchable rather than
+ * just hidden — so the session row goes and the cookie is cleared, not merely
+ * dropped from a list in localStorage.
+ */
 export const logoutUser = async (req, res) => {
   try {
-    const refreshToken = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    const activeToken = req.cookies?.[REFRESH_TOKEN_COOKIE_NAME];
+    const rawId = req.body?.accountId;
+    const requestedId = /^[a-f\d]{24}$/i.test(String(rawId || "")) ? String(rawId) : null;
+    const accountToken = requestedId ? req.cookies?.[accountCookieName(requestedId)] : null;
 
-    if (refreshToken) {
-      let decoded = null;
+    /*
+     * No falling back to the active account. This used to be
+     * `accountToken || activeToken`, so asking to sign out account X whose
+     * cookie had already been pruned would sign out whoever was *currently*
+     * signed in instead — the client asks for one account and loses another.
+     * A missing cookie means that account is already signed out here.
+     */
+    const target = requestedId ? accountToken : activeToken;
+
+    let loggedOutId = requestedId || null;
+    if (typeof target === "string" && target) {
       try {
-        decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+        const decoded = jwt.verify(target, process.env.JWT_SECRET);
+        loggedOutId = decoded?.id || loggedOutId;
       } catch {
-        decoded = null;
+        // An unverifiable token still gets its cookie cleared below.
       }
-
-      if (decoded?.id) {
-        const tokenHash = hashToken(refreshToken);
-        await UserSession.deleteOne({ refreshTokenHash: tokenHash });
-      }
+      // By hash, so only this device's session dies — other devices keep theirs.
+      await UserSession.deleteOne({ refreshTokenHash: hashToken(target) });
     }
 
-    res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, {
+    const baseOptions = {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
-    });
-    return res.status(200).json({ message: "Logged out successfully" });
+    };
+
+    if (loggedOutId) {
+      res.clearCookie(accountCookieName(loggedOutId), {
+        ...baseOptions,
+        path: ACCOUNT_COOKIE_PATH,
+      });
+    }
+
+    /*
+     * Only clear the shared "active account" pointer when it is the account
+     * being logged out. Clearing it while signing out a *different* account
+     * would sign the current one out too.
+     */
+    /*
+     * Only clear the shared pointer when it really is this account's. Comparing
+     * the raw tokens is exact — the two cookies hold the same string for the
+     * active account and diverge for any other.
+     */
+    const activeIsTarget = !requestedId || (Boolean(activeToken) && activeToken === target);
+    if (activeIsTarget) res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, baseOptions);
+
+    return res.status(200).json({ message: "Logged out successfully", accountId: loggedOutId });
   } catch (error) {
     console.error("logoutUser error:", error);
     return res.status(500).json({ error: "Failed to logout" });
+  }
+};
+
+/**
+ * GET /auth/accounts — which accounts can be switched to from this device.
+ *
+ * The client keeps its own list for instant rendering, but that list is names
+ * and avatars and it goes stale in ways only the server knows about: the
+ * session expired, someone signed out everywhere, an admin revoked it, the
+ * account was deleted. This is the authority, and it prunes the cookies it
+ * finds dead along the way.
+ */
+export const listAccounts = async (req, res) => {
+  try {
+    const ids = cookieAccountIds(req);
+    if (!ids.length) return res.status(200).json({ accounts: [] });
+
+    const results = await Promise.all(
+      ids.map(async (id) => ({ id, session: await readAccountSession(req, id) })),
+    );
+
+    const accounts = [];
+    for (const { id, session } of results) {
+      if (!session) {
+        // Dead cookie — clear it so it stops being sent and stops being asked
+        // about on every open of the switcher.
+        res.clearCookie(accountCookieName(id), {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+          path: ACCOUNT_COOKIE_PATH,
+        });
+        continue;
+      }
+      const { user } = session;
+      /*
+       * The cap is enforced here as well as in the client's list — the cookies
+       * are what actually make an account switchable, so a client that ignored
+       * the limit would otherwise keep a sixth alive.
+       */
+      if (accounts.length >= MAX_SWITCHABLE_ACCOUNTS) {
+        res.clearCookie(accountCookieName(id), {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+          path: ACCOUNT_COOKIE_PATH,
+        });
+        continue;
+      }
+      accounts.push({
+        id: user._id,
+        username: user.username,
+        name: user.name || "",
+        profilePic: user.profilePic,
+        isVerified: Boolean(user.isVerified),
+      });
+    }
+
+    return res.status(200).json({ accounts });
+  } catch (error) {
+    console.error("listAccounts error:", error);
+    return res.status(500).json({ error: "Failed to load accounts" });
+  }
+};
+
+/**
+ * POST /auth/switch — become another account already signed in on this device.
+ *
+ * Not behind `protect`: you may be switching *away from* a session that has
+ * just expired, which is exactly when you most want to. The authorisation is
+ * the target account's own refresh cookie — proof that this browser completed
+ * a real sign-in for it and hasn't been signed out since.
+ */
+export const switchAccount = async (req, res) => {
+  try {
+    const { accountId } = req.body || {};
+    if (!accountId || !/^[a-f\d]{24}$/i.test(String(accountId))) {
+      return res.status(400).json({ error: "accountId is required" });
+    }
+
+    const session = await readAccountSession(req, accountId);
+    if (!session) {
+      // Deliberately the same answer for "no cookie", "expired", "revoked" and
+      // "no such account": a switch endpoint shouldn't confirm who exists.
+      return res.status(401).json({ error: "Please log in to this account again" });
+    }
+
+    // Rotate, exactly as a refresh does — the token that got us here is spent.
+    await UserSession.deleteOne({ refreshTokenHash: hashToken(session.refreshToken) });
+
+    recordSignInCountry(req, session.user._id);
+    const token = await issueAuthTokens(session.user._id, res, {
+      deviceId: requestDeviceId(req),
+    });
+
+    return res.status(200).json({
+      message: "Switched account",
+      ...sessionPayload(session.user, token),
+    });
+  } catch (error) {
+    console.error("switchAccount error:", error);
+    return res.status(500).json({ error: "Failed to switch account" });
   }
 };

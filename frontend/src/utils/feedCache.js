@@ -99,3 +99,35 @@ export const deleteFeedCacheSnapshot = async (userId, tab) => {
     tx.onerror = () => reject(tx.error);
   });
 };
+
+/**
+ * Every cached feed belonging to one account.
+ *
+ * Logging out has to take the content with it: the promise the account
+ * switcher makes is that a signed-out account is gone from this device, and a
+ * feed sitting in IndexedDB on a shared laptop is not gone. Deleting by key
+ * prefix rather than by tab avoids having to know the tab names here.
+ */
+export const deleteFeedCacheForUser = async (userId) => {
+  if (!userId) return;
+  const db = await getDb();
+  if (!db) return;
+
+  const prefix = `${String(userId)}::`;
+
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const cursorRequest = store.openCursor();
+
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor) return;
+      if (String(cursor.key).startsWith(prefix)) cursor.delete();
+      cursor.continue();
+    };
+
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};

@@ -161,8 +161,31 @@ export const authAPI = {
     api.post("/auth/forgot-password", { email }).then((r) => r.data),
   resetPassword: (data) =>
     api.post("/auth/reset-password", data).then((r) => r.data),
-  refresh: () => api.post("/auth/refresh", {}).then((r) => r.data),
-  logout: () => api.post("/auth/logout").then((r) => r.data),
+
+  /**
+   * Which accounts this device can switch to. The server checks each stored
+   * session, so an entry missing from this list is one whose session is gone.
+   */
+  /*
+   * `_retry: true` opts these three out of the 401 interceptor. A 401 here is
+   * the answer — "that account's session is gone" — not an expired access
+   * token, and letting the interceptor treat it as one would rotate the
+   * *current* account's session and silently replay the request.
+   */
+  listAccounts: () =>
+    api
+      .get("/auth/accounts", { skipRequestCacheInterceptor: true, _retry: true })
+      .then((r) => r.data),
+
+  switchAccount: (accountId) =>
+    api.post("/auth/switch", { accountId }, { _retry: true }).then((r) => r.data),
+
+  // `accountId` signs out one account and leaves the others alone; omitting it
+  // signs out whoever is active.
+  logout: (accountId) =>
+    api
+      .post("/auth/logout", accountId ? { accountId } : {}, { _retry: true })
+      .then((r) => r.data),
 };
 
 // ─── User ────────────────────────────────────────────────────────────────────
