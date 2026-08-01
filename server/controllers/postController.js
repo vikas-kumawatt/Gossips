@@ -22,6 +22,7 @@ import {
 import { sendNotification } from "../utils/notifications.js";
 import { uploadMedia } from "../utils/uploadFiles.js";
 import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
+import { loadRepostFeedEntries, mergeFeedEntries } from "../utils/feedReposts.js";
 import { normalizeMedia } from "../utils/mediaTypes.js";
 import { getOrSet, del, CacheKeys } from "../utils/cache.js";
 import { resolveMentions } from "../utils/mentions.js";
@@ -504,19 +505,81 @@ export const getHomeFeed = async (req, res) => {
       {
         $facet: {
           paginatedIds: [
-            { $sort: { createdAt: -1 } },
+            // `_id` matches the merge's tiebreak, so which posts the facet
+            // returns under a same-millisecond tie is deterministic.
+            { $sort: { createdAt: -1, _id: -1 } },
             { $match: cursorQuery },
             { $limit: limitNum + 1 },
-            { $project: { _id: 1 } },
+            { $project: { _id: 1, createdAt: 1 } },
           ],
         },
       },
     ]);
 
-    const paginatedIds = feedMeta?.paginatedIds || [];
-    const hasNextPage = paginatedIds.length > limitNum;
-    const visibleIds = hasNextPage ? paginatedIds.slice(0, limitNum) : paginatedIds;
-    const orderedIds = visibleIds.map((d) => d._id.toString());
+    /*
+     * Reposts from the accounts this tab is scoped to, merged into the same
+     * stream. An original sits at its own createdAt; a repost sits at the
+     * moment it was reposted, so the two are separate chronologies that
+     * merge-sort into one — see utils/feedReposts.js for why that's exact
+     * rather than approximate.
+     *
+     * "all" has no author scope of its own, so reposts there come from the
+     * people you follow, which is the only sensible reading of "reposts in my
+     * feed" on an unscoped tab.
+     */
+    const hiddenSet = new Set(hiddenAuthorIds.map((id) => id.toString()));
+    const reposterIds = (
+      type === "favorites" ? query.author?.$in || [] : followingIds
+    ).filter((id) => !hiddenSet.has(id.toString()));
+
+    const { entries: repostEntries, floor: repostFloor } = await loadRepostFeedEntries({
+      reposterIds,
+      cursorQuery,
+      limit: limitNum,
+      visibility: {
+        viewerId: userId,
+        followingIds,
+        excludedAuthorIds: hiddenAuthorIds,
+        dismissedPostIds: dismissedPostIds.filter(Boolean),
+      },
+    });
+
+    const postEntries = (feedMeta?.paginatedIds || []).map((d) => ({
+      sortAt: d.createdAt,
+      sortId: d._id,
+      postId: d._id.toString(),
+      repostedBy: null,
+    }));
+
+    const entries = mergeFeedEntries(postEntries, repostEntries, limitNum);
+
+    /*
+     * Saturation of either source decides whether there's more, not the length
+     * of the merged page. The merge drops duplicate posts, so a viral post
+     * reposted by eleven followees collapses to one entry — reading that as
+     * "nothing left" would end the feed after a single card.
+     */
+    const hasNextPage =
+      entries.length > limitNum ||
+      postEntries.length > limitNum ||
+      repostEntries.length > limitNum;
+
+    let visibleEntries = entries.slice(0, limitNum);
+
+    /*
+     * The repost window was examined only down to `repostFloor`; anything
+     * older is unseen. Letting the cursor past it would skip those reposts
+     * permanently, so the page stops there instead — short, but complete.
+     */
+    if (repostFloor) {
+      const floorTime = new Date(repostFloor).getTime();
+      const clamped = visibleEntries.filter(
+        (e) => new Date(e.sortAt).getTime() >= floorTime
+      );
+      // Never clamp to nothing, or paging can't advance at all.
+      if (clamped.length) visibleEntries = clamped;
+    }
+    const orderedIds = [...new Set(visibleEntries.map((e) => e.postId))];
 
     const posts = orderedIds.length
       ? await Post.find({ _id: { $in: orderedIds } })
@@ -536,7 +599,33 @@ export const getHomeFeed = async (req, res) => {
       : [];
 
     const postMap = new Map(posts.map((p) => [p._id.toString(), p]));
-    const orderedPosts = orderedIds.map((id) => postMap.get(id)).filter(Boolean);
+
+    /*
+     * A repost renders the original post with an attribution line, so the
+     * fields are stamped onto the post itself rather than wrapping it — the
+     * feed response stays a flat array of posts, and PostCard already reads
+     * `isRepost` / `reposterUsername` off the item.
+     *
+     * `feedId` is what makes an entry unique: the same post can legitimately
+     * appear as someone's repost and, later, on its own. Keying the client's
+     * dedupe on the post id would silently drop the second one.
+     */
+    const orderedPosts = visibleEntries
+      .map((entry) => {
+        const post = postMap.get(entry.postId);
+        if (!post) return null;
+        if (!entry.repostedBy) return { ...post, feedId: post._id.toString() };
+        return {
+          ...post,
+          feedId: entry.sortId.toString(),
+          isRepost: true,
+          reposterUsername: entry.repostedBy.username,
+          reposterName: entry.repostedBy.name || "",
+          reposterProfilePic: entry.repostedBy.profilePic || "",
+          repostedAt: entry.sortAt,
+        };
+      })
+      .filter(Boolean);
 
     // Batch viewer like/repost/save status
     const [likedEdges, repostedEdges, savedEdges] = orderedPosts.length
@@ -579,9 +668,16 @@ export const getHomeFeed = async (req, res) => {
       viewerCanReply: viewerCanReplyFromSets(p, userId, { followingSet, followerSet }),
     }));
 
-    // Pagination boundary must stay chronological (the page is fetched in createdAt
-    // order), so capture the cursor from the chronological tail BEFORE re-ranking.
-    const cursorSource = postsWithViewer[postsWithViewer.length - 1];
+    /*
+     * The boundary is the last entry in merged order, before the down-rank
+     * shuffle. For a repost that's the repost's own date and id, not the
+     * post's — using the post's would rewind the cursor to whenever the
+     * original was written and re-serve everything since.
+     */
+    const lastEntry = visibleEntries[visibleEntries.length - 1];
+    const cursorSource = lastEntry
+      ? { createdAt: lastEntry.sortAt, _id: lastEntry.sortId }
+      : null;
 
     // Soft down-rank: stable-partition posts matching a negative author/hashtag
     // signal to the bottom of the page (they're shown less prominently, not removed).
@@ -607,7 +703,7 @@ export const getHomeFeed = async (req, res) => {
       posts: await decorateContent(rankedPosts, userId),
       pageInfo: {
         hasNextPage,
-        nextCursor: hasNextPage ? encodeCursor(cursorSource) : null,
+        nextCursor: hasNextPage && cursorSource ? encodeCursor(cursorSource) : null,
       },
     });
   } catch (error) {
@@ -1495,6 +1591,9 @@ export const getSavedPosts = async (req, res) => {
     const followedAuthorSet = new Set(followedEdges.map((f) => f.following.toString()));
     const postsWithViewer = orderedPosts.map((p) => ({
       ...p,
+      // Same entry identity the home feed stamps: these lists never contain
+      // reposts, so an entry is just the post.
+      feedId: p._id.toString(),
       viewerHasLiked: likedSet.has(p._id.toString()),
       viewerHasReposted: repostedSet.has(p._id.toString()),
       viewerHasSaved: true,
@@ -1568,6 +1667,7 @@ export const getLikedPosts = async (req, res) => {
     const savedSet = new Set(savedEdges.map((s) => s.post.toString()));
     const postsWithViewer = orderedPosts.map((p) => ({
       ...p,
+      feedId: p._id.toString(),
       viewerHasLiked: true,
       viewerHasReposted: repostedSet.has(p._id.toString()),
       viewerHasSaved: savedSet.has(p._id.toString()),

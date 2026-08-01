@@ -1,3 +1,5 @@
+import mongoose from "mongoose";
+
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 100;
 
@@ -39,12 +41,24 @@ export const decodeCursor = (cursor) => {
 export const buildCursorQuery = (cursor, direction = "desc") => {
   if (!cursor) return {};
   const op = direction === "asc" ? "$gt" : "$lt";
+
+  /*
+   * The id is cast explicitly. `decodeCursor` returns it as a string, and
+   * while Mongoose casts a `find` filter it does not cast an aggregation
+   * pipeline — and in BSON ordering a string sorts below every ObjectId, so
+   * the tiebreak branch silently matched nothing and rows sharing the
+   * boundary millisecond were skipped.
+   */
+  const id = mongoose.isValidObjectId(cursor._id)
+    ? new mongoose.Types.ObjectId(cursor._id)
+    : cursor._id;
+
   return {
     $or: [
       { createdAt: { [op]: new Date(cursor.createdAt) } },
       {
         createdAt: new Date(cursor.createdAt),
-        _id: { [op]: cursor._id },
+        _id: { [op]: id },
       },
     ],
   };

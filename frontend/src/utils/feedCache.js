@@ -6,8 +6,10 @@ const DB_NAME = "gossips-feed-cache";
  * it was written for. Version 3 is the poll/location/typed-media change: the
  * home feed reads from here on load, so posts cached before those fields
  * existed rendered without a poll while every live-fetched surface showed one.
+ *
+ * Version 4 adds feedId/isRepost/reposterUsername for reposts in the feed.
  */
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const STORE_NAME = "feedSnapshots";
 
 let dbPromise = null;

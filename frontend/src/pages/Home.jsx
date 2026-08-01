@@ -93,6 +93,18 @@ export default function PagesLayout() {
   const [isRefetching, setIsRefetching] = useState(false);
   const observer = useRef();
   const postIds = useRef(new Set());
+  /*
+   * A feed entry's identity, decided by the server.
+   *
+   * Every feed endpoint stamps `feedId`: the post's id for an original, the
+   * repost's id for a repost. That's what lets the same post appear both on
+   * its own and as somebody's repost without one silently replacing the other.
+   *
+   * The fallback is only for a post the client made itself — the create
+   * response is a Post, not a feed entry, so it has never been through an
+   * endpoint that assigns one.
+   */
+  const entryKey = (post) => post?.feedId || post?._id;
   const shouldFetch = useRef(false);
   const requestEpochRef = useRef(0);
   const refetchInFlightRef = useRef(0);
@@ -137,7 +149,7 @@ export default function PagesLayout() {
       postIds.current.clear();
 
       const newPosts = data.posts || [];
-      newPosts.forEach((post) => postIds.current.add(post._id));
+      newPosts.forEach((post) => postIds.current.add(entryKey(post)));
 
       setPosts(newPosts);
 
@@ -188,7 +200,7 @@ export default function PagesLayout() {
         const cachedPosts = Array.isArray(cached.posts)
           ? cached.posts
           : [];
-        postIds.current = new Set(cachedPosts.map((post) => post._id));
+        postIds.current = new Set(cachedPosts.map(entryKey));
         setPosts(cachedPosts);
         setCursor(cached.cursor ?? null);
         setHasMore(Boolean(cached.hasMore));
@@ -226,9 +238,9 @@ export default function PagesLayout() {
 
         const nextPosts = data.posts || [];
         const newPosts = nextPosts.filter(
-          (post) => !postIds.current.has(post._id)
+          (post) => !postIds.current.has(entryKey(post))
         );
-        newPosts.forEach((post) => postIds.current.add(post._id));
+        newPosts.forEach((post) => postIds.current.add(entryKey(post)));
 
         let combinedPosts = [];
         setPosts((prevPosts) => {
@@ -275,14 +287,19 @@ export default function PagesLayout() {
     fetchPage,
   ]);
 
-  const handleNewPost = (newPost) => {
-    if (!newPost?._id || postIds.current.has(newPost._id)) return;
-    postIds.current.add(newPost._id);
+  const handleNewPost = (rawPost) => {
+    if (!rawPost?._id) return;
+    // Your own new post is its own entry.
+    const newPost = { ...rawPost, feedId: rawPost.feedId || rawPost._id };
+    if (postIds.current.has(entryKey(newPost))) return;
+    postIds.current.add(entryKey(newPost));
     let nextPosts = [];
     setPosts((prevPosts) => {
       const updatedPosts = [newPost, ...prevPosts];
       const sorted = updatedPosts.sort(
-        (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
+        (a, b) =>
+          new Date(b.repostedAt || b.createdAt) -
+          new Date(a.repostedAt || a.createdAt)
       );
       nextPosts = sorted;
       return sorted;
@@ -305,7 +322,9 @@ export default function PagesLayout() {
       nextPosts = prevPosts.filter((p) => p._id !== postId);
       return nextPosts;
     });
-    postIds.current.delete(postId);
+    // A post can occupy more than one entry (its own, plus anyone's repost of
+    // it), so rebuild the key set rather than deleting a single id.
+    postIds.current = new Set(nextPosts.map(entryKey));
     if (userId) {
       setFeedCacheSnapshot(userId, feedTab, {
         posts: nextPosts,
@@ -397,7 +416,7 @@ export default function PagesLayout() {
               const isLastPost = index === posts.length - 1;
               return (
                 <div
-                  key={post._id || index}
+                  key={entryKey(post) || index}
                   ref={isLastPost ? lastPostRef : null}
                   className="border-b border-neutral-800 empty:hidden"
                 >
@@ -411,7 +430,7 @@ export default function PagesLayout() {
                     onUpdate={(updatedPost) => {
                       setPosts((prevPosts) => {
                         const nextPosts = prevPosts.map((p) =>
-                          p._id === updatedPost._id ? updatedPost : p
+                          entryKey(p) === entryKey(updatedPost) ? updatedPost : p
                         );
                         if (userId) {
                           setFeedCacheSnapshot(userId, feedTab, {

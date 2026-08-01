@@ -174,6 +174,7 @@ const PostCard = ({
     _id: id = "",
     isRepost = false,
     reposterUsername = "",
+    reposterName = "",
     quotedPost = null,
     quotedComment = null,
     isQuoteRepost = false,
@@ -434,11 +435,11 @@ const PostCard = ({
 
   useEffect(() => {
     if (isRepost && reposterUsername) {
-      setReposterInfo({ username: reposterUsername });
+      setReposterInfo({ username: reposterUsername, name: reposterName });
     } else {
       setReposterInfo(null);
     }
-  }, [isRepost, reposterUsername]);
+  }, [isRepost, reposterUsername, reposterName]);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
@@ -755,10 +756,9 @@ const PostCard = ({
 
   const handleReposterClick = (e) => {
     e.stopPropagation();
-    if (reposterUsername) {
-      setIsProfileModalOpen(true);
-      setReposterInfo({ username: reposterUsername });
-    }
+    // Not the profile modal: that one is rendered from `author`, so it would
+    // open the original poster rather than whoever reposted it.
+    if (reposterUsername) navigate(`/${reposterUsername}`);
   };
 
   const handleQuotedContentClick = (e) => {
@@ -1196,11 +1196,11 @@ const PostCard = ({
             <Icons.repost className="w-4 h-4" />
             <span
               onClick={handleReposterClick}
-              className="cursor-pointer hover:underline font-medium"
+              className="cursor-pointer truncate hover:underline font-medium"
             >
-              {reposterInfo.username}
+              {reposterInfo.name || reposterInfo.username}
             </span>{" "}
-            <span>reposted</span>
+            <span className="shrink-0">reposted</span>
           </div>
         )}
         <div className={`text-white w-full pb-2 ${isReply ? "pt-2" : ""}`}>
