@@ -5,6 +5,7 @@ import CreatePost from "../components/CreatePost";
 import SiteHeader from "../components/layouts/site-header";
 import MobileNavbar from "../components/layouts/mobile-navbar";
 import PostCard from "../components/PostCard";
+import PostMeta from "../components/PostMeta";
 import { UserContext } from "../contexts/UserContext";
 import { Icons } from "../components/icons";
 import ViewActivityModal from "../components/ViewActivityModal";
@@ -124,7 +125,13 @@ const PostPage = () => {
         {error ? (
           <p className="text-red-500 text-center">{error}</p>
         ) : post ? (
-          <PostCard item={post} author={post.author} />
+          <>
+            <PostCard item={post} author={post.author} />
+            {/* Sits after the card so it lands below the action row, without
+                threading a "this is the detail view" flag through PostCard's
+                two layout branches and its dozen other call sites. */}
+            <PostMeta createdAt={post.createdAt} views={post.counts?.views} />
+          </>
         ) : (
           ""
         )}

@@ -865,6 +865,12 @@ export const getPost = async (req, res) => {
       const isNew = await PostView.recordView(userId, postId);
       if (isNew) {
         await Post.updateOne({ _id: postId }, { $inc: { "counts.views": 1 } });
+        /*
+         * The document was read before the increment, so the copy in hand is
+         * one behind. Now that the detail page prints this number, that shows
+         * up as a post reading "0 views" to the first person who opens it.
+         */
+        if (post.counts) post.counts.views = (post.counts.views || 0) + 1;
       }
     }
 
