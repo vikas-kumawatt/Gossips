@@ -49,6 +49,30 @@ const refreshAccessToken = async () => {
   return refreshRequest;
 };
 
+/*
+ * The device's own time zone and locale.
+ *
+ * These are the last-resort signals for "Based in": the server tries a CDN geo
+ * header first, then an IP lookup, and only falls back to these — see
+ * server/utils/geo.js. Read once, because constructing a DateTimeFormat parses
+ * locale data.
+ *
+ * They live here rather than beside the other API helpers because sign-in runs
+ * through the *global* axios instance, not the configured `api` one, and these
+ * are only read on sign-in. Attaching them to one instance meant the fallback
+ * silently never fired.
+ */
+const deviceHints = (() => {
+  try {
+    return {
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+      locale: navigator.language || "",
+    };
+  } catch {
+    return { timeZone: "", locale: "" };
+  }
+})();
+
 const attachAuthInterceptors = (client) => {
   if (configuredClients.has(client)) return;
   configuredClients.add(client);
@@ -60,6 +84,8 @@ const attachAuthInterceptors = (client) => {
     if (user?.token) {
       config.headers.Authorization = `Bearer ${user.token}`;
     }
+    if (deviceHints.timeZone) config.headers["X-Client-Timezone"] = deviceHints.timeZone;
+    if (deviceHints.locale) config.headers["X-Client-Locale"] = deviceHints.locale;
     return config;
   });
 

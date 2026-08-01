@@ -10,6 +10,8 @@ import UserSession from "../models/UserSession.js";
 import UserSettings from "../models/UserSettings.js";
 import { sendWelcomeNotification } from "./notificationController.js";
 import { DEFAULT_AVATAR_URL } from "../utils/constants.js";
+import { countryUpdate } from "../utils/geo.js";
+import { generateAvailableUsername } from "../utils/username.js";
 
 if (!process.env.BREVO_EMAIL || !process.env.BREVO_SMTP_KEY || !process.env.SMTP_USER) {
   throw new Error(
@@ -124,14 +126,28 @@ const issueAuthTokens = async (userId, res) => {
   return token;
 };
 
-const generateUniqueUsername = async (baseUsername) => {
-  let username = baseUsername;
-  let count = 1;
-  while (await User.findOne({ username })) {
-    username = `${baseUsername}${count}`;
-    count++;
-  }
-  return username;
+/*
+ * Was a local loop appending 1, 2, 3… to the email's local part. Two problems:
+ * it fed that part to the schema unsanitised, so "first.last@…" threw a
+ * validation error at signup, and it happily handed out reserved names like
+ * "support". generateAvailableUsername does both checks.
+ */
+const generateUniqueUsername = (baseUsername) => generateAvailableUsername(baseUsername);
+
+/**
+ * Records where this sign-in came from.
+ *
+ * Deliberately not awaited. Resolving the country can involve an outbound IP
+ * lookup, and nobody should wait three seconds to log in — let alone fail to —
+ * so that a profile row can be filled.
+ */
+const recordSignInCountry = (req, userId) => {
+  countryUpdate(req)
+    .then((update) => {
+      if (!update) return undefined;
+      return User.updateOne({ _id: userId }, { $set: update });
+    })
+    .catch((error) => console.error("recordSignInCountry error:", error));
 };
 
 // ── Validators (kept local, no library dependency) ───────────────────────────
@@ -205,6 +221,8 @@ export const signupUser = async (req, res) => {
 
     await sendWelcomeNotification(newUser._id);
 
+    recordSignInCountry(req, newUser._id);
+
     const token = await issueAuthTokens(newUser._id, res);
     return res.status(201).json({
       message: "User registered successfully",
@@ -261,6 +279,8 @@ export const loginUser = async (req, res) => {
     if (!isMatch) {
       return res.status(400).json({ error: "Invalid credentials" });
     }
+
+    recordSignInCountry(req, user._id);
 
     const token = await issueAuthTokens(user._id, res);
 
@@ -321,6 +341,8 @@ export const googleLogin = async (req, res) => {
       );
       user.profilePic = picture || user.profilePic;
     }
+
+    recordSignInCountry(req, user._id);
 
     const token = await issueAuthTokens(user._id, res);
 

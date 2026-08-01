@@ -21,7 +21,13 @@ const BCRYPT_COST = 10;
 const userSchema = new Schema(
   {
     // ── Identity ──────────────────────────────────────────────
-    name: { type: String, default: "", trim: true, maxlength: 50 },
+    /*
+     * 200, not 50. The real limit is 50 characters *as a person counts them*,
+     * enforced in setupProfile with Intl.Segmenter — because `maxlength` counts
+     * UTF-16 code units, where one emoji is 2 and a flag can be 4. A 50-emoji
+     * name is 50 characters to its owner and up to ~200 units here.
+     */
+    name: { type: String, default: "", trim: true, maxlength: 200 },
     username: {
       type: String,
       required: true,
@@ -32,6 +38,31 @@ const userSchema = new Schema(
       maxlength: 30,
       match: [/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers and underscores"],
     },
+
+    /*
+     * Every username this account has left behind.
+     *
+     * Two jobs. It's what "changed their username N times, last in April 2026"
+     * is counted from, and it's what holds a released handle for a cooldown so
+     * the owner can undo a mistake and a squatter can't pounce.
+     *
+     * select:false is load-bearing, not tidiness: the earlier names must never
+     * leave the server, and `.lean()` skips the toJSON transform below, so a
+     * transform alone would leak them from every lean read. Routes that need
+     * the count ask for it explicitly and send only the count.
+     */
+    usernameHistory: {
+      type: [
+        {
+          _id: false,
+          username: { type: String, lowercase: true, trim: true },
+          changedAt: { type: Date, default: Date.now },
+        },
+      ],
+      select: false,
+      default: [],
+    },
+    usernameChangedAt: { type: Date },
     email: {
       type: String,
       required: true,
@@ -79,12 +110,55 @@ const userSchema = new Schema(
 
     // ── Verification & visibility ─────────────────────────────
     isVerified: { type: Boolean, default: false },
+    // When the badge was granted, for "Verified since April 2026". Accounts
+    // verified before this field existed have no date, and the profile just
+    // omits the line rather than inventing one.
+    verifiedAt: { type: Date },
+    /*
+      * Only "none" or "blue". This was a four-colour enum, but nothing in the
+      * product ever distinguished the colours — every read is
+      * `verificationBadge !== "none"` — so it's a boolean wearing a string.
+      * Kept as a string rather than folded into `isVerified` because ~20 query
+      * projections name it.
+      */
     verificationBadge: {
       type: String,
-      enum: ["none", "blue", "gold", "gray"],
+      enum: ["none", "blue"],
       default: "none",
     },
     isPrivate: { type: Boolean, default: false },
+
+    /*
+     * Where the account is based — ISO 3166-1 alpha-2, shown as "Based in
+     * India" on the profile.
+     *
+     * Resolved on sign-in from the CDN's geo header, then an IP lookup, then
+     * the device's time zone and locale — see utils/geo.js. Never from
+     * anything the user types. That's the entire point: a self-declared
+     * country is a bio field, whereas this one is evidence you can weigh when
+     * an account claims to be a local news outlet. Latest sign-in wins, so a
+     * trip abroad or a VPN moves it; smoothing that over several sign-ins is
+     * worth doing only if it turns out to matter.
+     */
+    country: {
+      type: String,
+      default: "",
+      uppercase: true,
+      trim: true,
+      maxlength: 2,
+    },
+    /*
+     * Which signal produced it, strongest first: "cdn" and "ip" are observed
+     * from the connection, "timezone" and "locale" are whatever the device
+     * claimed. Internal only — not sent to any client. It's here so that when a
+     * country looks wrong you can tell whether we measured it or were told it.
+     */
+    countrySource: {
+      type: String,
+      enum: ["", "cdn", "ip", "timezone", "locale"],
+      default: "",
+    },
+    countryUpdatedAt: { type: Date },
 
     // ── Staff role ────────────────────────────────────────────
     // Never settable through any public route — only scripts/makeAdmin.js and
@@ -152,6 +226,10 @@ const userSchema = new Schema(
         delete ret.googleId;
         delete ret.appleId;
         delete ret.facebookId;
+        // Belt and braces: select:false already keeps this out of most reads,
+        // but a route that explicitly asks for it must not serialise it by
+        // accident. Only the count is ever public.
+        delete ret.usernameHistory;
         delete ret.__v;
         return ret;
       },
@@ -163,6 +241,10 @@ const userSchema = new Schema(
 // ── Indexes ───────────────────────────────────────────────────
 userSchema.index({ createdAt: -1 });
 userSchema.index({ username: "text", name: "text", bio: "text" });
+// Every availability check asks "has anyone released this handle recently?",
+// which without this is a collection scan on the hottest keystroke path there
+// is. Sparse: only accounts that have ever renamed carry the array.
+userSchema.index({ "usernameHistory.username": 1 }, { sparse: true });
 
 // ── Virtuals ──────────────────────────────────────────────────
 userSchema.virtual("age").get(function () {
@@ -176,6 +258,24 @@ userSchema.virtual("age").get(function () {
 });
 
 // ── Hooks ─────────────────────────────────────────────────────
+
+/*
+ * verificationBadge used to be a four-colour enum. Narrowing it to
+ * none|blue would make any save() on a document still holding "gold" or "gray"
+ * throw a ValidationError — Mongoose validates every *selected* path, not just
+ * the modified ones, so a password reset or a suspension on such an account
+ * would fail for a reason that has nothing to do with either. Normalising here
+ * fixes those rows the next time they're written, with no migration to run and
+ * no loss: nothing ever distinguished the colours.
+ */
+const ALLOWED_BADGES = new Set(["none", "blue"]);
+userSchema.pre("validate", function (next) {
+  if (this.verificationBadge && !ALLOWED_BADGES.has(this.verificationBadge)) {
+    this.verificationBadge = "blue";
+  }
+  next();
+});
+
 userSchema.pre("save", async function (next) {
   if (this.isModified("password") && this.password) {
     const salt = await bcrypt.genSalt(BCRYPT_COST);

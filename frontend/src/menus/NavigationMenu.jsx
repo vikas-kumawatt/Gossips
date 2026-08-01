@@ -12,11 +12,13 @@ import { removeFromSession } from "../common/Session";
 import { UserContext } from "../contexts/UserContext";
 import { useNavigate } from "react-router-dom";
 import ReportProblemModal from "../components/ReportProblemModal";
+import AboutProfileSheet from "../components/AboutProfileSheet";
 
 export default function NavigationMenu() {
   const { userAuth, setUserAuth } = useContext(UserContext);
   const navigate = useNavigate();
   const [isProblemOpen, setIsProblemOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   // Only affects whether the entry is shown. The panel itself is gated by the
   // server, so a tampered role here gets a "nothing here" screen.
   const isStaff = ["admin", "super_admin"].includes(userAuth?.role);
@@ -91,7 +93,13 @@ export default function NavigationMenu() {
             <Icons.settings />
           </DropdownMenuItem>
 
-          <DropdownMenuItem className="flex justify-between items-center p-3 mx-2 mb-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950  text-white hover:bg-neutral-800 hover:rounded-xl outline-none">
+          {/* The same panel other people see when they open "About this
+              profile" on you — which is the point of it being here rather than
+              somewhere private. */}
+          <DropdownMenuItem
+            className="flex justify-between items-center p-3 mx-2 mb-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950  text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+            onClick={() => setIsAboutOpen(true)}
+          >
             <span>About</span>
             <Icons.about />
           </DropdownMenuItem>
@@ -133,6 +141,13 @@ export default function NavigationMenu() {
         isOpen={isProblemOpen}
         onClose={() => setIsProblemOpen(false)}
       />
+
+      {isAboutOpen && userAuth?.username && (
+        <AboutProfileSheet
+          username={userAuth.username}
+          onClose={() => setIsAboutOpen(false)}
+        />
+      )}
     </>
   );
 }

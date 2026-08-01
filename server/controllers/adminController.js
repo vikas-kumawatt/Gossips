@@ -6,16 +6,29 @@ import Report from "../models/Report.js";
 import PlatformReport from "../models/PlatformReport.js";
 import AuditLog from "../models/AuditLog.js";
 import UserSession from "../models/UserSession.js";
-import AppSettings, { EDITABLE_SETTINGS, SETTINGS_KEY } from "../models/AppSettings.js";
+import AppSettings, {
+  EDITABLE_SETTINGS,
+  SETTINGS_KEY,
+  normalizeReservedUsernames,
+} from "../models/AppSettings.js";
 import { getSettings, invalidateSettingsCache } from "../utils/settings.js";
 import { recordAudit } from "../utils/audit.js";
 import { getReasonLabelServer } from "../utils/reportCategories.js";
 import { escapeRegex } from "../utils/respond.js";
 import { roleOf } from "../utils/roles.js";
+import { listBuiltInReservedUsernames } from "../utils/reservedUsernames.js";
 import { del, CacheKeys } from "../utils/cache.js";
 
 const ADMIN_USER_SELECT =
-  "username name email profilePic bio role accountStatus isVerified verificationBadge suspensionReason suspensionEndsAt counts createdAt lastActiveAt isPrivate";
+  "username name email profilePic bio role accountStatus isVerified verifiedAt verificationBadge suspensionReason suspensionEndsAt counts createdAt lastActiveAt isPrivate";
+
+/*
+ * The one definition of "verified". Kept because a legacy row can carry a badge
+ * with isVerified false, and reading only the boolean showed a tick in the feed
+ * but not in the panel.
+ */
+const isVerified = (user) =>
+  Boolean(user?.isVerified || (user?.verificationBadge && user.verificationBadge !== "none"));
 
 const parsePage = (value) => Math.max(Number.parseInt(value, 10) || 1, 1);
 const parseLimit = (value, fallback = 25) =>
@@ -95,8 +108,10 @@ export const listUsers = async (req, res) => {
     ]);
 
     return res.status(200).json({
-      // Normalised so the client never has to guard against a missing role.
-      users: users.map((u) => ({ ...u, role: roleOf(u) })),
+      // Normalised so the client never has to guard against a missing role, and
+      // so the tick uses the same test as every other read path rather than
+      // isVerified alone.
+      users: users.map((u) => ({ ...u, role: roleOf(u), isVerified: isVerified(u) })),
       pageInfo: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
     });
   } catch (error) {
@@ -110,7 +125,7 @@ export const getUserDetail = async (req, res) => {
     const { username } = req.params;
     const found = await User.findOne({ username }).select(ADMIN_USER_SELECT).lean();
     if (!found) return res.status(404).json({ error: "User not found" });
-    const user = { ...found, role: roleOf(found) };
+    const user = { ...found, role: roleOf(found), isVerified: isVerified(found) };
 
     const [posts, comments, reportsAgainst, reportsFiled, recentPosts, actions] =
       await Promise.all([
@@ -152,7 +167,7 @@ export const getUserDetail = async (req, res) => {
  */
 const loadActionTarget = async (req, res, username) => {
   const target = await User.findOne({ username }).select(
-    "_id username name role accountStatus isVerified verificationBadge suspensionReason suspensionEndsAt"
+    "_id username name role accountStatus isVerified verifiedAt verificationBadge suspensionReason suspensionEndsAt"
   );
 
   if (!target) {
@@ -240,33 +255,63 @@ export const unsuspendUser = async (req, res) => {
   }
 };
 
-const VERIFICATION_BADGES = ["none", "blue", "gold", "gray"];
+/*
+ * One badge, so this is a boolean. It used to be a four-way choice — blue,
+ * gold, gray — that nothing in the product ever distinguished: every read path
+ * only asks `verificationBadge !== "none"`. The column stays because dozens of
+ * queries select it, but it now only ever holds "none" or "blue".
+ */
+const VERIFIED_BADGE = "blue";
 
 export const setVerification = async (req, res) => {
   try {
     const target = await loadActionTarget(req, res, req.params.username);
     if (!target) return undefined;
 
-    const { badge } = req.body;
-    if (!VERIFICATION_BADGES.includes(badge)) {
-      return res.status(400).json({ error: "Unknown verification badge" });
+    /*
+     * Accepts `verified: true|false`. The old `badge` string is still read so a
+     * stale client tab doesn't start failing mid-session; anything other than
+     * "none" means verified.
+     */
+    const { verified, badge } = req.body;
+    const shouldVerify =
+      typeof verified === "boolean" ? verified : badge !== undefined ? badge !== "none" : null;
+
+    if (shouldVerify === null) {
+      return res.status(400).json({ error: "Pass verified: true or false" });
     }
 
     const previous = target.verificationBadge;
-    target.verificationBadge = badge;
-    target.isVerified = badge !== "none";
+    target.verificationBadge = shouldVerify ? VERIFIED_BADGE : "none";
+    target.isVerified = shouldVerify;
+
+    /*
+     * "Verified since March 2026" should mean the badge has been held
+     * continuously since then, so switching blue → gold keeps the original
+     * date while losing and regaining the badge starts a new one.
+     */
+    if (!shouldVerify) target.verifiedAt = undefined;
+    else if (!target.verifiedAt) target.verifiedAt = new Date();
+
     await target.save();
 
     await recordAudit(req, {
-      action: badge === "none" ? "user.unverify" : "user.verify",
+      action: shouldVerify ? "user.verify" : "user.unverify",
       targetType: "user",
       targetId: target._id,
       targetLabel: `@${target.username}`,
-      details: { from: previous, to: badge },
+      details: { from: previous, to: target.verificationBadge },
     });
 
+    /*
+     * The profile cache holds isVerified, so without this the tick takes up to
+     * a minute to appear — long enough to look broken and get toggled twice.
+     */
+    await del(CacheKeys.profile(target.username));
+
     return res.status(200).json({
-      message: badge === "none" ? "Verification removed" : `Verified (${badge})`,
+      message: shouldVerify ? "Account verified" : "Verification removed",
+      isVerified: target.isVerified,
     });
   } catch (error) {
     console.error("setVerification error:", error);
@@ -704,7 +749,12 @@ export const updatePlatformReportStatus = async (req, res) => {
 export const readSettings = async (req, res) => {
   try {
     const settings = await getSettings();
-    return res.status(200).json({ settings });
+    return res.status(200).json({
+      settings,
+      // Read-only, and sent alongside the editable list so an admin can see
+      // what's already covered instead of re-reserving a name by guesswork.
+      builtInReservedUsernames: listBuiltInReservedUsernames(),
+    });
   } catch (error) {
     console.error("readSettings error:", error);
     return res.status(500).json({ error: "Failed to load settings" });
@@ -720,20 +770,29 @@ export const updateSettings = async (req, res) => {
     // Only known keys, only correct types — anything else is dropped.
     for (const [key, type] of Object.entries(EDITABLE_SETTINGS)) {
       if (!(key in req.body)) continue;
-      const value = req.body[key];
+      const raw = req.body[key];
+      let value = raw;
 
       if (type === "boolean") {
-        if (typeof value !== "boolean") continue;
+        if (typeof raw !== "boolean") continue;
       } else if (type === "number") {
-        if (typeof value !== "number" || !Number.isFinite(value)) continue;
-      } else if (typeof value !== "string") {
+        if (typeof raw !== "number" || !Number.isFinite(raw)) continue;
+      } else if (type === "usernameList") {
+        value = normalizeReservedUsernames(raw);
+        if (value === null) continue;
+      } else if (typeof raw !== "string") {
         continue;
       }
 
-      if (current[key] !== value) {
-        updates[key] = value;
-        changed.push({ key, from: current[key], to: value });
-      }
+      // Arrays compare by reference, so an identical list would log a change
+      // on every save. Compare the sorted contents instead.
+      const unchanged = Array.isArray(value)
+        ? JSON.stringify(current[key] || []) === JSON.stringify(value)
+        : current[key] === value;
+      if (unchanged) continue;
+
+      updates[key] = value;
+      changed.push({ key, from: current[key], to: value });
     }
 
     if (!changed.length) {

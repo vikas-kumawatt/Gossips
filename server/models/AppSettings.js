@@ -36,6 +36,15 @@ const appSettingsSchema = new Schema(
     // Accounts younger than this can't post — a blunt spam brake.
     minAccountAgeHoursToPost: { type: Number, default: 0, min: 0, max: 168 },
 
+    /*
+     * Extra usernames nobody may register, on top of the built-in list in
+     * utils/reservedUsernames.js. Lives here so a name can be held back the
+     * day it becomes a problem — a copycat brand, a campaign handle — without
+     * waiting for a deploy. The built-ins stay in code because they're tied to
+     * routes and shouldn't be removable by accident.
+     */
+    reservedUsernames: { type: [String], default: [] },
+
     updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null },
   },
   { timestamps: true }
@@ -57,6 +66,29 @@ export const EDITABLE_SETTINGS = {
   maxCommentLength: "number",
   autoFlagReportThreshold: "number",
   minAccountAgeHoursToPost: "number",
+  reservedUsernames: "usernameList",
+};
+
+/**
+ * Normalises the admin-supplied reserved list: lowercased, deduped, and
+ * restricted to things that could actually be a username in the first place.
+ * Anything that can't be registered doesn't need reserving, and letting junk
+ * in would just make the list unreadable.
+ */
+export const normalizeReservedUsernames = (value) => {
+  if (!Array.isArray(value)) return null;
+  const seen = new Set();
+  for (const entry of value) {
+    if (typeof entry !== "string") continue;
+    const name = entry.trim().toLowerCase();
+    // Must be a shape User.username could actually take, or reserving it is
+    // a no-op that looks like it worked.
+    if (!/^[a-z0-9_]{3,30}$/.test(name)) continue;
+    seen.add(name);
+  }
+  // Capped so one paste can't turn the settings document into a payload that
+  // every availability check then has to walk.
+  return [...seen].sort().slice(0, 500);
 };
 
 export default model("AppSettings", appSettingsSchema);

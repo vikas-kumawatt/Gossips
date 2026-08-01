@@ -4,11 +4,17 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { Toaster, toast } from "react-hot-toast";
 import axios from "axios";
 import { Icons } from "../components/icons";
+import UsernameField from "../components/UsernameField";
+import { clampGraphemes, graphemeLength } from "../lib/graphemes";
+
+// Matches NAME_MAX_GRAPHEMES in the server's setupProfile.
+const NAME_MAX = 50;
 
 const ProfileSetup = () => {
   const { userAuth, setUserAuth } = useContext(UserContext);
   const navigate = useNavigate();
   const [profileData, setProfileData] = useState({
+    name: "",
     bio: "",
     link: "",
     isPrivate: false,
@@ -24,6 +30,7 @@ const ProfileSetup = () => {
     if (userAuth) {
       setProfileData((prevState) => ({
         ...prevState,
+        name: userAuth.name || "",
         bio: userAuth.bio || "",
         link: userAuth.link || "",
         profilePic: userAuth.profilePic || "",
@@ -94,12 +101,13 @@ const ProfileSetup = () => {
   };
 
   const handleContinue = async () => {
-    const { bio, link, isPrivate } = profileData;
+    const { name, bio, link, isPrivate } = profileData;
 
     setProfileData((prev) => ({ ...prev, loading: true }));
 
     try {
       const formData = new FormData();
+      formData.append("name", name.trim());
       formData.append("bio", bio.trim());
       formData.append("link", link.trim());
       formData.append("isPrivate", isPrivate);
@@ -127,8 +135,13 @@ const ProfileSetup = () => {
 
         const updatedUser = {
           ...userAuth,
-          bio: bio.trim() || userAuth.bio,
-          link: link.trim() || userAuth.link,
+          /*
+           * `??` rather than `||`: the server echoes what it stored, and with
+           * `||` clearing your name to empty would silently keep the old one.
+           */
+          name: response.data.name ?? name.trim(),
+          bio: response.data.bio ?? bio.trim(),
+          link: response.data.link ?? link.trim(),
           isPrivate: isPrivate,
           profilePic: updatedProfilePic,
           version: (userAuth.version || 0) + 1,
@@ -165,12 +178,31 @@ const ProfileSetup = () => {
         <div className="w-full border border-neutral-700 rounded-2xl px-6 py-4 mb-6">
           <div className="relative flex flex-col justify-between mb-4 mt-4">
             <h2 className="text-white text-sm mb-2">Name</h2>
-            <div className="flex gap-2">
-              <i className="fi fi-rr-lock text-neutral-600"></i>
-              <p className="text-white text-sm">
-                {userAuth.name || "User"} ({userAuth.username || "username"})
-              </p>
-            </div>
+            {/* Was a locked label showing the name and handle. Both are
+                editable now — this one freely, since a display name isn't in
+                any URL or mention, so changing it breaks no links.
+
+                Any script, any emoji, any of the decorative Unicode alphabets.
+                No `maxLength`: it counts UTF-16 units, so it would cut a
+                25-emoji name in half and sometimes mid-character. */}
+            <input
+              className="w-full max-w-[calc(100%-72px)] bg-transparent text-white text-sm outline-none placeholder:text-neutral-600"
+              placeholder="Your name"
+              value={profileData.name}
+              onChange={(e) =>
+                setProfileData((prev) => ({
+                  ...prev,
+                  name: clampGraphemes(e.target.value, NAME_MAX),
+                }))
+              }
+            />
+            {/* Only once it's worth watching — a counter on an empty field is
+                just clutter. */}
+            {graphemeLength(profileData.name) > NAME_MAX - 10 && (
+              <div className="text-right text-xs text-neutral-400 mt-1">
+                {graphemeLength(profileData.name)}/{NAME_MAX}
+              </div>
+            )}
 
             <div
               className="absolute top-1/2 right-0 transform -translate-x-1/2 -translate-y-1/2 w-12 h-12 rounded-full flex items-center justify-center text-white cursor-pointer overflow-hidden group"
@@ -194,6 +226,9 @@ const ProfileSetup = () => {
               />
             </div>
           </div>
+
+          {/* Saves on its own, not with the button below — see UsernameField. */}
+          <UsernameField />
 
           <div className="mb-0">
             <h2 className="text-white text-sm font-medium mb-2">Bio</h2>

@@ -16,6 +16,13 @@ import {
 } from "../utils/cursorPagination.js";
 import { followListPage, normalizeFollowListSort } from "../utils/followList.js";
 import { decorateContent } from "../utils/attachments.js";
+import {
+  CHANGE_WINDOW_MS,
+  HOLD_MS,
+  changeQuota,
+  checkUsernameAvailability,
+  normalizeUsername,
+} from "../utils/username.js";
 
 const ACTIVE_ACCOUNT_FILTER = {
   accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
@@ -34,9 +41,67 @@ const invalidateFollowRelatedCaches = async (...usernames) => {
 // Profile
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The display name, as opposed to the handle.
+ *
+ * Free to change, unlike the username: it isn't in any URL or mention, so
+ * changing it breaks no links. It is still an impersonation surface — building
+ * a following then renaming yourself to a brand is the standard play, which is
+ * why Instagram caps name changes too — so if that shows up, the quota logic in
+ * utils/username.js already exists to be reused here.
+ *
+ * Any script, any emoji, any of the decorative Unicode alphabets. The only
+ * things removed are C0/C1 control characters, which are unprintable, can't be
+ * typed on purpose, and would break a single-line layout if they were newlines.
+ *
+ * @returns {string} the value to store
+ */
+const normalizeDisplayName = (name) =>
+  String(name)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g, "")
+    // Runs of whitespace collapse to one: pasted names routinely carry doubles
+    // and they render as a gap nobody meant.
+    .replace(/\s+/g, " ")
+    .trim();
+
+/**
+ * Length as a person would count it.
+ *
+ * `String.length` counts UTF-16 code units, so "🎉" is 2 and a letter from one
+ * of the decorative alphabets is also 2 — meaning a 25-emoji name would be
+ * rejected as "over 50 characters". Intl.Segmenter counts what you'd count
+ * pointing at the screen, including a flag or a family emoji built from several
+ * code points.
+ */
+const NAME_MAX_GRAPHEMES = 50;
+
+const graphemeCount = (value) => {
+  try {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    let count = 0;
+    for (const _ of segmenter.segment(value)) count += 1;
+    return count;
+  } catch {
+    // No Segmenter: [...value] at least counts code points rather than code
+    // units, which is wrong only for multi-codepoint emoji.
+    return [...value].length;
+  }
+};
+
+/** @returns {string|null} an error message, or null when acceptable */
+const validateDisplayName = (value) => {
+  // Empty is allowed: the profile then falls back to showing the handle, which
+  // is how accounts that never set a name already render.
+  if (!value) return null;
+  if (graphemeCount(value) > NAME_MAX_GRAPHEMES)
+    return `Name must be ${NAME_MAX_GRAPHEMES} characters or fewer`;
+  return null;
+};
+
 export const setupProfile = async (req, res) => {
   try {
-    const { bio, link, isPrivate } = req.body;
+    const { name, bio, link, isPrivate } = req.body;
 
     if (bio && bio.length > 150) {
       return res.status(403).json({ error: "Bio should be less than 150 characters" });
@@ -46,8 +111,16 @@ export const setupProfile = async (req, res) => {
         return res.status(400).json({ error: "Invalid URL format" });
       }
     }
+    // Normalise first, then check the length — otherwise trailing whitespace
+    // counts towards the limit.
+    const cleanName = name === undefined ? undefined : normalizeDisplayName(name);
+    if (cleanName !== undefined) {
+      const nameError = validateDisplayName(cleanName);
+      if (nameError) return res.status(400).json({ error: nameError });
+    }
 
     const updateObj = {};
+    if (cleanName !== undefined) updateObj.name = cleanName;
     if (bio !== undefined) updateObj.bio = bio;
     if (link !== undefined) updateObj.link = link;
     if (isPrivate !== undefined)
@@ -115,9 +188,22 @@ export const setupProfile = async (req, res) => {
       new: true,
     });
 
+    /*
+     * Both keys. The post list caches page 1 with the author document
+     * populated, and AUTHOR_SELECT includes `name`, so a rename that only
+     * cleared the profile key left your own posts listed under the old name.
+     */
     await del(CacheKeys.profile(updatedUser.username));
+    await del(CacheKeys.userPosts(updatedUser.username));
+
     return res.status(200).json({
       message: "Profile updated successfully",
+      // Echo what was actually stored rather than letting the client assume its
+      // own input took — the name here is trimmed and whitespace-collapsed.
+      name: updatedUser.name,
+      bio: updatedUser.bio,
+      link: updatedUser.link,
+      isPrivate: updatedUser.isPrivate,
       profilePic: updatedUser.profilePic,
     });
   } catch (error) {
@@ -1051,5 +1137,241 @@ export const getReposts = async (req, res) => {
   } catch (error) {
     console.error("getReposts error:", error);
     res.status(500).json({ error: "Server error" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// About this profile / username
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /user/:username/about — the "About this profile" panel.
+ *
+ * The signals here exist to help someone judge whether an account is who it
+ * claims to be, which is why they're shown for your own profile too: what
+ * other people can learn about you shouldn't be a secret from you.
+ *
+ * Deliberately *not* cached. It's opened rarely, and a stale username-change
+ * count on the one screen meant for spotting a freshly renamed impersonator
+ * would defeat the point.
+ *
+ * Earlier usernames are never sent — only how many there have been and when
+ * the last one was. Publishing the old handles would let anyone trace an
+ * account back through a name someone changed to get away from.
+ */
+export const getProfileAbout = async (req, res) => {
+  try {
+    const { username } = req.params;
+
+    // No account-status filter, deliberately: getUserProfile has none either,
+    // and a panel that 404s on a profile the page just rendered is worse than
+    // showing the join date of a suspended account.
+    const profile = await User.findOne({ username })
+      .select(
+        "username name profilePic isVerified verificationBadge verifiedAt country createdAt usernameChangedAt +usernameHistory"
+      )
+      .lean();
+
+    if (!profile) return res.status(404).json({ error: "User not found" });
+
+    // Same rule as the profile itself: to someone they've blocked, the account
+    // doesn't exist.
+    const blockedYou = await UserRelation.findOne({
+      from: profile._id,
+      to: req.user._id,
+      kind: "block",
+    }).lean();
+    if (blockedYou) return res.status(404).json({ error: "User not found" });
+
+    const history = profile.usernameHistory || [];
+
+    return res.status(200).json({
+      username: profile.username,
+      name: profile.name || "",
+      profilePic: profile.profilePic,
+      isVerified: Boolean(
+        profile.isVerified || (profile.verificationBadge && profile.verificationBadge !== "none")
+      ),
+      verificationBadge: profile.verificationBadge || "none",
+      // Null for accounts verified before we started recording it; the client
+      // then shows the badge without a date rather than a made-up one.
+      verifiedAt: profile.verifiedAt || null,
+      dateJoined: profile.createdAt,
+      // ISO alpha-2, or "" when nothing resolved; the client turns it into a
+      // country name. `countrySource` is deliberately not sent — how we worked
+      // it out is internal, and the panel explains accuracy in its own words.
+      country: profile.country || "",
+      usernameChanges: {
+        count: history.length,
+        lastChangedAt: profile.usernameChangedAt || null,
+      },
+    });
+  } catch (error) {
+    console.error("getProfileAbout error:", error);
+    return res.status(500).json({ error: "Failed to load profile details" });
+  }
+};
+
+/*
+ * "reserved" and "held" are useful internally and dangerous on the wire: both
+ * tell someone probing the namespace that a handle is worth waiting for. They
+ * collapse to the same answer a taken name gives.
+ */
+const PUBLIC_REASON = { reserved: "unavailable", held: "unavailable" };
+const publicReason = (reason) => PUBLIC_REASON[reason] || reason;
+
+/**
+ * GET /user/username-availability?username=… — what the edit form calls while
+ * you type.
+ *
+ * Advisory only. Every answer it gives can be stale by the time you submit, so
+ * changeUsername re-runs the identical checks and the unique index has the
+ * final word.
+ */
+export const getUsernameAvailability = async (req, res) => {
+  try {
+    const candidate = normalizeUsername(req.query.username);
+    const { available, reason, message } = await checkUsernameAvailability(
+      candidate,
+      req.user._id
+    );
+    return res
+      .status(200)
+      .json({ username: candidate, available, reason: publicReason(reason), message });
+  } catch (error) {
+    console.error("getUsernameAvailability error:", error);
+    return res.status(500).json({ error: "Failed to check username" });
+  }
+};
+
+/**
+ * GET /user/username-status — the state the edit form needs before you type:
+ * current handle, changes left, and when the next one unlocks.
+ */
+export const getUsernameStatus = async (req, res) => {
+  try {
+    const me = await User.findById(req.user._id)
+      .select("username usernameChangedAt +usernameHistory")
+      .lean();
+    if (!me) return res.status(404).json({ error: "User not found" });
+
+    const history = me.usernameHistory || [];
+    const quota = changeQuota(history);
+
+    return res.status(200).json({
+      username: me.username,
+      changeCount: history.length,
+      lastChangedAt: me.usernameChangedAt || null,
+      ...quota,
+      windowDays: Math.round(CHANGE_WINDOW_MS / 86400000),
+    });
+  } catch (error) {
+    console.error("getUsernameStatus error:", error);
+    return res.status(500).json({ error: "Failed to load username status" });
+  }
+};
+
+/**
+ * PATCH /user/username — change your handle.
+ *
+ * The whole operation is one conditional update. Reading the quota and then
+ * writing in a second step would let two requests fired together both see one
+ * change remaining and both spend it; instead the filter carries the quota
+ * check, so the second request matches nothing and is rejected.
+ */
+export const changeUsername = async (req, res) => {
+  try {
+    const candidate = normalizeUsername(req.body?.username);
+
+    const me = await User.findById(req.user._id)
+      .select("username usernameChangedAt +usernameHistory")
+      .lean();
+    if (!me) return res.status(404).json({ error: "User not found" });
+
+    if (candidate === me.username) {
+      return res.status(400).json({ error: "This is already your username" });
+    }
+
+    const availability = await checkUsernameAvailability(candidate, req.user._id);
+    if (!availability.available) {
+      // "invalid" is the user mistyping; the rest are conflicts.
+      const status = availability.reason === "invalid" ? 400 : 409;
+      return res
+        .status(status)
+        .json({ error: availability.message, reason: publicReason(availability.reason) });
+    }
+
+    const quota = changeQuota(me.usernameHistory || []);
+    if (quota.remaining <= 0) {
+      return res.status(429).json({
+        error: `You can change your username ${quota.limit} times every ${Math.round(
+          CHANGE_WINDOW_MS / 86400000
+        )} days`,
+        reason: "rate_limited",
+        nextAllowedAt: quota.nextAllowedAt,
+      });
+    }
+
+    const now = new Date();
+    const previous = me.username;
+
+    let updated;
+    try {
+      updated = await User.findOneAndUpdate(
+        {
+          _id: req.user._id,
+          /*
+           * The concurrency guard, and it only needs to be this. Two requests
+           * fired together would otherwise both see one change remaining and
+           * both spend it. Whichever lands first moves the username off
+           * `previous`, so the second matches no document and is rejected —
+           * which also covers a rename from another device mid-request.
+           */
+          username: previous,
+        },
+        {
+          $set: { username: candidate, usernameChangedAt: now },
+          $push: { usernameHistory: { username: previous, changedAt: now } },
+        },
+        { new: true, runValidators: true }
+      )
+        .select("username usernameChangedAt +usernameHistory")
+        .lean();
+    } catch (error) {
+      // The unique index is the real arbiter: someone can register the name in
+      // the moment between the availability check and this write.
+      if (error?.code === 11000) {
+        return res.status(409).json({ error: "This username is taken", reason: "taken" });
+      }
+      throw error;
+    }
+
+    if (!updated) {
+      return res
+        .status(409)
+        .json({ error: "Your username changed elsewhere. Try again.", reason: "conflict" });
+    }
+
+    // Both keys, or the old handle keeps serving a profile that has moved and
+    // the new one serves nothing.
+    await invalidateFollowRelatedCaches(previous, candidate);
+    await del(CacheKeys.userPosts(previous));
+    await del(CacheKeys.userPosts(candidate));
+
+    const nextQuota = changeQuota(updated.usernameHistory || []);
+
+    return res.status(200).json({
+      message: "Username updated",
+      username: updated.username,
+      previousUsername: previous,
+      changeCount: (updated.usernameHistory || []).length,
+      lastChangedAt: updated.usernameChangedAt,
+      ...nextQuota,
+      // So the client can say how long the old handle is theirs to reclaim.
+      heldUntil: new Date(now.getTime() + HOLD_MS),
+    });
+  } catch (error) {
+    console.error("changeUsername error:", error);
+    return res.status(500).json({ error: "Failed to change username" });
   }
 };

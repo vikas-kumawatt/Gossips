@@ -178,6 +178,36 @@ export const userAPI = {
 
   getProfile: (username) => cachedGet(`/user/${username}`),
 
+  // Uncached on purpose. It's opened rarely, and the whole point of the panel
+  // is spotting an account that just renamed itself — a stale change count
+  // would be the one number worth getting right.
+  getProfileAbout: (username) =>
+    api
+      .get(`/user/${username}/about`, { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  getUsernameStatus: () =>
+    api
+      .get("/user/username-status", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  /**
+   * Advisory: the answer can be stale by the time you submit, so the change
+   * itself re-checks. `signal` lets the form drop a reply that a later
+   * keystroke has already made irrelevant.
+   */
+  checkUsername: (username, signal) =>
+    api
+      .get("/user/username-availability", {
+        params: { username },
+        signal,
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
+
+  changeUsername: (username) =>
+    api.patch("/user/username", { username }).then((r) => r.data),
+
   // Uncached: rows carry the viewer's live follow state, and a 60-second
   // stale copy shows "Follow" on someone you just followed.
   getFollowers: (username, params) =>
@@ -305,8 +335,8 @@ export const adminAPI = {
     api.post(`/admin/users/${username}/suspend`, body).then((r) => r.data),
   unsuspendUser: (username) =>
     api.post(`/admin/users/${username}/unsuspend`).then((r) => r.data),
-  setVerification: (username, badge) =>
-    api.post(`/admin/users/${username}/verification`, { badge }).then((r) => r.data),
+  setVerification: (username, verified) =>
+    api.post(`/admin/users/${username}/verification`, { verified }).then((r) => r.data),
   setRole: (username, role) =>
     api.post(`/admin/users/${username}/role`, { role }).then((r) => r.data),
   forceLogout: (username) =>

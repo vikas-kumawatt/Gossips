@@ -43,7 +43,21 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      // Device hints for "Based in" — the last resort when neither a CDN
+      // header nor an IP lookup resolved a country. See utils/geo.js.
+      "X-Client-Timezone",
+      "X-Client-Locale",
+    ],
+    /*
+     * Those two custom headers ride on every request, which makes even an
+     * anonymous GET a preflighted one. Chrome's default preflight cache is
+     * about five seconds; a day means the browser asks once.
+     */
+    maxAge: 86400,
   })
 );
 

@@ -18,6 +18,7 @@ import PostCard from "../components/PostCard";
 import ReplyThread from "../components/ReplyThread";
 import FollowersModal from "../components/FollowersModal";
 import ShareProfileSheet from "../components/ShareProfileSheet";
+import AboutProfileSheet from "../components/AboutProfileSheet";
 import { buildProfileUrl } from "../lib/profileLink";
 import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
@@ -100,6 +101,7 @@ const ProfilePage = () => {
 
   const [profile, setProfile] = useState(profileDataStructure);
   const [isShareProfileOpen, setIsShareProfileOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [posts, setPosts] = useState([]);
   const [replies, setReplies] = useState([]);
   const [reposts, setReposts] = useState([]);
@@ -815,6 +817,8 @@ const ProfilePage = () => {
                   </div>
 
                   {profileId === currentUsername ? (
+                    /* No menu on your own profile. "About" in the main menu
+                       opens the same panel for you. */
                     ""
                   ) : (
                     <DropdownMenu>
@@ -845,7 +849,7 @@ const ProfilePage = () => {
                           <Icons.shareTo />
                         </DropdownMenuItem>
                         <DropdownMenuItem
-                          // onClick={(e) => handleIconClick(e, "about")}
+                          onClick={() => setIsAboutOpen(true)}
                           className="flex justify-between items-center cursor-pointer p-3 mx-2 tracking-normal select-none font-semibold text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
                         >
                           <span>About this profile</span>
@@ -1011,6 +1015,12 @@ const ProfilePage = () => {
           username={profile.username}
           userId={profile._id}
           onClose={() => setIsShareProfileOpen(false)}
+        />
+      )}
+      {isAboutOpen && profile.username && (
+        <AboutProfileSheet
+          username={profile.username}
+          onClose={() => setIsAboutOpen(false)}
         />
       )}
       <MobileNavbar

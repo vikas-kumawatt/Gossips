@@ -68,6 +68,27 @@ const NUMBERS = [
   },
 ];
 
+/*
+ * The list is edited as free text rather than as chips: reserving names is a
+ * paste-a-batch job, not a one-at-a-time one. Split on commas and newlines so
+ * either shape works.
+ */
+const parseReserved = (text) =>
+  [
+    ...new Set(
+      text
+        .split(/[\s,]+/)
+        .map((entry) => entry.trim().toLowerCase())
+        // Same filter the server applies, so the count below and the list that
+        // actually gets stored are the same list.
+        .filter((entry) => /^[a-z0-9_]{3,30}$/.test(entry))
+    ),
+  ]
+    .sort()
+    .slice(0, 500);
+
+const formatReserved = (list) => (Array.isArray(list) ? [...list].sort().join("\n") : "");
+
 const AdminSettings = () => {
   const { session } = useOutletContext();
   const [settings, setSettings] = useState(null);
@@ -75,6 +96,15 @@ const AdminSettings = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [saving, setSaving] = useState(false);
+  // Held as text, not as the array: mid-typing, "foo,\nba" isn't a valid list
+  // yet, and round-tripping through the array on every keystroke would eat
+  // the separator the moment you type it.
+  const [reservedText, setReservedText] = useState("");
+  // Sent by the server from utils/reservedUsernames.js. Not editable — these
+  // are tied to routes and to the platform's own identity, so removing one is
+  // a code change with a code review, not a form submission.
+  const [builtIn, setBuiltIn] = useState([]);
+  const [showBuiltIn, setShowBuiltIn] = useState(false);
 
   const readOnly = !session?.isSuperAdmin;
 
@@ -85,6 +115,8 @@ const AdminSettings = () => {
       const res = await adminAPI.getSettings();
       setSettings(res.settings);
       setDraft(res.settings);
+      setReservedText(formatReserved(res.settings.reservedUsernames));
+      setBuiltIn(res.builtInReservedUsernames || []);
     } catch {
       setError("Couldn't load settings.");
     } finally {
@@ -96,12 +128,21 @@ const AdminSettings = () => {
     load();
   }, [load]);
 
+  const reservedDirty =
+    settings && formatReserved(parseReserved(reservedText)) !== formatReserved(settings.reservedUsernames);
+
   const dirty =
-    draft &&
-    settings &&
-    Object.keys(draft).some(
-      (k) => k !== "updatedAt" && k !== "updatedBy" && draft[k] !== settings[k]
-    );
+    (draft &&
+      settings &&
+      Object.keys(draft).some(
+        (k) =>
+          k !== "updatedAt" &&
+          k !== "updatedBy" &&
+          // Compared separately above; an array is never === its own copy.
+          k !== "reservedUsernames" &&
+          draft[k] !== settings[k]
+      )) ||
+    reservedDirty;
 
   const save = async () => {
     setSaving(true);
@@ -112,10 +153,14 @@ const AdminSettings = () => {
       }
       for (const { key } of NUMBERS) payload[key] = Number(draft[key]);
       payload.maintenanceMessage = String(draft.maintenanceMessage || "");
+      payload.reservedUsernames = parseReserved(reservedText);
 
       const res = await adminAPI.updateSettings(payload);
       setSettings(res.settings);
       setDraft(res.settings);
+      // Echo back what the server kept — it drops anything that couldn't be a
+      // username, so the box shouldn't keep showing the rejects.
+      setReservedText(formatReserved(res.settings.reservedUsernames));
       toast.success(res.message);
     } catch (e) {
       toast.error(e.response?.data?.error || "Couldn't save settings");
@@ -144,7 +189,13 @@ const AdminSettings = () => {
         {!readOnly && (
           <div className="flex items-center gap-2">
             {dirty && (
-              <Button onClick={() => setDraft(settings)} disabled={saving}>
+              <Button
+              onClick={() => {
+                setDraft(settings);
+                setReservedText(formatReserved(settings.reservedUsernames));
+              }}
+              disabled={saving}
+            >
                 Discard
               </Button>
             )}
@@ -208,6 +259,69 @@ const AdminSettings = () => {
           maxLength={300}
           className="w-full h-20 bg-neutral-900 border border-neutral-800 rounded-xl p-3 text-[13px] text-white outline-none resize-none focus:border-neutral-600 disabled:opacity-60"
         />
+      </Panel>
+
+      <Panel
+        title="Reserved usernames"
+        subtitle="Extra handles nobody can register, on top of the built-in list"
+      >
+        <p className="text-[12px] text-neutral-500 mb-2">
+          One per line, or comma-separated. Route names, platform handles and
+          support-desk impersonations are already blocked in code — this is for
+          names you need to hold back today. Reserving a name doesn't take it
+          from anyone already using it.
+        </p>
+        <textarea
+          value={reservedText}
+          onChange={(e) => setReservedText(e.target.value)}
+          disabled={readOnly}
+          spellCheck={false}
+          placeholder={"acmecorp\nnewbrand"}
+          className="w-full h-32 bg-neutral-900 border border-neutral-800 rounded-xl p-3 text-[13px] text-white outline-none resize-y font-mono focus:border-neutral-600 disabled:opacity-60"
+        />
+        <p className="text-[12px] text-neutral-500 mt-2">
+          {parseReserved(reservedText).length} reserved · 500 max
+        </p>
+
+        {builtIn.length > 0 && (
+          <div className="mt-4 border-t border-neutral-800 pt-3">
+            <button
+              type="button"
+              onClick={() => setShowBuiltIn((v) => !v)}
+              className="flex w-full items-center justify-between text-left cursor-pointer"
+            >
+              <span className="text-[13px] font-medium text-white">
+                Blocked in code ({builtIn.length})
+              </span>
+              <span className="text-[12px] text-neutral-500">
+                {showBuiltIn ? "Hide" : "Show"}
+              </span>
+            </button>
+            {showBuiltIn && (
+              <>
+                <p className="mt-2 text-[12px] text-neutral-500">
+                  Read-only. Route names first — an account called “settings”
+                  would shadow the settings page — then platform handles,
+                  support-desk impersonations and infrastructure names.
+                  Impersonation patterns like “gossips_support” are also
+                  blocked and can’t be listed here.
+                </p>
+                <div className="mt-2 max-h-48 overflow-y-auto custom-scrollbar rounded-xl bg-neutral-900 p-3">
+                  <div className="flex flex-wrap gap-1.5">
+                    {builtIn.map((name) => (
+                      <span
+                        key={name}
+                        className="rounded-md bg-neutral-800 px-1.5 py-0.5 font-mono text-[11px] text-neutral-400"
+                      >
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </Panel>
 
       <Panel title="Limits">

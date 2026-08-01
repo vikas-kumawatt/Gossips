@@ -17,6 +17,8 @@ import {
   Th,
   Td,
   UserCell,
+  Toggle,
+  VerifiedTick,
   STATUS_TONE,
   ROLE_TONE,
   relativeTime,
@@ -241,14 +243,16 @@ const UserDetailSheet = ({ detail, session, onClose, onActed }) => {
               className="w-14 h-14 rounded-full object-cover bg-neutral-800"
             />
             <div className="min-w-0">
-              <p className="font-semibold truncate">{user.name}</p>
+              <div className="flex items-center gap-1 min-w-0">
+                <p className="font-semibold truncate">{user.name || user.username}</p>
+                {user.isVerified && <VerifiedTick className="w-4 h-4 shrink-0" />}
+              </div>
               <p className="text-[13px] text-neutral-500 truncate">{user.email}</p>
               <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                 <Badge tone={STATUS_TONE[user.accountStatus]}>{user.accountStatus}</Badge>
                 {roleOf(user) !== "user" && (
                   <Badge tone={ROLE_TONE[roleOf(user)]}>{roleLabel(user)}</Badge>
                 )}
-                {user.isVerified && <Badge tone="blue">{user.verificationBadge}</Badge>}
               </div>
             </div>
           </div>
@@ -339,25 +343,29 @@ const UserDetailSheet = ({ detail, session, onClose, onActed }) => {
                 </div>
               )}
 
-              <div className="rounded-xl border border-neutral-800 p-3 flex flex-col gap-2.5">
-                <p className="text-[13px] font-semibold">Verification</p>
-                <div className="flex flex-wrap gap-2">
-                  {["none", "blue", "gold", "gray"].map((badge) => (
-                    <Button
-                      key={badge}
-                      size="sm"
-                      variant={user.verificationBadge === badge ? "primary" : "secondary"}
-                      disabled={busy || user.verificationBadge === badge}
-                      onClick={() =>
-                        run(
-                          () => adminAPI.setVerification(user.username, badge),
-                          badge === "none" ? "Verification removed" : `Verified (${badge})`
-                        )
-                      }
-                    >
-                      {badge}
-                    </Button>
-                  ))}
+              <div className="rounded-xl border border-neutral-800 p-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-[13px] font-semibold">Verified</p>
+                    <p className="text-[12px] text-neutral-500 mt-0.5">
+                      {user.isVerified && user.verifiedAt
+                        ? `Since ${new Date(user.verifiedAt).toLocaleDateString(undefined, {
+                            month: "long",
+                            year: "numeric",
+                          })}`
+                        : "Shows the blue tick beside their name everywhere."}
+                    </p>
+                  </div>
+                  <Toggle
+                    checked={Boolean(user.isVerified)}
+                    disabled={busy}
+                    onChange={(next) =>
+                      run(
+                        () => adminAPI.setVerification(user.username, next),
+                        next ? "Account verified" : "Verification removed"
+                      )
+                    }
+                  />
                 </div>
               </div>
 

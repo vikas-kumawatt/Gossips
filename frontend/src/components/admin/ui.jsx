@@ -215,6 +215,19 @@ export const Td = ({ children, className = "" }) => (
   <td className={`py-3 px-2 text-sm text-neutral-300 align-middle ${className}`}>{children}</td>
 );
 
+/**
+ * The verification tick.
+ *
+ * Inline SVG rather than the app's `Icons.verified2`, which is sized and
+ * coloured for the feed and can't be scaled down to fit a table row.
+ */
+export const VerifiedTick = ({ className = "w-4 h-4" }) => (
+  <svg viewBox="0 0 24 24" fill="currentColor" className={`text-blue-500 ${className}`} aria-hidden="true">
+    <title>Verified</title>
+    <path d="M12 1.5l2.35 1.72 2.9-.13 1.06 2.7 2.53 1.43-.6 2.84 1.76 2.31-1.99 2.1.16 2.9-2.82.82-1.57 2.45-2.78-.83-2.78.83-1.57-2.45-2.82-.82.16-2.9-1.99-2.1 1.76-2.31-.6-2.84 2.53-1.43 1.06-2.7 2.9.13L12 1.5zm-1.2 13.3l5.1-5.1-1.42-1.41-3.68 3.68-1.88-1.88-1.42 1.42 3.3 3.29z" />
+  </svg>
+);
+
 export const UserCell = ({ user }) => {
   if (!user) return <span className="text-neutral-600">deleted account</span>;
   return (
@@ -225,7 +238,13 @@ export const UserCell = ({ user }) => {
         className="w-8 h-8 rounded-full object-cover shrink-0 bg-neutral-800"
       />
       <div className="min-w-0">
-        <p className="text-white text-[13px] font-medium truncate">{user.name || user.username}</p>
+        {/* The name truncates; the tick never does. */}
+        <div className="flex items-center gap-1 min-w-0">
+          <p className="text-white text-[13px] font-medium truncate">
+            {user.name || user.username}
+          </p>
+          {user.isVerified && <VerifiedTick className="w-3.5 h-3.5 shrink-0" />}
+        </div>
         <p className="text-neutral-500 text-[12px] truncate">@{user.username}</p>
       </div>
     </div>
