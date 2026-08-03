@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
+import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
 
 // Attaches req.user if a valid Bearer token is present; otherwise continues unauthenticated.
 export const optionalProtect = async (req, res, next) => {
@@ -8,7 +9,7 @@ export const optionalProtect = async (req, res, next) => {
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const token = authHeader.split(" ")[1];
       try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
         if (decoded.typ !== "refresh") {
           const user = await User.findById(decoded.id).select("-password");
           if (user) req.user = user;
@@ -37,7 +38,7 @@ export const protect = async (req, res, next) => {
     let decoded;
 
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
+      decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
     } catch {
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
     }

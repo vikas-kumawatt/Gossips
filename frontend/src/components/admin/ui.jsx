@@ -233,7 +233,7 @@ export const UserCell = ({ user }) => {
   return (
     <div className="flex items-center gap-2.5 min-w-0">
       <img
-        src={user.profilePic || "https://via.placeholder.com/40"}
+        src={user.profilePic || "/default-avatar.png"}
         alt=""
         className="w-8 h-8 rounded-full object-cover shrink-0 bg-neutral-800"
       />

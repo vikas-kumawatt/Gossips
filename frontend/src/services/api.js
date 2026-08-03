@@ -1,6 +1,7 @@
 import axios from "axios";
 import { attachAuthInterceptors } from "./authSession";
 import { getCachedRequest, setCachedRequest } from "../utils/requestCache";
+import { unlockHeaders } from "./chatUnlock";
 
 const BASE_URL = import.meta.env.VITE_SERVER;
 
@@ -199,7 +200,13 @@ export const userAPI = {
 
   getUsers: (params) => cachedGet("/user/users", { params }),
 
-  getProfile: (username) => cachedGet(`/user/${username}`),
+  /**
+   * @param options `{ bypassCache: true }` where the caller can change the state in
+   *   the payload — `relationship.youRestricted` and `youBlocked` are both editable
+   *   from the conversation page, and a 60-second-old copy would show a restriction
+   *   the user has just removed as still in place.
+   */
+  getProfile: (username, options) => cachedGet(`/user/${username}`, {}, options),
 
   // Uncached on purpose. It's opened rarely, and the whole point of the panel
   // is spotting an account that just renamed itself — a stale change count
@@ -287,6 +294,9 @@ export const userAPI = {
   restrict: (username) =>
     api.post(`/user/restrict/${username}`).then((r) => r.data),
 
+  unrestrict: (username) =>
+    api.post(`/user/unrestrict/${username}`).then((r) => r.data),
+
   block: (username) =>
     api.post(`/user/block/${username}`).then((r) => r.data),
 
@@ -294,6 +304,28 @@ export const userAPI = {
     api.post(`/user/unblock/${username}`).then((r) => r.data),
 
   getBlocked: () => api.get(`/user/blocked`).then((r) => r.data),
+
+  /*
+   * Push registration (CF30b).
+   *
+   * The session is resolved server-side from the `X-Device-Id` header that
+   * `attachAuthInterceptors` already sends — deliberately not from a session id in
+   * the body, which would let a caller point somebody else's session at their own
+   * device and receive that account's notifications.
+   */
+  setPushToken: (token, platform = "web") =>
+    api.put("/user/push-token", { token, platform }).then((r) => r.data),
+
+  clearPushToken: () => api.delete("/user/push-token").then((r) => r.data),
+
+  /**
+   * People search, uncached — the query changes on every keystroke, so a cache
+   * entry is never reused and only costs a write.
+   */
+  searchUsers: (q) =>
+    api
+      .get("/user/search", { params: { q }, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
 
   mute: (username) =>
     api.post(`/user/mute/${username}`).then((r) => r.data),
@@ -630,15 +662,88 @@ export const notificationAPI = {
 // ─── Groups ──────────────────────────────────────────────────────────────────
 export const groupAPI = {
   getUserGroups: () => cachedGet("/groups/user"),
+
+  /*
+   * Group management. None of this existed — there was one endpoint on the
+   * server and no way to rename a group, add or remove anyone, change a role
+   * or leave.
+   *
+   * Uncached, all of it. A member list that is 60 seconds stale is a list that
+   * still shows someone you just removed, which reads as the removal having
+   * failed.
+   */
+  createGroup: (payload) => api.post("/groups", payload).then((r) => r.data),
+
+  getGroup: (groupId) =>
+    api
+      .get(`/groups/${groupId}`, { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  getMembers: (groupId, params) =>
+    api
+      .get(`/groups/${groupId}/members`, { params, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  updateGroup: (groupId, updates) =>
+    api.patch(`/groups/${groupId}`, updates).then((r) => r.data),
+
+  addMembers: (groupId, userIds) =>
+    api.post(`/groups/${groupId}/members`, { userIds }).then((r) => r.data),
+
+  updateMember: (groupId, userId, updates) =>
+    api.patch(`/groups/${groupId}/members/${userId}`, updates).then((r) => r.data),
+
+  removeMember: (groupId, userId) =>
+    api.delete(`/groups/${groupId}/members/${userId}`).then((r) => r.data),
+
+  /*
+   * Ban and unban. `GroupMember.isBanned` gates every membership lookup — the
+   * member list, the counts, the socket room, every send path — and nothing had
+   * ever written it.
+   *
+   * A ban differs from a removal in one way that matters: a removed member can be
+   * added straight back by anyone with `addMembers`, a banned one can't until the
+   * ban is lifted. `banned` is stated rather than toggled so a retry can't undo
+   * the ban it was retrying.
+   */
+  setMemberBan: (groupId, userId, banned, reason) =>
+    api
+      .put(`/groups/${groupId}/members/${userId}/ban`, { banned, reason })
+      .then((r) => r.data),
+
+  leaveGroup: (groupId) =>
+    api.post(`/groups/${groupId}/leave`).then((r) => r.data),
 };
 
 // ─── Chat (existing — kept for backwards compat) ─────────────────────────────
 export const chatAPI = {
   // Chat list and management
-  getConversations: (params) => cachedGet("/chats", { params: params || {} }),
-  getPreferences: () => cachedGet("/chats/preferences"),
-  updateChatTheme: (theme) =>
-    api.patch("/chats/preferences/appearance", { theme }).then((r) => r.data),
+  /*
+   * Not cached, and the server says so too: getChats sets
+   * `Cache-Control: no-store`, which the IndexedDB layer here doesn't honour.
+   * With a 60-second TTL and no invalidation on any mutation, archiving,
+   * blocking or deleting a chat re-fetched the same stale list and looked like
+   * it had done nothing at all.
+   */
+  getConversations: (params) =>
+    api
+      .get("/chats", { params: params || {}, skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+  /**
+   * @param options `{ bypassCache: true }` to skip the 60-second IndexedDB entry.
+   *   Every preference mutation re-reads this to pick up the server's canonical
+   *   lists, and a cached response would show the state from before the change.
+   *   The conversation page reads the theme from the cached form, which is what the
+   *   cache is for.
+   */
+  getPreferences: (options) => cachedGet("/chats/preferences", {}, options),
+  // Omit chatId to move the account-wide default; pass one to override a single
+  // conversation. The server treats an absent chatId as "the default", so the
+  // old one-argument call still means what it used to.
+  updateChatTheme: (theme, chatId) =>
+    api
+      .patch("/chats/preferences/appearance", chatId ? { theme, chatId } : { theme })
+      .then((r) => r.data),
   setDisappearingTimer: (chatId, seconds) =>
     api
       .put(`/chats/preferences/disappearing/${encodeURIComponent(chatId)}`, {
@@ -661,8 +766,19 @@ export const chatAPI = {
     api
       .put(`/chats/preferences/state/${chatId}`, { stateKey, nextState, pin })
       .then((r) => r.data),
-  setChatLockPin: (pin) =>
-    api.put("/chats/preferences/lock-pin", { pin }).then((r) => r.data),
+  // `currentPin` is required by the server whenever a PIN already exists —
+  // omitting it is only valid for the very first one.
+  setChatLockPin: (pin, currentPin) =>
+    api
+      .put("/chats/preferences/lock-pin", { pin, currentPin })
+      .then((r) => r.data),
+
+  // The way out of a forgotten PIN. Clears the hash and unlocks every chat it
+  // was protecting, so it needs the account password rather than the PIN.
+  resetChatLockPin: (password) =>
+    api
+      .post("/chats/preferences/lock-pin/reset", { password })
+      .then((r) => r.data),
   toggleFavoriteChat: (chatId) =>
     api.post(`/chats/preferences/favorites/${chatId}/toggle`).then((r) => r.data),
 
@@ -683,7 +799,36 @@ export const chatAPI = {
     }
   },
 
-  getUnreadCount: () => cachedGet("/chats/unread-count"),
+  /**
+   * Same problem, same fix, for the theme: the conversation view reads its
+   * theme from the cached /chats/preferences entry, and picking one in the
+   * details page and going straight back lands inside the 60s TTL — so the
+   * chat would repaint with the old theme until the cache expired.
+   *
+   * The entry keeps its original timestamp: only the theme is known to be
+   * fresh, and bumping `ts` would extend the TTL of everything else in there.
+   */
+  patchCachedPreferencesTheme: async ({ theme, themeByChat }) => {
+    const key = buildGetCacheKey("/chats/preferences", undefined);
+    const existing = await getCachedRequest(key).catch(() => null);
+    if (existing?.data) {
+      await setCachedRequest(key, {
+        ts: existing.ts,
+        data: {
+          ...existing.data,
+          ...(theme ? { theme } : {}),
+          ...(themeByChat ? { themeByChat } : {}),
+        },
+      }).catch(() => {});
+    }
+  },
+
+  // Not cached: read state is the one thing a 60-second stale response makes
+  // visibly wrong — the badge is the reason you'd refresh in the first place.
+  getUnreadCount: () =>
+    api
+      .get("/chats/unread-count", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
 
   archiveChat: (chatId, archive = true) =>
     api.post(`/chats/${chatId}/archive`, { archive }).then((r) => r.data),
@@ -691,34 +836,113 @@ export const chatAPI = {
   deleteChat: (username) =>
     api.delete(`/chats/${username}`).then((r) => r.data),
 
-  // Message routes
-  getMessages: (username, params) =>
-    cachedGet(`/chats/messages/${username}`, { params }),
+  // Message routes.
+  //
+  // Deliberately uncached. Opening a conversation clears the context's message
+  // array, so re-entering one always refetches — and with a 60s TTL that
+  // refetch served the stale page. Send a message, go back to the list, open it
+  // again: your own message was gone for up to a minute.
+  /*
+   * `chatId` is passed so the unlock grant can ride along.
+   *
+   * The chat lock is enforced server-side now: these five reads answer 423 for a
+   * locked conversation unless the request carries a grant proving the PIN was
+   * entered. The grant is per conversation, so only the caller knows which one to
+   * attach — an interceptor couldn't. Callers that never touch a locked chat can
+   * omit it and nothing changes.
+   */
+  getMessages: (username, params, chatId) =>
+    api
+      .get(`/chats/messages/${username}`, {
+        params,
+        headers: unlockHeaders(chatId),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
 
   getGroupMessages: (groupId, params) =>
-    cachedGet(`/chats/groups/${groupId}/messages`, { params }),
+    api
+      .get(`/chats/groups/${groupId}/messages`, {
+        params,
+        headers: unlockHeaders(`group_${groupId}`),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
 
   markMessagesAsRead: (messageIds) =>
     api.post("/chats/messages/mark-read", { messageIds }).then((r) => r.data),
 
-  // Search
-  searchMessages: (username, query) =>
-    cachedGet(`/chats/messages/${username}/search`, { params: { query } }),
+  /**
+   * Prove the PIN for one locked conversation. Returns `{ chatId, grant,
+   * expiresAt }`; the caller stores it with `saveUnlockGrant`.
+   */
+  verifyChatLockPin: (chatId, pin) =>
+    api
+      .post("/chats/preferences/lock-pin/verify", { chatId, pin })
+      .then((r) => r.data),
+
+  /*
+   * Search and media are uncached, and the lock is why.
+   *
+   * `cachedGet` keys on url + params, so a response fetched *with* an unlock
+   * grant would be served again later *without* one — the IndexedDB entry
+   * outlives the grant, and it survives a reload, which is precisely the case a
+   * chat lock exists for. Skipping the cache is also the right call on its own
+   * merits here: in-chat search is per-keystroke and the media grid paginates,
+   * so a 60-second stale entry was never useful for either.
+   */
+  searchMessages: (username, query, chatId, params = {}) =>
+    api
+      .get(`/chats/messages/${username}/search`, {
+        params: { query, ...params },
+        headers: unlockHeaders(chatId),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
 
   globalSearch: (query) =>
     cachedGet("/chats/search/global", { params: { query } }),
 
   // Media
-  getConversationMedia: (username, params) =>
-    cachedGet(`/chats/messages/${username}/media`, { params }),
+  getConversationMedia: (username, params, chatId) =>
+    api
+      .get(`/chats/messages/${username}/media`, {
+        params,
+        headers: unlockHeaders(chatId),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
+
+  /**
+   * Throw away uploads that were never sent.
+   *
+   * Pass the server's descriptors back verbatim — the signature on each is what
+   * authorizes the deletion, so a rebuilt object won't verify. See CF28.
+   */
+  discardChatMedia: (items) =>
+    api.post("/chats/upload/discard", { items }).then((r) => r.data),
 
   sendMessage: () =>
     Promise.reject(new Error("Use socket for sending text messages")),
 
+  /*
+   * Two different actions, easy to confuse, so the names say which is which:
+   *
+   *   unsendMessage      — for everyone. Sender only, inside the one-hour
+   *                        window; leaves a tombstone in the thread.
+   *   deleteMessageForMe — hides it from your own copy of the conversation.
+   *                        Either participant, no time limit.
+   *
+   * `deleteMessageForMe` was the name the provider had always called and the
+   * name the server controller uses, but the client method here was called
+   * `deleteMessage` — so every "Delete for me" threw
+   * "chatAPI.deleteMessageForMe is not a function" and the raw TypeError was
+   * shown to the user as a toast.
+   */
   unsendMessage: (messageId) =>
     api.delete(`/chats/message/${messageId}/unsend`).then((r) => r.data),
 
-  deleteMessage: (messageId) =>
+  deleteMessageForMe: (messageId) =>
     api.delete(`/chats/message/${messageId}/delete`).then((r) => r.data),
 
   editMessage: (messageId, content) =>
@@ -739,11 +963,42 @@ export const chatAPI = {
       .post(`/chats/message/${messageId}/forward`, data)
       .then((r) => r.data),
 
-  pinMessage: (messageId) =>
-    api.post(`/chats/message/${messageId}/pin`).then((r) => r.data),
+  /**
+   * Pin or unpin. `pinned` states the target rather than toggling, so a
+   * double-click or a retry after a slow response can't cancel itself out —
+   * asking for the state it's already in succeeds and changes nothing. Omitting it
+   * still toggles, for any caller that hasn't been updated.
+   */
+  pinMessage: (messageId, pinned) =>
+    api
+      .post(
+        `/chats/message/${messageId}/pin`,
+        typeof pinned === "boolean" ? { pinned } : {}
+      )
+      .then((r) => r.data),
 
-  getPinnedMessages: (conversationId) =>
-    cachedGet(`/chats/${conversationId}/pinned`),
+  // Groups have their own route: the server builds a DM or a group
+  // conversation key from the route, not from the id, because the same 24-hex
+  // id can't tell it which one it is.
+  // Uncached for the same reason as search and media above: a cache entry
+  // fetched with an unlock grant would be served again without one.
+  getPinnedMessages: (conversationId, params) =>
+    api
+      .get(`/chats/${conversationId}/pinned`, {
+        params,
+        headers: unlockHeaders(`user_${conversationId}`),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
+
+  getGroupPinnedMessages: (groupId, params) =>
+    api
+      .get(`/chats/groups/${groupId}/pinned`, {
+        params,
+        headers: unlockHeaders(`group_${groupId}`),
+        skipRequestCacheInterceptor: true,
+      })
+      .then((r) => r.data),
 
   uploadMedia: (formData) =>
     api

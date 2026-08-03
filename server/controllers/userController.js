@@ -26,6 +26,11 @@ import {
   checkUsernameAvailability,
   normalizeUsername,
 } from "../utils/username.js";
+import { invalidatePrivacy } from "../utils/chatAccess.js";
+import {
+  clearPushTokenForRequest,
+  registerPushTokenForRequest,
+} from "../utils/pushNotifications.js";
 
 const ACTIVE_ACCOUNT_FILTER = {
   accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
@@ -328,10 +333,11 @@ export const getUserProfile = async (req, res) => {
 
     if (!profileData) return res.status(404).json({ error: "User not found" });
 
-    // Block relationship (viewer-specific, not cached)
-    const [youBlockedRel, blockedYouRel] = await Promise.all([
+    // Block and restrict relationships (viewer-specific, not cached)
+    const [youBlockedRel, blockedYouRel, youRestrictedRel] = await Promise.all([
       UserRelation.findOne({ from: req.user._id, to: profileData._id, kind: "block" }).lean(),
       UserRelation.findOne({ from: profileData._id, to: req.user._id, kind: "block" }).lean(),
+      UserRelation.findOne({ from: req.user._id, to: profileData._id, kind: "restrict" }).lean(),
     ]);
 
     // If the profile owner blocked the viewer → Instagram shows "User not found".
@@ -355,6 +361,7 @@ export const getUserProfile = async (req, res) => {
         isPending: youBlocked ? false : followEdge?.status === "pending",
         youBlocked,
         blockedYou: false,
+        youRestricted: Boolean(youRestrictedRel),
       },
     });
   } catch (error) {
@@ -1098,6 +1105,19 @@ export const restrictUser = async (req, res) => {
   }
 };
 
+export const unrestrictUser = async (req, res) => {
+  try {
+    const userToUnrestrict = await User.findOne({ username: req.params.username }).select("_id");
+    if (!userToUnrestrict) return res.status(404).json({ message: "User not found" });
+
+    await UserRelation.deleteOne({ from: req.user._id, to: userToUnrestrict._id, kind: "restrict" });
+    res.status(200).json({ message: "User unrestricted successfully" });
+  } catch (error) {
+    console.error("unrestrictUser error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Replies & Reposts (user profile tabs)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1518,6 +1538,14 @@ export const updatePrivacySettings = async (req, res) => {
       .select("privacy")
       .lean();
 
+    /*
+     * The chat layer caches this block — it's read once per typing burst, per read
+     * notification and per contact in a presence fan-out — so a save has to say so.
+     * Without this, turning off "show my online status" would keep leaking it for
+     * up to the cache's TTL, which is the one thing a privacy toggle must not do.
+     */
+    invalidatePrivacy(req.user._id);
+
     return res.status(200).json({
       message: "Settings saved",
       whoCanMention: settings?.privacy?.whoCanMention || "everyone",
@@ -1525,5 +1553,54 @@ export const updatePrivacySettings = async (req, res) => {
   } catch (error) {
     console.error("updatePrivacySettings error:", error);
     return res.status(500).json({ error: "Failed to save settings" });
+  }
+};
+
+/**
+ * PUT /user/push-token — register this device for push notifications.
+ *
+ * The delivery path has been complete since 8b and had nowhere to deliver *to*:
+ * `UserSession.push.token` is what it reads, `registerPushToken` is what writes it,
+ * and there was no route, so the function had no callers (CF30b). This is that route.
+ *
+ * The session is resolved from the `X-Device-Id` header rather than from the body —
+ * see registerPushTokenForRequest for why a client-supplied session id would be a way
+ * to receive someone else's notifications.
+ */
+export const setPushToken = async (req, res) => {
+  try {
+    const { token, platform = "web" } = req.body || {};
+    const result = await registerPushTokenForRequest(req, token, platform);
+
+    if (!result.ok) {
+      /*
+       * A missing session is not the client's fault and not worth an error state.
+       *
+       * It happens for a token issued before the device-id header existed, and for a
+       * session that has since been revoked. Either way the correct response is
+       * "noted, not registered" — the client has nothing useful to do about it, and a
+       * 4xx would show the user a failure for a feature they never asked about.
+       */
+      if (result.reason === "session") {
+        return res.status(200).json({ registered: false, reason: "no-session" });
+      }
+      return res.status(400).json({ error: "Invalid push token" });
+    }
+
+    return res.status(200).json({ registered: true });
+  } catch (error) {
+    console.error("setPushToken error:", error);
+    return res.status(500).json({ error: "Failed to register for notifications" });
+  }
+};
+
+/** DELETE /user/push-token — stop delivering to this device. */
+export const deletePushToken = async (req, res) => {
+  try {
+    await clearPushTokenForRequest(req);
+    return res.status(200).json({ registered: false });
+  } catch (error) {
+    console.error("deletePushToken error:", error);
+    return res.status(500).json({ error: "Failed to unregister" });
   }
 };

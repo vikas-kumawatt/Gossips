@@ -337,7 +337,7 @@ const AvatarStack = ({ people }) => {
       {shown.map((p, i) => (
         <img
           key={p.id}
-          src={p.profilePic || "https://via.placeholder.com/28"}
+          src={p.profilePic || "/default-avatar.png"}
           alt=""
           className="w-7 h-7 rounded-full object-cover bg-neutral-800 border-2 border-[#181818]"
           style={{ marginLeft: i === 0 ? 0 : -10 }}
@@ -366,7 +366,7 @@ const RecipientCell = ({ label, avatar, verified, selected, sent, onClick }) => 
   >
     <span className="relative">
       <img
-        src={avatar || "https://via.placeholder.com/56"}
+        src={avatar || "/default-avatar.png"}
         alt=""
         className={`w-14 h-14 rounded-full object-cover bg-neutral-800 ${sent ? "opacity-40" : ""}`}
       />

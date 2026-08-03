@@ -57,15 +57,21 @@ const SharedProfileCard = ({ sharedContent }) => {
     <div
       role="button"
       tabIndex={0}
+      // Named, and Space no longer scrolls the thread as well as opening the card
+      // — see the same pair on SharedPostCard.
+      aria-label={`Shared profile: ${resolved.username || "account"}`}
       onClick={open}
       onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") open(event);
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          open(event);
+        }
       }}
       className="w-full max-w-[240px] cursor-pointer overflow-hidden rounded-2xl border border-neutral-700 bg-neutral-900/60 p-3 text-left transition-colors hover:border-neutral-600"
     >
       <div className="flex items-center gap-2.5">
         <img
-          src={resolved.profilePic || "https://via.placeholder.com/44"}
+          src={resolved.profilePic || "/default-avatar.png"}
           alt=""
           referrerPolicy="no-referrer"
           className="h-11 w-11 shrink-0 rounded-full bg-neutral-800 object-cover"

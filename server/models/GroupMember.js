@@ -6,26 +6,35 @@ import { Schema, model } from "mongoose";
  */
 const groupMemberSchema = new Schema(
   {
-    group: { type: Schema.Types.ObjectId, ref: "Group", required: true, index: true },
-    user:  { type: Schema.Types.ObjectId, ref: "User",  required: true, index: true },
+    group: { type: Schema.Types.ObjectId, ref: "Group", required: true },
+    user:  { type: Schema.Types.ObjectId, ref: "User",  required: true },
 
     role: {
       type: String,
       enum: ["super_admin", "admin", "member", "restricted"],
       default: "member",
-      index: true,
     },
 
-    nickname: { type: String, maxlength: 50 },
     addedBy:  { type: Schema.Types.ObjectId, ref: "User" },
     joinedAt: { type: Date, default: Date.now },
 
     // State
     mutedUntil: { type: Date, default: null },
+    /*
+     * isBanned is read on every membership lookup — it is what keeps a banned
+     * account out of the member list, the counts, the group's socket room and
+     * every send path.
+     *
+     * The row is kept rather than deleted, which is the whole reason a ban is a
+     * different thing from a removal: a removed member can be added back by
+     * anyone with `addMembers`, and a banned one can't until the ban is lifted.
+     * The three fields below are the audit trail that makes that decision
+     * reviewable — who banned them, when, and why.
+     */
     isBanned:   { type: Boolean, default: false },
     bannedAt:   { type: Date },
     bannedBy:   { type: Schema.Types.ObjectId, ref: "User" },
-    banReason:  { type: String, maxlength: 200 },
+    banReason:  { type: String, maxlength: 300 },
 
     // Per-member permission overrides (omit unless explicitly set; resolve from role otherwise)
     permissionOverrides: {
@@ -40,6 +49,13 @@ const groupMemberSchema = new Schema(
   },
   { timestamps: true }
 );
+
+/*
+ * The field-level index:true on group and user is gone — each was a strict
+ * prefix of one of the compounds below, so Mongo could already serve those
+ * queries and the extra indexes only cost writes. Same for role, which nothing
+ * queries by.
+ */
 
 // One row per (group, user)
 groupMemberSchema.index({ group: 1, user: 1 }, { unique: true });

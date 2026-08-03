@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Routes, Route, Navigate, useParams } from "react-router-dom";
 import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import { UserContext } from "./contexts/UserContext";
@@ -25,6 +25,7 @@ import ChatPage from "./pages/ChatPage.jsx";
 import UserConversationPage from "./pages/UserConversationPage.jsx";
 import ConversationDetailsPage from "./pages/ConversationDetailsPage.jsx";
 import GroupChatPage from "./pages/GroupChatPage.jsx";
+import GroupInfoPage from "./pages/GroupInfoPage.jsx";
 import ChatLayout from "./pages/ChatLayout.jsx";
 import TermsPage from "./pages/TermsPage.jsx";
 import PrivacyPage from "./pages/PrivacyPage.jsx";
@@ -49,8 +50,21 @@ import {
   safeParseUser,
 } from "./services/authSession";
 import "./services/api";
+import { syncPushRegistration } from "./services/pushNotifications";
 import UnreadNotificationsSync from "./components/UnreadNotificationsSync";
 import HashtagPage from "./pages/HashtagPage";
+
+/**
+ * `/group/:id` moved under `/chat/group/:id` so it inherits ChatLayout.
+ *
+ * `<Navigate to="/chat/group/:groupId">` would navigate to that literal string
+ * — route params aren't interpolated into a `to` prop — so the redirect needs
+ * to read the param itself.
+ */
+function LegacyGroupRedirect() {
+  const { groupId } = useParams();
+  return <Navigate to={`/chat/group/${groupId}`} replace />;
+}
 
 function App() {
   const [userAuth, setUserAuth] = useState({ token: null, savedPosts: [] });
@@ -100,6 +114,29 @@ function App() {
     } else {
       persistUser(null, false);
     }
+  }, [userAuth]);
+
+  /*
+   * Register this device for push, once the app has an authenticated user (CF30b).
+   *
+   * Here rather than in the login form because there are five ways to arrive
+   * authenticated — email, Google, signup, an account switch, and a reload with a
+   * stored token — and the registration belongs to all of them. Keyed on the id
+   * rather than the token so a token refresh doesn't re-register.
+   *
+   * `syncPushRegistration` never prompts and never throws: it does nothing at all
+   * unless the Firebase env vars are set *and* the user has already granted
+   * permission, so on an unconfigured deployment this is one function call that
+   * returns immediately. A prompt on login is the pattern browsers penalise and users
+   * dismiss permanently, so asking is a separate, user-initiated action.
+   */
+  const pushUserRef = useRef(null);
+  useEffect(() => {
+    const id = userAuth?.id || userAuth?._id || null;
+    if (!userAuth?.token || !id) return;
+    if (pushUserRef.current === id) return;
+    pushUserRef.current = id;
+    syncPushRegistration();
   }, [userAuth]);
 
   return (
@@ -231,14 +268,28 @@ function App() {
                 />
                 <Route path=":username" element={<UserConversationPage />} />
               </Route>
+              {/*
+                Groups live under /chat, inside ChatLayout, like DMs do.
+
+                They used to be a sibling route, so opening a group threw away
+                the two-pane layout entirely — and the only control back out was
+                `md:hidden`, which meant that on desktop there was no way to
+                leave a group chat but the browser's back button.
+              */}
               <Route
-                path="/group/:groupId"
+                path="/chat/group"
                 element={
                   <ProtectedRoute>
-                    <GroupChatPage />
+                    <ChatLayout />
                   </ProtectedRoute>
                 }
-              />
+              >
+                <Route path=":groupId/info" element={<GroupInfoPage />} />
+                <Route path=":groupId" element={<GroupChatPage />} />
+              </Route>
+              {/* The old path, kept so existing links and anything already open
+                  keep working rather than landing on NotFoundPage. */}
+              <Route path="/group/:groupId" element={<LegacyGroupRedirect />} />
               <Route
                 path="/reset-password/:token"
                 element={<ResetPassword />}

@@ -23,6 +23,9 @@ import { createServer } from "http";
 import { initializeSocket, getIO, getUserSocket } from "./config/socket.js";
 import { ALLOWED_ORIGINS } from "./config/origins.js";
 import hashtagRoutes from "./routes/hashtagRoutes.js";
+import { MulterError } from "multer";
+import { unlink } from "fs";
+import { MAX_FILE_SIZE, UNSUPPORTED_FILE_TYPE } from "./config/multerConfig.js";
 
 const app = express();
 
@@ -63,6 +66,10 @@ app.use(
       // Names the browser so a session row can mean "this account on this
       // device". Not a credential — see requestDeviceId in authController.
       "X-Device-Id",
+      // The short-lived grant proving a chat lock PIN was entered. A header
+      // rather than a query parameter so it stays out of access logs — see
+      // utils/chatLock.js.
+      "X-Chat-Unlock",
     ],
     /*
      * Those two custom headers ride on every request, which makes even an
@@ -78,6 +85,55 @@ app.use(cookieParser());
 // Must run before any route: strips `$`-prefixed and dotted keys so a client
 // can't smuggle a Mongo operator into a query filter.
 app.use(sanitizeMongo);
+
+/*
+ * Multer writes the upload to uploads/ before any handler runs, and the only
+ * unlink in the codebase is the one inside uploadToCloudinary — so every early
+ * return that happens first (wrong type, not a member of the group, no such
+ * conversation) strands the file on disk. Doing this per branch would mean
+ * remembering it at a few dozen return statements and getting it wrong at one
+ * of them; hanging it off the response instead means it runs once per request
+ * whatever the outcome, including the ones that throw. ENOENT is the ordinary
+ * case rather than a failure: a request that reached Cloudinary has already
+ * had its temp file removed there.
+ */
+app.use((req, res, next) => {
+  /*
+   * `close`, not `finish`.
+   *
+   * `finish` fires only when a response was fully sent, so an upload the
+   * client abandons — tab closed, connection dropped — after multer has
+   * written the file but before the handler answers leaves it on disk
+   * permanently. `close` fires on both paths, and the flag stops the two from
+   * double-unlinking when they both do.
+   */
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+
+    const files = Array.isArray(req.files)
+      ? [...req.files]
+      : req.files
+      ? Object.values(req.files).flat()
+      : [];
+    if (req.file) files.push(req.file);
+
+    for (const file of files) {
+      if (!file?.path) continue;
+      unlink(file.path, (err) => {
+        if (err && err.code !== "ENOENT") {
+          console.error("Failed to remove temp upload:", file.path, err);
+        }
+      });
+    }
+  };
+
+  res.on("finish", cleanup);
+  res.on("close", cleanup);
+  next();
+});
+
 const server = createServer(app);
 
 const io = initializeSocket(server);
@@ -119,6 +175,42 @@ app.use("/search", searchRoutes);
 
 app.get("/", (req, res) => {
   res.send("Server is running");
+});
+
+/*
+ * Express 4 hands an error to the first middleware declared with four
+ * arguments, which is why this sits below every mount — registered any earlier
+ * and the routes above it would never reach it. There was no such handler at
+ * all, so a multer rejection (an unsupported type, or a file over the limit)
+ * fell through to Express's default and came back as an HTML 500 page; a
+ * client expecting JSON can only report that as a parse failure, never as
+ * "your file is too big".
+ *
+ * Multer's own messages are safe to pass on — they describe the request, not
+ * the server. Everything else is logged here and answered with a fixed string,
+ * because err.message on an unexpected fault routinely carries a file path, a
+ * stack frame or the driver's view of a failed query. The status is preserved
+ * where the error carries one, so a malformed JSON body still answers 400
+ * rather than being relabelled a server fault.
+ */
+app.use((err, req, res, _next) => {
+  if (err instanceof MulterError) {
+    const message =
+      err.code === "LIMIT_FILE_SIZE"
+        ? `File size exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB limit`
+        : err.message;
+    return res.status(400).json({ error: message });
+  }
+
+  if (err?.code === UNSUPPORTED_FILE_TYPE) {
+    return res.status(400).json({ error: err.message });
+  }
+
+  console.error("Unhandled error:", err);
+  const status = err?.status || err?.statusCode || 500;
+  res
+    .status(status)
+    .json({ error: status < 500 ? "Bad request" : "Something went wrong" });
 });
 
 server.listen(5000, () => {

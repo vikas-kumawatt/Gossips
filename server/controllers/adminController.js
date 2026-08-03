@@ -20,6 +20,7 @@ import { roleOf } from "../utils/roles.js";
 import { listBuiltInReservedUsernames } from "../utils/reservedUsernames.js";
 import { listBuiltInBlockedHashtags } from "../utils/blockedHashtags.js";
 import { del, CacheKeys } from "../utils/cache.js";
+import { disconnectUserSockets } from "../config/socket.js";
 
 const ADMIN_USER_SELECT =
   "username name email profilePic bio role accountStatus isVerified verifiedAt verificationBadge suspensionReason suspensionEndsAt counts createdAt lastActiveAt isPrivate";
@@ -211,8 +212,11 @@ export const suspendUser = async (req, res) => {
     target.suspensionEndsAt = endsAt;
     await target.save();
 
-    // A suspension that leaves live sessions running isn't a suspension.
+    // A suspension that leaves live sessions running isn't a suspension. The
+    // socket layer only checks accountStatus at handshake, so an open tab would
+    // otherwise keep sending messages until it happened to reconnect.
     await UserSession.deleteMany({ user: target._id });
+    disconnectUserSockets(target._id);
 
     await recordAudit(req, {
       action: "user.suspend",
@@ -347,9 +351,15 @@ export const setUserRole = async (req, res) => {
     target.role = role;
     await target.save();
 
-    // Demoting someone should end their staff session immediately. The role is
-    // read live from the database on every request, so this is belt-and-braces.
-    if (role === "user") await UserSession.deleteMany({ user: target._id });
+    // Demoting someone should end their staff session immediately. Over HTTP
+    // the role is read live from the database on every request, so that part is
+    // belt-and-braces — but a socket snapshots `userRole` at handshake and uses
+    // it to bypass maintenance mode and the messaging kill-switch, so a demoted
+    // admin would keep the bypass on an open tab.
+    if (role === "user") {
+      await UserSession.deleteMany({ user: target._id });
+      disconnectUserSockets(target._id);
+    }
 
     await recordAudit(req, {
       action: "user.role_change",
@@ -372,13 +382,14 @@ export const forceLogout = async (req, res) => {
     if (!target) return undefined;
 
     const { deletedCount } = await UserSession.deleteMany({ user: target._id });
+    const socketsDropped = disconnectUserSockets(target._id);
 
     await recordAudit(req, {
       action: "user.force_logout",
       targetType: "user",
       targetId: target._id,
       targetLabel: `@${target.username}`,
-      details: { sessionsRevoked: deletedCount },
+      details: { sessionsRevoked: deletedCount, socketsDropped },
     });
 
     return res

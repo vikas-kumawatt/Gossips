@@ -6,6 +6,13 @@ import React, {
   useMemo,
   useCallback,
 } from "react";
+import { toast } from "react-hot-toast";
+import { chatAPI } from "../services/api";
+import {
+  clearAllUnlockGrants,
+  clearUnlockGrant,
+  saveUnlockGrant,
+} from "../services/chatUnlock";
 import {
   BadgeCheck,
   Archive,
@@ -14,19 +21,17 @@ import {
   BellOff,
   CircleDot,
   Check,
-  Eye,
-  EyeOff,
-  Flag,
-  FlagOff,
   FolderOpen,
   Inbox,
   Lock,
   LockOpen,
   MessageCircle,
+  MoreVertical,
   Pin,
   PinOff,
   Plus,
   Star,
+  Tag,
   Trash2,
   UserCheck,
   UserMinus,
@@ -35,8 +40,7 @@ import {
 } from "lucide-react";
 import { UserContext } from "../contexts/UserContext";
 import { useChat } from "../contexts/ChatContext";
-import axios from "axios";
-// import { io } from "socket.io-client"; // Removed, handled by SocketContext
+import { userAPI } from "../services/api";
 import { useNavigate } from "react-router-dom";
 import SiteHeader from "../components/layouts/site-header";
 import MobileNavbar from "../components/layouts/mobile-navbar";
@@ -44,18 +48,150 @@ import { Icons } from "../components/icons";
 import CreatePost from "../components/CreatePost";
 import ResponsiveMenu from "../components/ui/ResponsiveMenu";
 import ResponsiveSheet from "../components/ui/responsive-sheet";
+import { useLongPress } from "../hooks/useLongPress";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
+import ReconnectBanner from "../components/Chat/ReconnectBanner";
 
+/*
+ * ── Conversation row furniture ────────────────────────────────────────────────
+ *
+ * Module scope, not declared inside ChatPage's render body. A component declared
+ * in a render body is a new *type* on every render, so React unmounts and rebuilds
+ * the whole subtree — round 5 was entirely that bug.
+ */
+
+/**
+ * The per-chat state the row was computing and never showing (#114).
+ *
+ * `isMuted`, `isFavorite` and `categoryId` were all resolved for every row and then
+ * used only to decide what the menu should say, so muting a chat produced no visible
+ * change anywhere and users had no way to tell the action had done anything. Lock
+ * and pin were given icons in 8b; these are the three that were left.
+ */
+const ChatRowBadges = ({ item }) => (
+  <>
+    {item.isLocked && (
+      <span className="shrink-0 inline-flex items-center" title="Locked">
+        <Lock className="w-3.5 h-3.5 text-neutral-400" aria-hidden="true" />
+      </span>
+    )}
+    {item.isPinned && (
+      <span className="shrink-0 inline-flex items-center" title="Pinned">
+        <Pin className="w-3.5 h-3.5 text-neutral-300" aria-hidden="true" />
+      </span>
+    )}
+    {item.isMuted && (
+      <span className="shrink-0 inline-flex items-center" title="Muted">
+        <BellOff className="w-3.5 h-3.5 text-neutral-500" aria-hidden="true" />
+      </span>
+    )}
+    {item.isFavorite && (
+      <span className="shrink-0 inline-flex items-center" title="Favourite">
+        <Star className="w-3.5 h-3.5 text-amber-400 fill-amber-400" aria-hidden="true" />
+      </span>
+    )}
+    {item.categoryId && (
+      <span className="shrink-0 inline-flex items-center" title="In a list">
+        <Tag className="w-3.5 h-3.5 text-neutral-500" aria-hidden="true" />
+      </span>
+    )}
+  </>
+);
+
+/**
+ * The `⋮` trigger.
+ *
+ * Was 24×24 with only a `title` and a literal `⋮` character as its label: under the
+ * 44px minimum touch target, and announced by a screen reader as "vertical
+ * ellipsis" (#51). The glyph is now decorative and the button carries the name;
+ * `p-2.5` on a 5×5 icon gets it to 44px without changing how the row looks, because
+ * the padding overlaps the row's own.
+ */
+const ChatRowMenuButton = ({ item, onOpen }) => (
+  <button
+    type="button"
+    onClick={(event) => {
+      event.stopPropagation();
+      onOpen(event, item);
+    }}
+    // The row is itself a button; a keystroke here must not also open the chat.
+    onKeyDown={(event) => event.stopPropagation()}
+    className="w-11 h-11 -mr-2 rounded-full flex items-center justify-center text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors"
+    aria-label="Chat options"
+  >
+    <MoreVertical className="w-5 h-5" aria-hidden="true" />
+  </button>
+);
+
+/**
+ * What a screen reader reads for a row.
+ *
+ * The row was a bare div, so it announced its children as a run of loose text with
+ * no indication it was one activatable thing — and the state icons are all
+ * `aria-hidden`, being decoration, so they have to be said here instead.
+ */
+const rowAccessibleName = (title, item, unreadCount) => {
+  const parts = [title];
+  if (unreadCount > 0) {
+    parts.push(`${unreadCount} unread message${unreadCount === 1 ? "" : "s"}`);
+  }
+  if (item.isPinned) parts.push("pinned");
+  if (item.isMuted) parts.push("muted");
+  if (item.isFavorite) parts.push("favourite");
+  if (item.isLocked) parts.push("locked");
+  return parts.join(", ");
+};
+
+
+const DEFAULT_BUILT_IN_TABS = [
+  { id: "all", label: "All" },
+  { id: "requests", label: "Requests" },
+  { id: "groups", label: "Groups" },
+  { id: "unread", label: "Unread" },
+  { id: "favorites", label: "Favorites" },
+  { id: "archived", label: "Archived" },
+];
 
 const ChatPage = ({ embedded = false }) => {
   const { userAuth } = useContext(UserContext);
   const {
     conversations: chats,
-    loading: chatLoading,
-    error: chatError,
+    listLoading: chatLoading,
+    listLoadingMore: chatLoadingMore,
+    listError: chatError,
+    listPageInfo,
     onlineUsers,
     unreadCounts,
-    actions: { loadConversations },
+    preferences,
+    actions: {
+      loadConversations,
+      loadMoreConversations,
+      clearChatUnread,
+      markConversationUnread,
+      loadPreferences,
+      applyPreferences,
+      setChatState,
+      toggleFavoriteChat,
+    },
   } = useChat();
+
+  /*
+   * Preferences come from the provider, not from local state (#96).
+   *
+   * This page used to hold seven `useState` mirrors of the same account-wide data
+   * that the details page and the conversation page each fetched separately, so
+   * muting a chat from its details page left this list showing it unmuted. They are
+   * derived here so the rest of the file reads unchanged.
+   */
+  const {
+    categories: customCategories,
+    categoryAssignments,
+    favoriteChats,
+    mutedChats,
+    pinnedChats,
+    lockedChats,
+    hasLockPin,
+  } = preferences;
 
   const [filteredUsers, setFilteredUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -63,14 +199,8 @@ const ChatPage = ({ embedded = false }) => {
   const [searchLoading, setSearchLoading] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState("all");
-  const [customCategories, setCustomCategories] = useState([]);
-  const [categoryAssignments, setCategoryAssignments] = useState({});
-  const [favoriteChats, setFavoriteChats] = useState([]);
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
-  const [isAssignCategoryModalOpen, setIsAssignCategoryModalOpen] = useState(false);
-  const [selectedItemForCategory, setSelectedItemForCategory] = useState(null);
-  const [selectedCategoryId, setSelectedCategoryId] = useState("");
   const [tabMenu, setTabMenu] = useState(null);
   const [isFilterDropdownOpen, setIsFilterDropdownOpen] = useState(false);
   const [filterDropdownPosition, setFilterDropdownPosition] = useState({ x: 24, y: 24 });
@@ -83,90 +213,62 @@ const ChatPage = ({ embedded = false }) => {
   const [draggingCategoryId, setDraggingCategoryId] = useState(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState(null);
   const [chatMenu, setChatMenu] = useState(null);
-  const [chatLongPressTimer, setChatLongPressTimer] = useState(null);
   const [showListSubmenu, setShowListSubmenu] = useState(false);
   const [lockPinInput, setLockPinInput] = useState("");
+  // The existing PIN when changing, or the account password when resetting.
+  const [lockPinCurrent, setLockPinCurrent] = useState("");
   const [isPinModalOpen, setIsPinModalOpen] = useState(false);
   const [pendingLockItem, setPendingLockItem] = useState(null);
   const [pinAction, setPinAction] = useState("toggle");
-  const [mutedChats, setMutedChats] = useState([]);
-  const [pinnedChats, setPinnedChats] = useState([]);
-  const [hiddenChats, setHiddenChats] = useState([]);
-  const [flaggedChats, setFlaggedChats] = useState([]);
-  const [lockedChats, setLockedChats] = useState([]);
-  const [manualUnreadChats, setManualUnreadChats] = useState([]);
-  const [forcedReadChats, setForcedReadChats] = useState([]);
-  const [builtInTabs, setBuiltInTabs] = useState([
-    { id: "all", label: "All" },
-    { id: "requests", label: "Requests" },
-    { id: "groups", label: "Groups" },
-    { id: "unread", label: "Unread" },
-    { id: "favorites", label: "Favorites" },
-  ]);
+  const [builtInTabs, setBuiltInTabs] = useState(DEFAULT_BUILT_IN_TABS);
   const navigate = useNavigate();
   const searchTimeoutRef = useRef(null);
   const tabLongPressTimerRef = useRef(null);
   const filterTriggerRef = useRef(null);
   const filterDropdownRef = useRef(null);
   const filterButtonRef = useRef(null);
+  const searchInputRef = useRef(null);
   const tabMenuRef = useRef(null);
+  const listSentinelRef = useRef(null);
 
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
   const layoutContext = { openCreateModal, closeCreateModal };
 
+  /*
+   * Delegated to the provider, which owns preferences now (#96).
+   *
+   * This page held seven `useState` mirrors and re-read them itself; the details page
+   * and the conversation page each did their own fetch. One owner means a change made
+   * anywhere is visible everywhere, which is the bug the duplication caused.
+   */
   const loadChatPreferences = useCallback(async () => {
     if (!userAuth?.token) return;
-    try {
-      const response = await axios.get(`${import.meta.env.VITE_SERVER}/chats/preferences`, {
-        headers: { Authorization: `Bearer ${userAuth.token}` },
-      });
-      setCustomCategories(Array.isArray(response.data?.categories) ? response.data.categories : []);
-      setCategoryAssignments(
-        response.data?.categoryAssignments && typeof response.data.categoryAssignments === "object"
-          ? response.data.categoryAssignments
-          : {}
-      );
-      setFavoriteChats(Array.isArray(response.data?.favoriteChats) ? response.data.favoriteChats : []);
-      setMutedChats(Array.isArray(response.data?.mutedChats) ? response.data.mutedChats : []);
-      setPinnedChats(Array.isArray(response.data?.pinnedChats) ? response.data.pinnedChats : []);
-      setHiddenChats(Array.isArray(response.data?.hiddenChats) ? response.data.hiddenChats : []);
-      setFlaggedChats(Array.isArray(response.data?.flaggedChats) ? response.data.flaggedChats : []);
-      setLockedChats(Array.isArray(response.data?.lockedChats) ? response.data.lockedChats : []);
-      setManualUnreadChats(
-        Array.isArray(response.data?.manualUnreadChats) ? response.data.manualUnreadChats : []
-      );
-      setForcedReadChats(
-        Array.isArray(response.data?.forcedReadChats) ? response.data.forcedReadChats : []
-      );
-    } catch (prefError) {
-      console.error("Error loading chat preferences:", prefError);
-      setCustomCategories([]);
-      setCategoryAssignments({});
-      setFavoriteChats([]);
-      setMutedChats([]);
-      setPinnedChats([]);
-      setHiddenChats([]);
-      setFlaggedChats([]);
-      setLockedChats([]);
-      setManualUnreadChats([]);
-      setForcedReadChats([]);
-    }
-  }, [userAuth?.token]);
+    await loadPreferences();
+  }, [userAuth?.token, loadPreferences]);
 
   const getConversationParamsForFilter = useCallback((filter) => {
-    if (filter === "all") return { view: "all" };
-    if (filter === "requests") return { view: "requests" };
-    if (filter === "groups") return { view: "groups" };
-    if (filter === "unread") return { view: "unread" };
-    if (filter === "favorites") return { view: "favorites" };
+    /*
+     * `archived` was never sent, so the server never filtered on it and
+     * archiving a chat removed it from precisely nothing. Every view except the
+     * archive itself now excludes archived chats, which is the whole point of
+     * the feature — and the Archived tab is the way back, which is why Hide
+     * (same idea, no way back) was removed rather than finished.
+     */
+    if (filter === "archived") return { view: "all", archived: "true" };
+    if (filter === "all") return { view: "all", archived: "false" };
+    if (filter === "requests") return { view: "requests", archived: "false" };
+    if (filter === "groups") return { view: "groups", archived: "false" };
+    if (filter === "unread") return { view: "unread", archived: "false" };
+    if (filter === "favorites") return { view: "favorites", archived: "false" };
     if (filter.startsWith("category:")) {
       return {
         view: "category",
         categoryId: filter.replace("category:", ""),
+        archived: "false",
       };
     }
-    return { view: "all" };
+    return { view: "all", archived: "false" };
   }, []);
 
   useEffect(() => {
@@ -178,6 +280,36 @@ const ChatPage = ({ embedded = false }) => {
     if (!userAuth?.token) return;
     loadConversations(getConversationParamsForFilter(activeFilter));
   }, [userAuth?.token, activeFilter, loadConversations, getConversationParamsForFilter]);
+
+  /*
+   * The rest of the list, a page at a time (CF23/CF24).
+   *
+   * The endpoint used to return up to 500 conversations and stop without saying so, and
+   * this page rendered whatever arrived — so a heavy account's older chats were
+   * unreachable and searching them found nothing. It is cursored now, and the sentinel
+   * below asks for the next page as it comes into view.
+   *
+   * `chats.length` is in the dependencies so the observer is rebound after each page:
+   * without it the sentinel keeps the same registration while the element moves down the
+   * document, and on a list that grows past the viewport it never intersects again.
+   *
+   * Re-entry is the provider's problem, not this effect's — the sentinel fires repeatedly
+   * while visible, and `loadMoreConversations` drops calls that arrive while one is in
+   * flight or when there is no cursor left.
+   */
+  useEffect(() => {
+    const sentinel = listSentinelRef.current;
+    if (!sentinel || !listPageInfo.hasNextPage) return undefined;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) loadMoreConversations();
+      },
+      { rootMargin: "400px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [listPageInfo.hasNextPage, loadMoreConversations, chats.length]);
 
   // fetchChats removed - handled by ChatContext
 
@@ -192,13 +324,8 @@ const ChatPage = ({ embedded = false }) => {
 
     setSearchLoading(true);
     try {
-      const response = await axios.get(
-        `${import.meta.env.VITE_SERVER}/user/search?q=${encodeURIComponent(query)}`,
-        {
-          headers: { Authorization: `Bearer ${userAuth.token}` },
-        }
-      );
-      setFilteredUsers(response.data.users || []);
+      const data = await userAPI.searchUsers(query);
+      setFilteredUsers(data.users || []);
       setShowSearchResults(true);
     } catch (error) {
       console.error("Error searching users:", error);
@@ -239,17 +366,17 @@ const ChatPage = ({ embedded = false }) => {
     navigate(`/chat/${user.username}`);
   };
 
-  // const handleGroupSelect = (group) => {
-  //   navigate(`/group/${group._id}`);
-  // };
-
+  /*
+   * A ref, not a document-wide query for the placeholder text (#151).
+   *
+   * This was `document.querySelector('input[placeholder="Search users to chat"]')`,
+   * which reaches outside the component into the whole page, breaks the moment
+   * anyone edits the copy — including a translation — and would find the wrong input
+   * if a second one ever carried the same placeholder. It also finds nothing on the
+   * embedded layout if the search box is scrolled out of the DOM.
+   */
   const handleStartConversation = () => {
-    const searchInput = document.querySelector(
-      'input[placeholder="Search users to chat"]'
-    );
-    if (searchInput) {
-      searchInput.focus();
-    }
+    searchInputRef.current?.focus();
   };
 
   useEffect(() => {
@@ -283,15 +410,11 @@ const ChatPage = ({ embedded = false }) => {
         localStorage.getItem(`chat-built-in-tabs-order-${userAuth.id}`) || "[]"
       );
       if (Array.isArray(saved) && saved.length) {
-        const byId = new Map(
-          [
-            { id: "all", label: "All" },
-            { id: "requests", label: "Requests" },
-            { id: "groups", label: "Groups" },
-            { id: "unread", label: "Unread" },
-            { id: "favorites", label: "Favorites" },
-          ].map((item) => [item.id, item])
-        );
+        // From the shared default, not a second hardcoded copy. The copy here
+        // was never updated when a tab was added, so any user with a saved
+        // order — which is everyone, the persist effect writes on mount —
+        // would never see a new tab, and the stale order got written back.
+        const byId = new Map(DEFAULT_BUILT_IN_TABS.map((item) => [item.id, item]));
         const reordered = saved.map((id) => byId.get(id)).filter(Boolean);
         const missing = [...byId.values()].filter(
           (item) => !reordered.some((entry) => entry.id === item.id)
@@ -312,7 +435,11 @@ const ChatPage = ({ embedded = false }) => {
   }, [builtInTabs, userAuth?.id]);
 
   const formatMessageTime = (dateString) => {
+    // Guarded: every comparison below is NaN for an invalid date and the
+    // fallthrough renders the literal string "Invalid Date".
+    if (!dateString) return "";
     const date = new Date(dateString);
+    if (Number.isNaN(date.getTime())) return "";
     const now = new Date();
     const diffMs = now - date;
     const diffMins = Math.floor(diffMs / 60000);
@@ -340,18 +467,64 @@ const ChatPage = ({ embedded = false }) => {
     return `${prefix} ${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
   };
 
-  const getMessagePreview = (message) => {
+  const getMessagePreview = (message, { locked = false } = {}) => {
+    // The server withholds the preview for a locked chat rather than trusting
+    // the client to hide it, so `message` is genuinely absent here.
+    if (locked) return "Locked chat";
     if (!message) return "";
 
     if (message.isDeleted) return "This message was deleted";
+    /*
+     * `deletedFor` — hidden for *this* reader.
+     *
+     * Delete-for-me leaves the message in place with the reader's id in
+     * `deletedFor`, and the list showed its text regardless: a message you had
+     * deliberately hidden went on being the preview at the top of your chat list.
+     */
+    const myId = String(userAuth?.id || userAuth?._id || "");
+    if (
+      myId &&
+      Array.isArray(message.deletedFor) &&
+      message.deletedFor.some((id) => String(id?._id ?? id) === myId)
+    ) {
+      return "";
+    }
+
     if (message.messageType === "media") {
       const mediaType = message.media?.[0]?.type;
-      return mediaType === "video" ? "Sent a video" : "Sent a photo";
+      // `document` is the case the media branch missed — a PDF previewed as
+      // "Sent a photo" because the branch only distinguished video from everything
+      // else.
+      if (mediaType === "video") return "Sent a video";
+      if (mediaType === "document") return "Sent a file";
+      if (mediaType === "audio") return "Sent an audio file";
+      return "Sent a photo";
     }
     if (message.messageType === "voice") return "Sent a voice message";
     if (message.messageType === "gif") return "Sent a gif";
-    if (message.messageType === "poll") return "Sent a poll";
+    if (message.messageType === "poll") {
+      // The question, when there is one. "Sent a poll" over a poll everyone in the
+      // group is looking at is strictly less useful than its text.
+      return message.poll?.question ? `📊 ${message.poll.question}` : "Sent a poll";
+    }
     if (message.messageType === "sticker") return "Sent a sticker";
+    /*
+     * `post_share` — unhandled, so it fell through to "Sent a message".
+     *
+     * The envelope covers three kinds (see Message.sharedContent), and the marker
+     * survives even when the snapshot has been stripped for this reader.
+     */
+    if (message.messageType === "post_share") {
+      const kind = message.sharedContent?.kind;
+      if (kind === "profile") return "Shared a profile";
+      if (kind === "comment") return "Shared a comment";
+      return "Shared a post";
+    }
+    if (message.messageType === "file") return "Sent a file";
+    if (message.messageType === "location") return "Shared a location";
+    if (message.messageType === "call") {
+      return message.call?.type === "video" ? "Video call" : "Voice call";
+    }
 
     return message.content || "Sent a message";
   };
@@ -362,17 +535,24 @@ const ChatPage = ({ embedded = false }) => {
         type: chat.isGroup ? "group" : "chat",
         key: chat.id,
         id: chat.id,
-        timestamp: new Date(chat.latestMessage?.createdAt || chat.updatedAt || 0).getTime(),
-        unreadCount: chat.unreadCount || (!chat.isGroup && unreadCounts[chat.user?._id]) || 0,
+        // lastMessageTime, not updatedAt — the server doesn't send updatedAt,
+        // so a chat with no latestMessage (locked, or never messaged) sorted to
+        // the epoch and fell to the bottom of the list.
+        timestamp: new Date(
+          chat.latestMessage?.createdAt || chat.lastMessageTime || 0
+        ).getTime(),
+        // The context is the live source once it's seeded from the fetch —
+        // socket bumps and clears land there, and the fetched `chat.unreadCount`
+        // goes stale the moment a message arrives.
+        unreadCount: unreadCounts[chat.id] ?? chat.unreadCount ?? 0,
         isFavorite: Boolean(chat.isFavorite) || favoriteChats.includes(chat.id),
         isMuted: Boolean(chat.isMuted) || mutedChats.includes(chat.id),
         isPinned: Boolean(chat.isPinned) || pinnedChats.includes(chat.id),
-        isHidden: Boolean(chat.isHidden) || hiddenChats.includes(chat.id),
-        isFlagged: Boolean(chat.isFlagged) || flaggedChats.includes(chat.id),
         isLocked: Boolean(chat.isLocked) || lockedChats.includes(chat.id),
-        isMarkedUnread:
-          manualUnreadChats.includes(chat.id) ||
-          ((chat.unreadCount || 0) > 0 && !forcedReadChats.includes(chat.id)),
+        // Unread is now one fact — the watermark — rather than a real count
+        // crossed with two flag arrays that could contradict each other.
+        isMarkedUnread: (unreadCounts[chat.id] ?? chat.unreadCount ?? 0) > 0,
+        seen: Boolean(chat.seen),
         categoryId: chat.categoryId || categoryAssignments[chat.id] || null,
         data: chat,
       })),
@@ -382,11 +562,7 @@ const ChatPage = ({ embedded = false }) => {
       favoriteChats,
       mutedChats,
       pinnedChats,
-      hiddenChats,
-      flaggedChats,
       lockedChats,
-      manualUnreadChats,
-      forcedReadChats,
       categoryAssignments,
     ]
   );
@@ -417,7 +593,17 @@ const ChatPage = ({ embedded = false }) => {
   const filteredItems = useMemo(() => {
     let items = sortedItems;
     if (activeFilter === "all") items = sortedItems;
-    if (activeFilter === "groups") return groupItems;
+    /*
+     * The Groups tab used to `return` here, before the advanced filters below ran.
+     *
+     * So a filter left on from another tab was silently ignored on this one — the
+     * trigger still showed it as active and the list disagreed with it (#116). The
+     * profile-shaped filters (verified, following, followers) are about a *person*
+     * and can't apply to a group, so they pass groups through by construction; going
+     * through the same code path is what keeps that a deliberate answer rather than
+     * an accident of where the early return sat.
+     */
+    if (activeFilter === "groups") items = groupItems;
     if (activeFilter === "unread") {
       items = sortedItems.filter((item) => item.isMarkedUnread || item.unreadCount > 0);
     }
@@ -455,12 +641,65 @@ const ChatPage = ({ embedded = false }) => {
     return items;
   }, [activeFilter, sortedItems, groupItems, advancedFilters, userAuth?.id, userAuth?._id]);
 
+  /*
+   * Loaded conversations matching the search box.
+   *
+   * Local, over `sortedItems`, rather than a `GET /chats?search=` round trip: the results
+   * are instant on every keystroke, and the server's own `search` is the same substring
+   * match applied to a page it has already fetched — it matches peer usernames and group
+   * names, which aren't on the row the query pages over, so it cannot be a predicate.
+   *
+   * The limit is therefore the same on both sides and it is now honest: this searches the
+   * conversations that have been paged in, and scrolling pages in more. It used to search
+   * a set the server had silently truncated at 500, which no amount of scrolling would
+   * extend (CF24).
+   */
+  const matchingChats = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return [];
+    return sortedItems.filter((item) => {
+      const peer = item.data?.user;
+      const group = item.data?.group;
+      return [peer?.name, peer?.username, group?.name].some((field) =>
+        field?.toLowerCase().includes(q)
+      );
+    });
+  }, [searchQuery, sortedItems]);
+
   const toggleAdvancedFilter = (key) => {
     setAdvancedFilters((prev) => ({
       ...prev,
       [key]: !prev[key],
     }));
   };
+
+  const activeAdvancedFilterCount = useMemo(
+    () => Object.values(advancedFilters).filter(Boolean).length,
+    [advancedFilters]
+  );
+
+  const clearAdvancedFilters = useCallback(() => {
+    setAdvancedFilters({
+      verifiedProfiles: false,
+      following: false,
+      followers: false,
+      unanswered: false,
+    });
+  }, []);
+
+  /*
+   * Filters reset when the tab changes.
+   *
+   * They persisted across tabs, so switching to Requests with "Verified Profiles"
+   * still on showed an empty list and the generic "Start a conversation" copy — the
+   * filter was invisible on the new tab and the emptiness looked like the truth
+   * (#116). Resetting is the behaviour that can't mislead; the alternative is
+   * showing the filter state on every tab, which is the same information in four
+   * more places.
+   */
+  useEffect(() => {
+    clearAdvancedFilters();
+  }, [activeFilter, clearAdvancedFilters]);
 
   const toggleFilterDropdown = (event) => {
     event.stopPropagation();
@@ -482,12 +721,8 @@ const ChatPage = ({ embedded = false }) => {
     );
     if (exists) return;
     try {
-      const response = await axios.post(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/categories`,
-        { name },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
-      const createdCategory = (response.data?.categories || []).find(
+      const data = await chatAPI.createCategory(name);
+      const createdCategory = (data?.categories || []).find(
         (category) => category.name.toLowerCase() === name.toLowerCase()
       );
       await loadChatPreferences();
@@ -501,70 +736,37 @@ const ChatPage = ({ embedded = false }) => {
     }
   };
 
-  const saveCategoryAssignment = async () => {
-    if (!selectedItemForCategory) return;
-    try {
-      await axios.put(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/assignments/${encodeURIComponent(selectedItemForCategory.key)}`,
-        { categoryId: selectedCategoryId || null },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
-      await loadChatPreferences();
-      if (activeFilter.startsWith("category:")) {
-        loadConversations(getConversationParamsForFilter(activeFilter));
-      }
-      setIsAssignCategoryModalOpen(false);
-      setSelectedItemForCategory(null);
-      setSelectedCategoryId("");
-    } catch (assignError) {
-      console.error("Error assigning category:", assignError);
-    }
-  };
-
+  /*
+   * Through the provider, which owns the list and patches the cached copy (CF37).
+   *
+   * This used to call the endpoint itself, apply the response, and then patch the
+   * IndexedDB entry separately — because post cards kept their own module-level copy of
+   * `favoriteChats` and read it from there. They don't any more: `ChatProvider` wraps the
+   * whole route tree, so the feed reads the same list this does and one action serves
+   * both.
+   */
   const toggleFavorite = async (item) => {
-    try {
-      const response = await axios.post(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/favorites/${encodeURIComponent(item.key)}/toggle`,
-        {},
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
-      const nextFavorites = Array.isArray(response.data?.favoriteChats)
-        ? response.data.favoriteChats
-        : [];
-      setFavoriteChats(nextFavorites);
-      if (activeFilter === "favorites") {
-        loadConversations(getConversationParamsForFilter(activeFilter));
-      }
-    } catch (favError) {
-      console.error("Error toggling favorite chat:", favError);
-    }
-  };
-
-  const syncPreferenceStateFromResponse = (responseData) => {
-    if (Array.isArray(responseData?.favoriteChats)) setFavoriteChats(responseData.favoriteChats);
-    if (Array.isArray(responseData?.mutedChats)) setMutedChats(responseData.mutedChats);
-    if (Array.isArray(responseData?.pinnedChats)) setPinnedChats(responseData.pinnedChats);
-    if (Array.isArray(responseData?.hiddenChats)) setHiddenChats(responseData.hiddenChats);
-    if (Array.isArray(responseData?.flaggedChats)) setFlaggedChats(responseData.flaggedChats);
-    if (Array.isArray(responseData?.lockedChats)) setLockedChats(responseData.lockedChats);
-    if (Array.isArray(responseData?.manualUnreadChats)) {
-      setManualUnreadChats(responseData.manualUnreadChats);
-    }
-    if (Array.isArray(responseData?.forcedReadChats)) {
-      setForcedReadChats(responseData.forcedReadChats);
+    const data = await toggleFavoriteChat(item.key);
+    if (data && activeFilter === "favorites") {
+      loadConversations(getConversationParamsForFilter(activeFilter));
     }
   };
 
   const updateItemState = async (item, stateKey, nextState, pin = "") => {
     try {
-      const response = await axios.put(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/state/${encodeURIComponent(item.id)}`,
-        { stateKey, nextState, pin },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
-      syncPreferenceStateFromResponse(response.data);
+      // Through the provider, so the details page and the conversation page see the
+      // change too rather than only this list (#96).
+      const data = await setChatState(item.id, stateKey, nextState, pin);
+      /*
+       * Locking a chat invalidates any grant this tab was holding for it.
+       *
+       * Without this, locking a conversation you had open a moment ago would
+       * leave it readable for the rest of the grant's fifteen minutes — the lock
+       * would appear to have done nothing.
+       */
+      if (stateKey === "lock") clearUnlockGrant(item.id);
       loadConversations(getConversationParamsForFilter(activeFilter));
-      return response.data;
+      return data;
     } catch (error) {
       console.error(`Error updating ${stateKey}:`, error);
       throw error;
@@ -574,11 +776,7 @@ const ChatPage = ({ embedded = false }) => {
   const handleArchiveToggle = async (item) => {
     try {
       const chatId = item.id;
-      await axios.post(
-        `${import.meta.env.VITE_SERVER}/chats/${encodeURIComponent(chatId)}/archive`,
-        { archive: !item.data?.isArchived },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
+      await chatAPI.archiveChat(chatId, !item.data?.isArchived);
       loadConversations(getConversationParamsForFilter(activeFilter));
     } catch (error) {
       console.error("Error toggling archive:", error);
@@ -589,14 +787,12 @@ const ChatPage = ({ embedded = false }) => {
     if (item.type !== "chat") return;
     const username = item.data?.user?.username;
     if (!username) return;
-    const isBlocked = Boolean(item.data?.user?.isBlocked);
-    const route = isBlocked ? "unblock" : "block";
+    // Top level, not on `user` — that's where getChats puts it. Reading
+    // `user.isBlocked` was always undefined, so this row always said "Block
+    // user" and unblocking from the list was impossible.
+    const isBlocked = Boolean(item.data?.isBlocked);
     try {
-      await axios.post(
-        `${import.meta.env.VITE_SERVER}/user/${route}/${encodeURIComponent(username)}`,
-        {},
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
+      await (isBlocked ? userAPI.unblock(username) : userAPI.block(username));
       loadConversations(getConversationParamsForFilter(activeFilter));
       setChatMenu(null);
     } catch (error) {
@@ -604,21 +800,38 @@ const ChatPage = ({ embedded = false }) => {
     }
   };
 
-  const handleDeleteItem = async (item) => {
-    if (!window.confirm("Delete this chat?")) return;
+  /*
+   * `ConfirmDialog`, not `window.confirm` (#120).
+   *
+   * A native confirm is unstyled, unbrandable, blocks the whole tab, and on iOS
+   * Safari names the site in the prompt — but the reason it matters here is that it
+   * can be suppressed by the browser ("prevent this page from creating additional
+   * dialogs"), after which the destructive action either always fires or never does
+   * depending on the browser. The project has a dialog component for exactly this.
+   */
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deletingChat, setDeletingChat] = useState(false);
+  const [categoryToDelete, setCategoryToDelete] = useState(null);
+  const [deletingCategory, setDeletingCategory] = useState(false);
+
+  const handleDeleteItem = (item) => {
+    if (item.type !== "chat") return;
+    setDeleteTarget(item);
+    setChatMenu(null);
+  };
+
+  const confirmDeleteItem = async () => {
+    if (!deleteTarget) return;
+    setDeletingChat(true);
     try {
-      if (item.type === "chat") {
-        await axios.delete(
-          `${import.meta.env.VITE_SERVER}/chats/${encodeURIComponent(item.data?.user?.username)}`,
-          { headers: { Authorization: `Bearer ${userAuth.token}` } }
-        );
-      } else {
-        await updateItemState(item, "hide", true);
-      }
+      await chatAPI.deleteChat(deleteTarget.data?.user?.username);
       loadConversations(getConversationParamsForFilter(activeFilter));
-      setChatMenu(null);
+      setDeleteTarget(null);
     } catch (error) {
       console.error("Error deleting item:", error);
+      toast.error(error?.response?.data?.error || "Couldn't delete that chat.");
+    } finally {
+      setDeletingChat(false);
     }
   };
 
@@ -638,45 +851,148 @@ const ChatPage = ({ embedded = false }) => {
     setShowListSubmenu(false);
   };
 
-  const handleChatLongPressStart = (event, item) => {
-    const touch = event.touches?.[0];
-    const rect = event.currentTarget?.getBoundingClientRect?.();
-    const menuWidth = 260;
-    const estimatedMenuHeight = 560;
-    const viewportHeight = window.innerHeight || 800;
-    const timer = setTimeout(() => {
-      const preferredY = (rect?.bottom || touch?.clientY || 24) + 8;
-      const maxY = Math.max(12, viewportHeight - estimatedMenuHeight - 12);
-      setChatMenu({
-        item,
-        x: rect ? Math.max(12, rect.right - menuWidth) : touch?.clientX || 24,
-        y: Math.min(preferredY, maxY),
-      });
-      setShowListSubmenu(false);
-    }, 450);
-    setChatLongPressTimer(timer);
-  };
+  /*
+   * `openChatMenu` reached through a ref.
+   *
+   * The long-press callback has to be stable — `useLongPress` memoises on it, and
+   * an identity that changes every render would rebuild the timer machinery on each
+   * one. `openChatMenu` is redeclared every render because it closes over setState,
+   * so the ref is the indirection that keeps the callback stable without making the
+   * menu logic stale.
+   */
+  const openChatMenuRef = useRef(openChatMenu);
+  openChatMenuRef.current = openChatMenu;
 
-  const handleChatLongPressEnd = () => {
-    if (chatLongPressTimer) {
-      clearTimeout(chatLongPressTimer);
-      setChatLongPressTimer(null);
-    }
-  };
+  /*
+   * Close the menu when the list moves under it (#150).
+   *
+   * Its position is a `getBoundingClientRect()` snapshot taken when it opened, so
+   * scrolling left it floating over an unrelated row — still acting on the chat it
+   * was opened for, which is the dangerous half. Repositioning on every scroll frame
+   * would be the fuller fix; dismissing is what a native menu does and is the
+   * behaviour nobody has to learn.
+   */
+  useEffect(() => {
+    // All three hand-positioned popovers, not just the chat menu — the tab menu and
+    // the filter dropdown snapshot a rect the same way and detach the same way.
+    if (!chatMenu && !tabMenu && !isFilterDropdownOpen) return undefined;
+    const dismiss = () => {
+      setChatMenu(null);
+      setTabMenu(null);
+      setIsFilterDropdownOpen(false);
+    };
+    // Capture phase, so a scroll inside the list container is caught too — a
+    // bubbling scroll listener on window never sees it.
+    window.addEventListener("scroll", dismiss, true);
+    window.addEventListener("resize", dismiss);
+    return () => {
+      window.removeEventListener("scroll", dismiss, true);
+      window.removeEventListener("resize", dismiss);
+    };
+  }, [chatMenu, tabMenu, isFilterDropdownOpen]);
+
+  /*
+   * The tab long-press timer, cleared on unmount (#149).
+   *
+   * It is already a ref rather than state, but nothing cancelled it — navigating away
+   * mid-press fired `setTabMenu` into an unmounted component. `useLongPress` handles
+   * this for the row press; this one is hand-rolled because it also has to
+   * distinguish a fixed tab from a category.
+   */
+  useEffect(
+    () => () => {
+      if (tabLongPressTimerRef.current) clearTimeout(tabLongPressTimerRef.current);
+    },
+    []
+  );
+
+  /*
+   * Long press, through the shared hook.
+   *
+   * This was hand-rolled and had both of the problems `useLongPress` exists to
+   * solve. The timer lived in `useState`, so every touchstart re-rendered the whole
+   * list, and it was never cleared on unmount — navigating away mid-press fired
+   * setState into a dead component. And nothing suppressed the click that ends the
+   * press, so holding a row opened the menu *and* navigated into the conversation
+   * behind it (#101); the hook's `consumeClick` is exactly that suppression, and it
+   * also kills the iOS callout that was hijacking the gesture.
+   *
+   * One hook instance for the whole list rather than one per row — the row being
+   * pressed goes in a ref, because the hook's callback is stable by design.
+   */
+  const pressedItemRef = useRef(null);
+
+  const openMenuForPressedItem = useCallback((event) => {
+    const item = pressedItemRef.current;
+    if (item) openChatMenuRef.current?.(event, item);
+  }, []);
+
+  const chatLongPress = useLongPress(openMenuForPressedItem);
+
+  /**
+   * Props for a conversation row: long-press handlers, the click that has to know
+   * whether it was a long press, and the keyboard equivalents.
+   */
+  const chatRowProps = (item, onOpen) => ({
+    ...chatLongPress.handlers,
+    onPointerDown: (event) => {
+      pressedItemRef.current = item;
+      chatLongPress.handlers.onPointerDown(event);
+    },
+    onClick: (event) => {
+      if (chatLongPress.consumeClick(event)) return;
+      onOpen();
+    },
+    /*
+     * `role="listitem"`, not `role="button"` (#51).
+     *
+     * The row was a bare `<div onClick>` — unreachable by keyboard, announced as
+     * nothing. `role="button"` was the obvious repair and the wrong one: the row
+     * *contains* a real `<button>` for the ⋮ menu, and ARIA treats interactive
+     * content inside a `button` role as presentational, so screen readers may not
+     * expose that menu at all. Fixing the row by hiding a control isn't a fix.
+     *
+     * A list item that happens to be activatable is what this is. It keeps its own
+     * name, stays in the tab order, answers Enter and Space, and leaves the nested
+     * button exposed — and the list container carries `role="list"`.
+     */
+    role: "listitem",
+    tabIndex: 0,
+    onKeyDown: (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onOpen();
+        return;
+      }
+      // The same menu the long press and the right-click open, from the keyboard.
+      if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        openChatMenu(event, item);
+      }
+    },
+    onContextMenu: (event) => {
+      chatLongPress.handlers.onContextMenu?.(event);
+      openChatMenu(event, item);
+    },
+  });
 
   const runToggleAction = async (item, stateKey) => {
-    const current =
-      stateKey === "mute"
-        ? item.isMuted
-        : stateKey === "pin"
-          ? item.isPinned
-          : stateKey === "hide"
-            ? item.isHidden
-            : stateKey === "flag"
-              ? item.isFlagged
-              : stateKey === "unread"
-                ? item.isMarkedUnread
-                : false;
+    // Read and unread aren't a flag any more, they're the read watermark, so
+    // they go through the context rather than the preferences endpoint.
+    if (stateKey === "unread") {
+      setChatMenu(null);
+      try {
+        if (item.isMarkedUnread) await clearChatUnread(item.id);
+        else await markConversationUnread(item.id);
+      } catch (error) {
+        console.error("Error changing read state:", error);
+      }
+      return;
+    }
+
+    // Only mute and pin reach here now; hide and flag are gone and read/unread
+    // returned above.
+    const current = stateKey === "mute" ? item.isMuted : item.isPinned;
     await updateItemState(item, stateKey, !current);
     setChatMenu(null);
   };
@@ -688,47 +1004,132 @@ const ChatPage = ({ embedded = false }) => {
     setIsPinModalOpen(true);
   };
 
+  const closePinModal = () => {
+    setIsPinModalOpen(false);
+    setPendingLockItem(null);
+    setLockPinInput("");
+    setLockPinCurrent("");
+    setPinAction("toggle");
+  };
+
+  const openPinSetup = (action) => {
+    setPinAction(action);
+    setPendingLockItem(null);
+    setLockPinInput("");
+    setLockPinCurrent("");
+    setIsPinModalOpen(true);
+  };
+
   const submitLockPinAction = async () => {
     if (!pendingLockItem) return;
-    const nextState =
-      pinAction === "open" ? pendingLockItem.isLocked : !pendingLockItem.isLocked;
     try {
-      await updateItemState(pendingLockItem, "lock", nextState, lockPinInput);
       if (pinAction === "open") {
+        /*
+         * Opening a locked chat asks a question; it doesn't write anything.
+         *
+         * This used to call `PUT /preferences/state/:chatId` with `nextState` set
+         * to the value the chat already had, purely so the server would compare
+         * the PIN — a write pretending to be a question, and it produced nothing
+         * the thread endpoint could use. The lock is enforced server-side now, so
+         * proving the PIN returns a short-lived grant instead and the reads verify
+         * it. See services/chatUnlock.js.
+         */
+        const data = await chatAPI.verifyChatLockPin(pendingLockItem.id, lockPinInput);
+        saveUnlockGrant(data.chatId, data.grant, data.expiresAt);
         if (pendingLockItem.type === "group") {
-          navigate(`/group/${pendingLockItem.data?.group?._id}`);
+          navigate(`/chat/group/${pendingLockItem.data?.group?._id}`);
         } else {
           navigate(`/chat/${pendingLockItem.data?.user?.username}`);
         }
+      } else {
+        await updateItemState(
+          pendingLockItem,
+          "lock",
+          !pendingLockItem.isLocked,
+          lockPinInput
+        );
       }
       setIsPinModalOpen(false);
       setPendingLockItem(null);
       setChatMenu(null);
       setLockPinInput("");
       setPinAction("toggle");
-    } catch {
-      alert("Invalid PIN or failed to update lock state.");
-    }
-  };
-
-  const promptSetPinIfMissing = async () => {
-    const pin = window.prompt("Set chat lock PIN (4-8 digits)");
-    if (!pin) return;
-    try {
-      await axios.put(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/lock-pin`,
-        { pin },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
+    } catch (error) {
+      toast.error(
+        error?.response?.data?.error || "Couldn't update the lock. Try again."
       );
-      alert("PIN set successfully.");
-    } catch {
-      alert("Failed to set PIN.");
     }
   };
 
-  const ChatResultCard = ({ chat, item }) => {
+  /*
+   * Setting, changing and resetting the PIN.
+   *
+   * There was one path — `window.prompt("Set chat lock PIN")` — reachable only
+   * when no PIN existed. So a PIN could be created and then never changed, and
+   * a forgotten one locked those conversations for the life of the account:
+   * `setChatLockPin` requires the current PIN, and nothing anywhere could
+   * supply it. The reset goes through the account password instead, which is
+   * the credential the lock sits behind anyway.
+   */
+  const submitPinSetup = async () => {
+    if (pinAction === "reset") {
+      try {
+        const data = await chatAPI.resetChatLockPin(lockPinCurrent);
+        // The list of locked chats went with the PIN, so both come from a reload
+        // rather than being patched a field at a time.
+        applyPreferences({ hasLockPin: false, lockedChats: [] });
+        // Every chat is unlocked now, so every grant is meaningless — and holding
+        // one for a chat that gets locked again later would open it without a PIN.
+        clearAllUnlockGrants();
+        closePinModal();
+        toast.success(
+          data?.unlocked
+            ? `PIN removed. ${data.unlocked} chat${data.unlocked === 1 ? "" : "s"} unlocked.`
+            : "PIN removed."
+        );
+        // With the current tab's params: bare, this replaced a filtered list with
+        // the unfiltered one while the tab still claimed to be filtered.
+        loadConversations(getConversationParamsForFilter(activeFilter));
+      } catch (error) {
+        toast.error(error?.response?.data?.error || "Couldn't reset your PIN.");
+      }
+      return;
+    }
+
+    if (!/^\d{4,8}$/.test(lockPinInput)) {
+      toast.error("PIN must be 4-8 digits");
+      return;
+    }
+    try {
+      await chatAPI.setChatLockPin(lockPinInput, lockPinCurrent || undefined);
+      applyPreferences({ hasLockPin: true });
+      closePinModal();
+      toast.success(pinAction === "change" ? "PIN changed" : "PIN set");
+    } catch (error) {
+      // The input is left alone — a wrong current PIN shouldn't cost the user
+      // the new one they just typed.
+      toast.error(error?.response?.data?.error || "Couldn't save your PIN.");
+    }
+  };
+
+  /*
+   * The four blocks below are chunks of this component's JSX, not components.
+   *
+   * Declared as `const X = (props) => ...` inside the render body and used as
+   * `<X />`, React treats each as a component *type* that is redefined every
+   * render — so the entire conversation list unmounted and remounted whenever
+   * anything on the page changed: a keystroke in the search box, a menu
+   * opening, an incoming message. Avatars re-requested and hover state was lost
+   * each time.
+   *
+   * None of them uses hooks and each has exactly one call site, so calling them
+   * as functions puts their JSX directly in this component's tree. The `key`
+   * moves onto the root element, which is where React wants it for an item in
+   * a list.
+   */
+  const renderChatResultCard = (chat, item) => {
     const isOnline = onlineUsers.has(chat.user._id.toString());
-    const unreadCount = item.unreadCount || unreadCounts[chat.user._id] || 0;
+    const unreadCount = item.unreadCount || 0;
 
     const myId = String(userAuth?.id || userAuth?._id || "");
     const latestMsg = chat.latestMessage;
@@ -738,24 +1139,46 @@ const ChatPage = ({ embedded = false }) => {
     let previewText;
     let showTimestamp = true;
 
-    if (unreadCount >= 1) {
-      previewText = `${unreadCount} new message${unreadCount > 1 ? "s" : ""}`;
-    } else if (isSentByMe) {
-      const isSeen = latestMsg?.status === "read";
+    /*
+     * An unread chat shows the message, not the count.
+     *
+     * It used to replace the preview with "3 new messages" — which throws away the
+     * one thing that tells you whether to open it, and duplicates the badge
+     * that is already sitting on the same row. Every messaging app shows the
+     * latest message and puts the number in the badge; this showed the number
+     * twice and the message never.
+     */
+    if (isSentByMe && unreadCount === 0) {
+      // From the peer's read watermark, computed server-side. `status` was a
+      // single field shared by every recipient and never reached "read" here.
+      const isSeen = Boolean(item.seen);
       previewText = formatSentTime(latestMsg?.createdAt, isSeen ? "Seen" : "Sent");
       showTimestamp = false;
     } else {
-      previewText = getMessagePreview(latestMsg);
+      previewText = getMessagePreview(latestMsg, { locked: item.isLocked });
     }
 
-    const previewTime = showTimestamp ? formatMessageTime(latestMsg?.createdAt) : null;
+    // Falls back to lastMessageTime: a locked chat has no latestMessage, and
+    // formatMessageTime(undefined) renders the literal string "Invalid Date".
+    const previewTime = showTimestamp
+      ? formatMessageTime(latestMsg?.createdAt || chat.lastMessageTime)
+      : null;
 
     const handleCardClick = () => {
-      if (item.isMarkedUnread) {
-        updateItemState(item, "read", true).catch((error) =>
-          console.error("Error marking chat read on open:", error)
-        );
-      }
+      // Clearing the badge is the context's job — the watermark advances when
+      // the conversation opens. This used to persist a "forced read" flag that
+      // was only ever cleared by an explicit mark-as-unread, so a chat you had
+      // opened once could never show a badge again.
+      // Fire-and-forget, but the rejection has to be caught: the badge is
+      // already zeroed optimistically, so a failure here is invisible — and
+      // uncaught it becomes an unhandled rejection on every offline tap.
+      /*
+       * The lock first, before anything is marked read.
+       *
+       * `clearChatUnread` advances the server-side read watermark, so tapping a locked
+       * chat and then cancelling the PIN sheet zeroed the badge on every device and
+       * marked the conversation read — for messages nobody was ever shown.
+       */
       if (item.isLocked) {
         setPendingLockItem(item);
         setPinAction("open");
@@ -763,44 +1186,52 @@ const ChatPage = ({ embedded = false }) => {
         setIsPinModalOpen(true);
         return;
       }
+      if (unreadCount > 0) {
+        clearChatUnread(item.id).catch((err) =>
+          console.error("Failed to mark chat read:", err)
+        );
+      }
       navigate(`/chat/${chat.user.username}`);
     };
 
     return (
       <div
-        className="text-white w-full px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors"
-        onClick={handleCardClick}
-        onContextMenu={(event) => openChatMenu(event, item)}
-        onTouchStart={(event) => handleChatLongPressStart(event, item)}
-        onTouchEnd={handleChatLongPressEnd}
-        onTouchMove={handleChatLongPressEnd}
+        key={item.key}
+        {...chatRowProps(item, handleCardClick)}
+        aria-label={rowAccessibleName(chat.user.name || chat.user.username, item, unreadCount)}
+        className={`${chatLongPress.className} text-white w-full px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors focus:outline-none focus-visible:bg-neutral-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-600`}
       >
         <div className="flex gap-3">
           <div className="cursor-pointer relative">
             <img
               className="w-10 h-10 rounded-full bg-neutral-800 object-cover border border-neutral-800"
               src={chat.user.profilePic || "/default-avatar.png"}
-              alt="Profile"
+              alt=""
             />
             {isOnline && (
               <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-black"></div>
             )}
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex flex-row justify-between items-center">
+            <div className="flex flex-row justify-between items-center gap-2">
               <div className="cursor-pointer flex-1 min-w-0">
-                <p className="text-white font-medium line-clamp-1 flex items-center">
-                  {chat.user.name || chat.user.username}
+                {/*
+                  `line-clamp-1` and `flex` were on the same element, and they
+                  collide: line-clamp sets `display:-webkit-box`, which `flex`
+                  overrides, so the clamp did nothing and a long display name pushed
+                  the timestamp and the menu off the row (#113). The flex row keeps
+                  its layout job and the text node inside it does the truncating.
+                */}
+                <p className="text-white font-medium flex items-center gap-1 min-w-0">
+                  <span className="truncate min-w-0">
+                    {chat.user.name || chat.user.username}
+                  </span>
                   {chat.user.isVerified && (
-                    <span className="pl-1 pt-0.5 inline-flex items-center">
+                    <span className="shrink-0 inline-flex items-center">
                       <Icons.verified />
                     </span>
                   )}
-                  {item.isPinned && (
-                    <span className="pl-1 inline-flex items-center">
-                      <Pin className="w-3.5 h-3.5 text-neutral-300" />
-                    </span>
-                  )}
+                  <ChatRowBadges item={item} />
                 </p>
                 <p
                   className={`text-sm flex items-center gap-1 min-w-0 ${
@@ -816,23 +1247,17 @@ const ChatPage = ({ embedded = false }) => {
                   )}
                 </p>
               </div>
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-4">
-                  {unreadCount > 0 && (
-                    <span className="w-2 h-2 rounded-full bg-blue-700 mr-1" />
-                  )}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openChatMenu(e, item);
-                    }}
-                    className="w-6 h-6 rounded-full flex items-center justify-center text-sm font-semibold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors leading-none"
-                    title="Chat actions"
+              <div className="flex items-center gap-1 shrink-0">
+                {unreadCount > 0 && (
+                  <span
+                    className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-[11px] font-semibold text-white flex items-center justify-center"
+                    // The count is already in the row's accessible name.
+                    aria-hidden="true"
                   >
-                    ⋮
-                  </button>
-                </div>
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+                <ChatRowMenuButton item={item} onOpen={openChatMenu} />
               </div>
             </div>
           </div>
@@ -841,7 +1266,7 @@ const ChatPage = ({ embedded = false }) => {
     );
   };
 
-  const GroupCard = ({ conversation, item }) => {
+  const renderGroupCard = (conversation, item) => {
     const group = conversation.group || {};
     const unreadCount = item.unreadCount || conversation.unreadCount || 0;
     const lastMessage = conversation.latestMessage || {
@@ -856,24 +1281,32 @@ const ChatPage = ({ embedded = false }) => {
     let previewText;
     let showTimestamp = true;
 
-    if (unreadCount >= 1) {
-      previewText = `${unreadCount} new message${unreadCount > 1 ? "s" : ""}`;
-    } else if (isSentByMe) {
-      const isSeen = lastMessage?.status === "read";
+    // Same as the DM card: the message, with the count in the badge beside it.
+    if (isSentByMe && unreadCount === 0) {
+      // Same watermark compare the DM card uses; `status` never reaches "read".
+      const isSeen = Boolean(item.seen);
       previewText = formatSentTime(lastMessage?.createdAt, isSeen ? "Seen" : "Sent");
       showTimestamp = false;
     } else {
-      previewText = getMessagePreview(lastMessage);
+      previewText = getMessagePreview(lastMessage, { locked: item.isLocked });
     }
 
     const previewTime = showTimestamp ? formatMessageTime(lastMessage?.createdAt) : null;
 
     const handleCardClick = () => {
-      if (item.isMarkedUnread) {
-        updateItemState(item, "read", true).catch((error) =>
-          console.error("Error marking group chat read on open:", error)
-        );
-      }
+      // The local `unreadCount`, not item.unreadCount — a group whose badge came
+      // from the server payload rather than the context map would render the
+      // badge and then never clear it on open.
+      // Fire-and-forget, but the rejection has to be caught: the badge is
+      // already zeroed optimistically, so a failure here is invisible — and
+      // uncaught it becomes an unhandled rejection on every offline tap.
+      /*
+       * The lock first, before anything is marked read.
+       *
+       * `clearChatUnread` advances the server-side read watermark, so tapping a locked
+       * chat and then cancelling the PIN sheet zeroed the badge on every device and
+       * marked the conversation read — for messages nobody was ever shown.
+       */
       if (item.isLocked) {
         setPendingLockItem(item);
         setPinAction("open");
@@ -881,36 +1314,36 @@ const ChatPage = ({ embedded = false }) => {
         setIsPinModalOpen(true);
         return;
       }
-      navigate(`/group/${group._id}`);
+      if (unreadCount > 0) {
+        clearChatUnread(item.id).catch((err) =>
+          console.error("Failed to mark chat read:", err)
+        );
+      }
+      navigate(`/chat/group/${group._id}`);
     };
 
     return (
       <div
-        className="text-white w-full px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors"
-        onClick={handleCardClick}
-        onContextMenu={(event) => openChatMenu(event, item)}
-        onTouchStart={(event) => handleChatLongPressStart(event, item)}
-        onTouchEnd={handleChatLongPressEnd}
-        onTouchMove={handleChatLongPressEnd}
+        key={item.key}
+        {...chatRowProps(item, handleCardClick)}
+        aria-label={rowAccessibleName(group.name || "Group", item, unreadCount)}
+        className={`${chatLongPress.className} text-white w-full px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors focus:outline-none focus-visible:bg-neutral-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-600`}
       >
         <div className="flex gap-3">
           <div className="cursor-pointer">
             <img
               className="w-10 h-10 rounded-full bg-neutral-800 object-cover border border-neutral-800"
               src={group.avatar || "/default-group-avatar.png"}
-              alt="Group"
+              alt=""
             />
           </div>
           <div className="flex-1 min-w-0">
-            <div className="flex flex-row justify-between items-center">
+            <div className="flex flex-row justify-between items-center gap-2">
               <div className="cursor-pointer flex-1 min-w-0">
-                <p className="text-white font-medium line-clamp-1">
-                  {group.name}
-                  {item.isPinned && (
-                    <span className="pl-1 inline-flex items-center align-middle">
-                      <Pin className="w-3.5 h-3.5 text-neutral-300" />
-                    </span>
-                  )}
+                {/* Same line-clamp/flex collision as the DM row — see #113 there. */}
+                <p className="text-white font-medium flex items-center gap-1 min-w-0">
+                  <span className="truncate min-w-0">{group.name}</span>
+                  <ChatRowBadges item={item} />
                 </p>
                 <p
                   className={`text-sm flex items-center gap-1 min-w-0 ${
@@ -926,23 +1359,16 @@ const ChatPage = ({ embedded = false }) => {
                   )}
                 </p>
               </div>
-              <div className="flex flex-col items-end gap-1">
-                <div className="flex items-center gap-4">
-                  {unreadCount > 0 && (
-                    <span className="w-2 h-2 rounded-full bg-blue-700 mr-1" />
-                  )}
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      openChatMenu(e, item);
-                    }}
-                    className="w-6 h-6 rounded-full flex items-center justify-center text-sm font-semibold text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors leading-none"
-                    title="Chat actions"
+              <div className="flex items-center gap-1 shrink-0">
+                {unreadCount > 0 && (
+                  <span
+                    className="min-w-5 h-5 px-1.5 rounded-full bg-blue-600 text-[11px] font-semibold text-white flex items-center justify-center"
+                    aria-hidden="true"
                   >
-                    ⋮
-                  </button>
-                </div>
+                    {unreadCount > 99 ? "99+" : unreadCount}
+                  </span>
+                )}
+                <ChatRowMenuButton item={item} onOpen={openChatMenu} />
               </div>
             </div>
           </div>
@@ -951,35 +1377,47 @@ const ChatPage = ({ embedded = false }) => {
     );
   };
 
-  const UserCard = ({ user, onClick }) => (
+  const renderUserCard = (user, onClick) => (
     <div
       key={user._id}
-      className="text-white w-full border-b border-neutral-800 px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors"
+      // Same reasoning as the conversation rows: a div that behaves like a button
+      // has to say so and answer the keyboard (#51).
+      role="button"
+      tabIndex={0}
+      aria-label={`Start a chat with ${user.name || user.username}`}
+      className="text-white w-full border-b border-neutral-800 px-3 py-3 cursor-pointer hover:bg-neutral-900 transition-colors focus:outline-none focus-visible:bg-neutral-900 focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-600"
       onClick={onClick}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onClick(event);
+        }
+      }}
     >
       <div className="flex gap-3">
         <div className="cursor-pointer relative">
           <img
             className="w-10 h-10 rounded-full bg-neutral-800 object-cover border border-neutral-800"
             src={user.profilePic || "/default-avatar.png"}
-            alt="Profile"
+            alt=""
           />
           {onlineUsers.has(user._id.toString()) && (
             <div className="absolute bottom-0 right-0 w-3 h-3 bg-green-500 rounded-full border-2 border-black"></div>
           )}
         </div>
-        <div className="flex-1">
-          <div className="flex flex-row justify-start items-center relative">
-            <div className="cursor-pointer">
-              <p className="text-white font-medium line-clamp-1 flex items-center hover:underline">
-                {user.name || user.username}
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-row justify-start items-center relative min-w-0">
+            <div className="cursor-pointer min-w-0">
+              {/* line-clamp and flex collide — see #113 on the DM row. */}
+              <p className="text-white font-medium flex items-center gap-1 min-w-0 hover:underline">
+                <span className="truncate min-w-0">{user.name || user.username}</span>
                 {user.isVerified && (
-                  <span className="pl-1 pt-0.5 inline-flex items-center">
+                  <span className="shrink-0 inline-flex items-center">
                     <Icons.verified />
                   </span>
                 )}
               </p>
-              <p className="text-neutral-500">{user.username}</p>
+              <p className="text-neutral-500 truncate">{user.username}</p>
             </div>
           </div>
         </div>
@@ -1001,6 +1439,14 @@ const ChatPage = ({ embedded = false }) => {
         actionLabel: "Create a Group",
         action: () => navigate("/create-group"),
         actionIcon: <Users className="w-5 h-5" strokeWidth={2} />,
+      };
+    }
+
+    if (activeFilter === "archived") {
+      return {
+        title: "Nothing archived",
+        description: "Archived chats are hidden from your list and kept here.",
+        icon: <Archive className="w-12 h-12 text-neutral-400" strokeWidth={1.8} />,
       };
     }
 
@@ -1051,7 +1497,7 @@ const ChatPage = ({ embedded = false }) => {
     };
   }, [activeFilter, navigate, sortedCustomCategories]);
 
-  const EmptyState = () => {
+  const renderEmptyState = () => {
     const config = getEmptyStateConfig();
     return (
       <div className="flex flex-col items-center justify-center py-16 px-4 text-center">
@@ -1124,11 +1570,7 @@ const ChatPage = ({ embedded = false }) => {
     [next[index], next[nextIndex]] = [next[nextIndex], next[index]];
 
     try {
-      await axios.put(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/categories/reorder`,
-        { orderedCategoryIds: next.map((item) => item.id) },
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
+      await chatAPI.reorderCategories(next.map((item) => item.id));
       await loadChatPreferences();
     } catch (reorderError) {
       console.error("Error reordering categories:", reorderError);
@@ -1153,17 +1595,13 @@ const ChatPage = ({ embedded = false }) => {
       next.splice(targetIndex, 0, moved);
 
       try {
-        await axios.put(
-          `${import.meta.env.VITE_SERVER}/chats/preferences/categories/reorder`,
-          { orderedCategoryIds: next.map((item) => item.id) },
-          { headers: { Authorization: `Bearer ${userAuth.token}` } }
-        );
+        await chatAPI.reorderCategories(next.map((item) => item.id));
         await loadChatPreferences();
       } catch (reorderError) {
         console.error("Error drag-reordering categories:", reorderError);
       }
     },
-    [sortedCustomCategories, userAuth?.token, loadChatPreferences]
+    [sortedCustomCategories, loadChatPreferences]
   );
 
   const handleCategoryDragStart = (event, categoryId) => {
@@ -1193,21 +1631,35 @@ const ChatPage = ({ embedded = false }) => {
     setDragOverCategoryId(null);
   };
 
-  const removeCategory = async () => {
+  /*
+   * Deleting a list asks first (#120).
+   *
+   * It was the most destructive action on this screen and the only one with no
+   * confirmation whatsoever: one tap removed the list and every chat's assignment
+   * to it, with no undo. The count is in the message because that is the part
+   * people would want back.
+   */
+  const requestRemoveCategory = () => {
     if (!tabMenu?.category) return;
+    setCategoryToDelete(tabMenu.category);
+    setTabMenu(null);
+  };
+
+  const confirmRemoveCategory = async () => {
+    if (!categoryToDelete) return;
+    setDeletingCategory(true);
     try {
-      await axios.delete(
-        `${import.meta.env.VITE_SERVER}/chats/preferences/categories/${tabMenu.category.id}`,
-        { headers: { Authorization: `Bearer ${userAuth.token}` } }
-      );
+      await chatAPI.deleteCategory(categoryToDelete.id);
       await loadChatPreferences();
-      if (activeFilter === `category:${tabMenu.category.id}`) {
+      if (activeFilter === `category:${categoryToDelete.id}`) {
         setActiveFilter("all");
       }
+      setCategoryToDelete(null);
     } catch (deleteError) {
       console.error("Error deleting category:", deleteError);
+      toast.error(deleteError?.response?.data?.error || "Couldn't delete that list.");
     } finally {
-      setTabMenu(null);
+      setDeletingCategory(false);
     }
   };
 
@@ -1216,10 +1668,20 @@ const ChatPage = ({ embedded = false }) => {
   return (
     <div className={embedded ? "h-full flex flex-col bg-neutral-950 overflow-hidden" : "w-full bg-neutral-950 min-h-screen"}>
       {!embedded && <SiteHeader layoutContext={layoutContext} />}
-      <main className={embedded ? "flex-1 overflow-y-auto px-4 py-4 min-h-0" : "container max-w-[620px] px-4 sm:px-6 bg-neutral-950 mx-auto py-4"}>
+      <ReconnectBanner />
+      {/*
+        `pb-20 sm:pb-4` — the mobile navbar is `fixed bottom-0 h-16` and this
+        container had no bottom padding, so it sat on top of the last conversation
+        row: the bottom chat in the list could not be tapped at all. 20 (5rem) clears
+        the 4rem bar with a little room, and `sm:` drops it because the bar is
+        `sm:hidden`.
+      */}
+      <main className={embedded ? "flex-1 overflow-y-auto px-4 py-4 pb-20 sm:pb-4 min-h-0" : "container max-w-[620px] px-4 sm:px-6 bg-neutral-950 mx-auto py-4 pb-20 sm:pb-4"}>
         {/* Search Bar */}
         <div className="flex justify-center items-center relative">
           <input
+            ref={searchInputRef}
+            aria-label="Search chats and users"
             className="border border-neutral-800 rounded-xl outline-0 flex items-center justify-center w-full mx-auto py-3 sm:py-5 px-12 mt-4 bg-neutral-950 text-white placeholder-neutral-500"
             placeholder="Search users to chat"
             value={searchQuery}
@@ -1240,13 +1702,36 @@ const ChatPage = ({ embedded = false }) => {
             <button
               ref={filterButtonRef}
               type="button"
-              className="h-9 px-3 rounded-xl bg-neutral-900 border border-neutral-800 flex items-center justify-center cursor-pointer"
-              title="Filters"
+              /*
+               * The trigger says whether anything is filtered (#116).
+               *
+               * It looked identical whether four filters were on or none were, so a
+               * filter left on from an earlier session showed an empty list with the
+               * generic "Start a conversation" copy and no clue why. The border and
+               * the count are the smallest honest signal.
+               */
+              className={`h-9 px-3 rounded-xl flex items-center justify-center cursor-pointer border ${
+                activeAdvancedFilterCount > 0
+                  ? "bg-neutral-800 border-neutral-500 text-white"
+                  : "bg-neutral-900 border-neutral-800"
+              }`}
+              aria-label={
+                activeAdvancedFilterCount > 0
+                  ? `Filters, ${activeAdvancedFilterCount} active`
+                  : "Filters"
+              }
+              aria-expanded={isFilterDropdownOpen}
               onClick={toggleFilterDropdown}
             >
               <div className="flex items-center gap-0.5">
                 <Icons.filter className="w-4 h-4" />
-                <Icons.chevronbottom className="w-3 h-3" />
+                {activeAdvancedFilterCount > 0 ? (
+                  <span className="text-[11px] font-semibold leading-none">
+                    {activeAdvancedFilterCount}
+                  </span>
+                ) : (
+                  <Icons.chevronbottom className="w-3 h-3" />
+                )}
               </div>
             </button>
           </div>
@@ -1344,52 +1829,88 @@ const ChatPage = ({ embedded = false }) => {
         </ResponsiveMenu>
 
         {showSearchResults ? (
-          <div className="bg-neutral-950 border border-neutral-800 rounded-lg mt-2 overflow-hidden">
-            <div className="p-4 border-b border-neutral-800 flex items-center">
-              <Icons.search className="w-5 h-5 mr-2 " strokeColor="#404040" />
-              <p className="font-medium mr-1 text-white">
-                Search for "{searchQuery}"
-              </p>
-            </div>
-            {filteredUsers.length > 0 ? (
-              filteredUsers
-                .slice(0, 5)
-                .map((user) => (
-                  <UserCard
-                    key={user._id}
-                    user={user}
-                    onClick={() => handleUserSelect(user)}
-                  />
-                ))
-            ) : (
-              <div className="p-4 text-center text-neutral-400">
-                No users found matching "{searchQuery}"
+          <>
+            {/*
+              Your own chats first.
+
+              Typing used to replace the entire list with *user* results, so
+              there was no way to search the conversations you already have —
+              the one thing a search box above a chat list is for. Finding an
+              existing thread meant scrolling to it.
+            */}
+            {matchingChats.length > 0 && (
+              <div className="mt-4 space-y-0">
+                <p className="px-1 pb-1 text-xs font-medium uppercase tracking-wide text-neutral-500">
+                  Your chats
+                </p>
+                {/* role="list" because the rows are role="listitem" — a listitem with
+                    no list ancestor is ignored by screen readers. */}
+                <div role="list" aria-label="Matching chats">
+                {matchingChats.map((item) =>
+                  item.type === "chat"
+                    ? renderChatResultCard(item.data, item)
+                    : renderGroupCard(item.data, item)
+                )}
+                </div>
               </div>
             )}
-          </div>
+
+            <div className="bg-neutral-950 border border-neutral-800 rounded-lg mt-2 overflow-hidden">
+              <div className="p-4 border-b border-neutral-800 flex items-center">
+                <Icons.search className="w-5 h-5 mr-2 " strokeColor="#404040" />
+                <p className="font-medium mr-1 text-white">
+                  {matchingChats.length > 0
+                    ? "Other people"
+                    : `Search for "${searchQuery}"`}
+                </p>
+              </div>
+              {filteredUsers.length > 0 ? (
+                filteredUsers
+                  .slice(0, 5)
+                  .map((user) => (
+                    renderUserCard(user, () => handleUserSelect(user))
+                  ))
+              ) : (
+                <div className="p-4 text-center text-neutral-400">
+                  No users found matching "{searchQuery}"
+                </div>
+              )}
+            </div>
+          </>
         ) : searchQuery === "" ? (
           <>
             {filteredItems.length > 0 ? (
-              <div className="mt-4 space-y-0">
+              <div className="mt-4 space-y-0" role="list" aria-label="Conversations">
                 {filteredItems.map((item) =>
                   item.type === "chat" ? (
-                    <ChatResultCard
-                      key={item.key}
-                      chat={item.data}
-                      item={item}
-                    />
+                    renderChatResultCard(item.data, item)
                   ) : (
-                    <GroupCard
-                      key={item.key}
-                      conversation={item.data}
-                      item={item}
-                    />
+                    renderGroupCard(item.data, item)
                   )
                 )}
               </div>
-            ) : !chatLoading ? (
-              <EmptyState />
+            ) : !chatLoading && !listPageInfo.hasNextPage ? (
+              /*
+               * The empty state waits for the pages to run out.
+               *
+               * A page can be empty while later pages have matches: the Requests tab and
+               * the search box filter the fetched page rather than the query, and the
+               * Unread view's server-side predicate over-matches by a case the counts
+               * then reject. Showing "no conversations" over a list that is still paging
+               * is a lie the sentinel would silently correct a moment later.
+               */
+              renderEmptyState()
             ) : null}
+
+            {/* Fetches the next page as it scrolls into view. */}
+            {listPageInfo.hasNextPage && <div ref={listSentinelRef} aria-hidden="true" className="h-1" />}
+
+            {chatLoadingMore && (
+              <div className="py-6 text-center text-neutral-500" role="status">
+                <Icons.spinner className="animate-spin mx-auto w-6 h-6" />
+                <span className="sr-only">Loading more conversations</span>
+              </div>
+            )}
           </>
         ) : null}
 
@@ -1449,68 +1970,6 @@ const ChatPage = ({ embedded = false }) => {
           </div>
         </ResponsiveSheet>
       )}
-      {isAssignCategoryModalOpen && (
-        <ResponsiveSheet
-          title="Move to list"
-          onClose={() => {
-            setIsAssignCategoryModalOpen(false);
-            setSelectedItemForCategory(null);
-            setSelectedCategoryId("");
-          }}
-        >
-          <div className="p-5">
-
-        <div className="space-y-2 max-h-56 overflow-y-auto">
-          <button
-            type="button"
-            onClick={() => setSelectedCategoryId("")}
-            className={`w-full rounded-xl border px-4 py-2 text-left ${
-              selectedCategoryId === ""
-                ? "bg-white text-black border-white"
-                : "bg-neutral-900 text-white border-neutral-800"
-            }`}
-          >
-            None (remove category)
-          </button>
-          {sortedCustomCategories.map((category) => (
-            <button
-              key={category.id}
-              type="button"
-              onClick={() => setSelectedCategoryId(category.id)}
-              className={`w-full rounded-xl border px-4 py-2 text-left ${
-                selectedCategoryId === category.id
-                  ? "bg-white text-black border-white"
-                  : "bg-neutral-900 text-white border-neutral-800"
-              }`}
-            >
-              {category.name}
-            </button>
-          ))}
-        </div>
-
-        <div className="flex items-center gap-2 mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              setIsAssignCategoryModalOpen(false);
-              setSelectedItemForCategory(null);
-              setSelectedCategoryId("");
-            }}
-            className="w-full rounded-xl border border-neutral-800 bg-neutral-900 text-white py-2.5 hover:bg-neutral-800"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={saveCategoryAssignment}
-            className="w-full rounded-xl bg-white text-black py-2.5 font-medium hover:bg-neutral-200"
-          >
-            Save
-          </button>
-        </div>
-          </div>
-        </ResponsiveSheet>
-      )}
       {/* Guarded outside the menu too: JSX children are evaluated eagerly, so
           the rows below would dereference a null tabMenu while it's closed. */}
       {tabMenu?.category && (
@@ -1550,7 +2009,7 @@ const ChatPage = ({ embedded = false }) => {
               <button
                 type="button"
                 className="w-[calc(100%-1rem)] mx-2 mb-2 mt-2 flex items-center gap-3 text-left p-3 rounded-xl text-[15px] text-red-400 hover:bg-neutral-800 cursor-pointer"
-                onClick={removeCategory}
+                onClick={requestRemoveCategory}
               >
                 <span className="inline-flex items-center gap-2 font-semibold">
                   <Icons.trash className="w-6 h-6 text-red-400" />
@@ -1640,11 +2099,7 @@ const ChatPage = ({ embedded = false }) => {
                   type="button"
                   className="w-full text-left p-2 rounded-lg hover:bg-neutral-800 text-sm text-white"
                   onClick={async () => {
-                    await axios.put(
-                      `${import.meta.env.VITE_SERVER}/chats/preferences/assignments/${encodeURIComponent(chatMenu.item.id)}`,
-                      { categoryId: category.id },
-                      { headers: { Authorization: `Bearer ${userAuth.token}` } }
-                    );
+                    await chatAPI.assignCategory(chatMenu.item.id, category.id);
                     await loadChatPreferences();
                     setShowListSubmenu(false);
                     setChatMenu(null);
@@ -1671,11 +2126,7 @@ const ChatPage = ({ embedded = false }) => {
                   type="button"
                   className="w-full text-left p-2 rounded-lg hover:bg-neutral-800 text-sm text-neutral-300"
                   onClick={async () => {
-                    await axios.put(
-                      `${import.meta.env.VITE_SERVER}/chats/preferences/assignments/${encodeURIComponent(chatMenu.item.id)}`,
-                      { categoryId: null },
-                      { headers: { Authorization: `Bearer ${userAuth.token}` } }
-                    );
+                    await chatAPI.assignCategory(chatMenu.item.id, null);
                     await loadChatPreferences();
                     setShowListSubmenu(false);
                     setChatMenu(null);
@@ -1703,9 +2154,14 @@ const ChatPage = ({ embedded = false }) => {
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={async () => {
-              if (!lockedChats.length) {
-                await promptSetPinIfMissing();
+            onClick={() => {
+              // `hasLockPin` comes from the server. This used to test
+              // "are any chats locked", which is a different question — unlock
+              // everything and it concluded you had no PIN, then silently
+              // overwrote the one you had.
+              if (!hasLockPin) {
+                openPinSetup("set");
+                return;
               }
               handleLockToggle(chatMenu.item);
             }}
@@ -1726,104 +2182,173 @@ const ChatPage = ({ embedded = false }) => {
               onClick={() => handleBlockToggle(chatMenu.item)}
             >
               <span className="font-semibold text-[15px] text-white">
-                {chatMenu.item.data?.user?.isBlocked ? "Unblock user" : "Block user"}
+                {chatMenu.item.data?.isBlocked ? "Unblock user" : "Block user"}
               </span>
-              {chatMenu.item.data?.user?.isBlocked ? (
+              {chatMenu.item.data?.isBlocked ? (
                 <UserMinus className="w-5 h-5 text-white" />
               ) : (
                 <UserX className="w-5 h-5 text-white" />
               )}
             </button>
           )}
-          <button
-            type="button"
-            className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => runToggleAction(chatMenu.item, "hide")}
-          >
-            <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isHidden ? "Unhide" : "Hide"}
-            </span>
-            {chatMenu.item.isHidden ? (
-              <Eye className="w-5 h-5 text-white" />
-            ) : (
-              <EyeOff className="w-5 h-5 text-white" />
-            )}
-          </button>
-          <button
-            type="button"
-            className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => runToggleAction(chatMenu.item, "flag")}
-          >
-            <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isFlagged ? "Unflag" : "Flag"}
-            </span>
-            {chatMenu.item.isFlagged ? (
-              <FlagOff className="w-5 h-5 text-white" />
-            ) : (
-              <Flag className="w-5 h-5 text-white" />
-            )}
-          </button>
-          <div className="h-px bg-neutral-700 my-0" />
-          <button
-            type="button"
-            className="w-[calc(100%-1rem)] mx-2 mb-2 mt-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800 text-red-400"
-            onClick={() => handleDeleteItem(chatMenu.item)}
-          >
-            <span className="font-semibold text-[15px]">Delete</span>
-            <Trash2 className="w-5 h-5" />
-          </button>
+          {/*
+            * Hide and Flag used to sit here.
+            *
+            * Flag returned 400 on every call — the server had no `flag` state
+            * and never returned a flagged list — and there was no surface
+            * anywhere for looking at flagged chats, so it could not be finished
+            * into anything meaningful. Hide persisted but nothing filtered on
+            * it, and there was no "hidden" view, so a working version would
+            * have made a chat vanish with no way to get it back. Archive
+            * already does that job properly and now has a tab.
+            *
+            * Delete is gone for groups: it showed "Delete this chat?" and
+            * quietly called hide. Leaving a group needs an endpoint that
+            * doesn't exist yet.
+            */}
+          {chatMenu.item.type === "chat" && (
+            <>
+              <div className="h-px bg-neutral-700 my-0" />
+              <button
+                type="button"
+                className="w-[calc(100%-1rem)] mx-2 mb-2 mt-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800 text-red-400"
+                onClick={() => handleDeleteItem(chatMenu.item)}
+              >
+                <span className="font-semibold text-[15px]">Delete</span>
+                <Trash2 className="w-5 h-5" />
+              </button>
+            </>
+          )}
         </div>
       </ResponsiveMenu>
       )}
       {isPinModalOpen && (
-        <ResponsiveSheet
-          title="Chat lock"
-          onClose={() => {
-            setIsPinModalOpen(false);
-            setPendingLockItem(null);
-            setLockPinInput("");
-            setPinAction("toggle");
-          }}
-        >
+        <ResponsiveSheet title="Chat lock" onClose={closePinModal}>
           <div className="p-5">
-        <h3 className="text-lg font-semibold mb-3">
-          {pinAction === "open"
-            ? "Enter PIN to open chat"
-            : pendingLockItem?.isLocked
-              ? "Unlock chat"
-              : "Lock chat"}
-        </h3>
-        <p className="text-sm text-neutral-400 mb-3">Enter your PIN to continue.</p>
-        <input
-          type="password"
-          value={lockPinInput}
-          onChange={(e) => setLockPinInput(e.target.value)}
-          placeholder="Enter PIN"
-          className="w-full rounded-xl bg-neutral-900 border border-neutral-800 px-4 py-3 outline-none text-white placeholder-neutral-500"
-        />
-        <div className="flex items-center gap-2 mt-4">
-          <button
-            type="button"
-            onClick={() => {
-              setIsPinModalOpen(false);
-              setPendingLockItem(null);
-              setLockPinInput("");
-            }}
-            className="w-full rounded-xl border border-neutral-800 bg-neutral-900 text-white py-2.5 hover:bg-neutral-800"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={submitLockPinAction}
-            className="w-full rounded-xl bg-white text-black py-2.5 font-medium hover:bg-neutral-200"
-          >
-            Confirm
-          </button>
-        </div>
+            <h3 className="text-lg font-semibold mb-3">
+              {
+                {
+                  open: "Enter PIN to open chat",
+                  set: "Set a chat lock PIN",
+                  change: "Change your PIN",
+                  reset: "Reset your PIN",
+                }[pinAction] ??
+                (pendingLockItem?.isLocked ? "Unlock chat" : "Lock chat")
+              }
+            </h3>
+
+            <p className="text-sm text-neutral-400 mb-3">
+              {pinAction === "reset"
+                ? "Confirm your account password. This removes the PIN and unlocks every locked chat."
+                : pinAction === "set"
+                  ? "4-8 digits. You'll need it to open a locked chat."
+                  : "Enter your PIN to continue."}
+            </p>
+
+            {/* Changing needs the old PIN; resetting needs the password. */}
+            {(pinAction === "change" || pinAction === "reset") && (
+              <input
+                type="password"
+                value={lockPinCurrent}
+                onChange={(e) => setLockPinCurrent(e.target.value)}
+                placeholder={pinAction === "reset" ? "Account password" : "Current PIN"}
+                autoComplete={pinAction === "reset" ? "current-password" : "off"}
+                className="w-full rounded-xl bg-neutral-900 border border-neutral-800 px-4 py-3 mb-2 outline-none text-white placeholder-neutral-500"
+              />
+            )}
+
+            {pinAction !== "reset" && (
+              <input
+                type="password"
+                inputMode="numeric"
+                value={lockPinInput}
+                onChange={(e) => setLockPinInput(e.target.value)}
+                placeholder={pinAction === "change" ? "New PIN" : "Enter PIN"}
+                className="w-full rounded-xl bg-neutral-900 border border-neutral-800 px-4 py-3 outline-none text-white placeholder-neutral-500"
+              />
+            )}
+
+            <div className="flex items-center gap-2 mt-4">
+              <button
+                type="button"
+                onClick={closePinModal}
+                className="w-full rounded-xl border border-neutral-800 bg-neutral-900 text-white py-2.5 hover:bg-neutral-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={
+                  pinAction === "set" || pinAction === "change" || pinAction === "reset"
+                    ? submitPinSetup
+                    : submitLockPinAction
+                }
+                className="w-full rounded-xl bg-white text-black py-2.5 font-medium hover:bg-neutral-200"
+              >
+                {pinAction === "reset" ? "Remove PIN" : "Confirm"}
+              </button>
+            </div>
+
+            {/*
+              The two escape hatches, offered where they're needed. Without the
+              first there was no way to change a PIN at all — `setChatLockPin`
+              accepts a `currentPin` and nothing in the UI ever sent one.
+            */}
+            {(pinAction === "open" || pinAction === "toggle") && (
+              <div className="mt-3 flex flex-col gap-1">
+                <button
+                  type="button"
+                  onClick={() => openPinSetup("change")}
+                  className="w-full text-sm text-neutral-400 hover:text-white"
+                >
+                  Change your PIN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => openPinSetup("reset")}
+                  className="w-full text-sm text-neutral-400 hover:text-white"
+                >
+                  Forgot your PIN?
+                </button>
+              </div>
+            )}
           </div>
         </ResponsiveSheet>
       )}
+      {deleteTarget && (
+        <ConfirmDialog
+          title={`Delete your chat with ${
+            deleteTarget.data?.user?.name || deleteTarget.data?.user?.username
+          }?`}
+          confirmLabel="Delete"
+          busy={deletingChat}
+          onConfirm={confirmDeleteItem}
+          onCancel={() => setDeleteTarget(null)}
+        >
+          The conversation is removed from your list only — they keep their copy.
+          Your pin, mute, list and disappearing-message settings for it are cleared.
+        </ConfirmDialog>
+      )}
+
+      {categoryToDelete && (
+        <ConfirmDialog
+          title={`Delete the "${categoryToDelete.name}" list?`}
+          confirmLabel="Delete"
+          busy={deletingCategory}
+          onConfirm={confirmRemoveCategory}
+          onCancel={() => setCategoryToDelete(null)}
+        >
+          {(() => {
+            const assigned = Object.values(categoryAssignments).filter(
+              (id) => id === categoryToDelete.id
+            ).length;
+            return assigned
+              ? `${assigned} chat${assigned === 1 ? "" : "s"} will go back to All. The chats themselves aren't deleted.`
+              : "The chats themselves aren't deleted.";
+          })()}
+        </ConfirmDialog>
+      )}
+
       {!embedded && <MobileNavbar layoutContext={layoutContext} />}
     </div>
   );

@@ -825,9 +825,6 @@ const CreatePost = ({
                   onPickImage={handleImageButtonClick}
                   mediaCount={mediaFiles.length}
                 />
-                <button className="text-neutral-500">
-                  <Icons.hashtag className="h-5 w-5" />
-                </button>
                 {content.length > 0 && (
                   <span className="text-sm text-neutral-500 ml-auto">
                     {content.length}/500

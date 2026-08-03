@@ -36,9 +36,41 @@
   scrollbar-color: #555 transparent; 
 }
 
+/*
+ * Full height that tracks the *dynamic* viewport — see pages/ChatLayout.jsx.
+ *
+ * `100vh` is the large viewport height on mobile and does not shrink when the
+ * on-screen keyboard opens, which pushed the chat composer below the visible area.
+ * Both declarations in one rule so the browser picks: `dvh` wins where it's
+ * understood, and where it isn't the line is discarded and `100vh` stands.
+ */
+.h-dynamic-screen {
+  height: 100vh;
+  height: 100dvh;
+}
+
+/*
+ * Elements that respond to a long press — see hooks/useLongPress.js.
+ *
+ * The callout suppression is iOS-only anyway, so it's unconditional. Selection
+ * suppression is behind `hover: none` because it must not apply on desktop: as an
+ * inline style it made every message bubble's text unselectable with a mouse, so
+ * drag-selecting part of a message became impossible.
+ */
+.long-press-target {
+  -webkit-touch-callout: none;
+}
+
+@media (hover: none) {
+  .long-press-target {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
 .no-scroll {
   overflow: hidden;
-  touch-action: none; 
+  touch-action: none;
 }
 
 @utility input-box {

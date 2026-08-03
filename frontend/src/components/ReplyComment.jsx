@@ -243,9 +243,6 @@ const ReplyComment = ({ isOpen, onClose, commentId, parentId = null }) => {
                   onPickImage={handleImageButtonClick}
                   mediaCount={mediaFiles.length}
                 />
-                <button className="text-gray-500">
-                  <Icons.hashtag className="h-5 w-5" />
-                </button>
                 {content.length > 0 && (
                   <span className="text-sm text-gray-500 ml-auto">
                     {content.length}/500

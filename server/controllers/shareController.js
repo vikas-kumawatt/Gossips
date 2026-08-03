@@ -8,45 +8,26 @@ import Group from "../models/Group.js";
 import GroupMember from "../models/GroupMember.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
-import UserSettings from "../models/UserSettings.js";
 import { escapeRegex } from "../utils/respond.js";
 import { getIO, getUserSocket } from "../config/socket.js";
 import { loadVisibleContent } from "../utils/contentVisibility.js";
 import { attachSharedContent, stripSharedSnapshot } from "../utils/resolveSharedContent.js";
+import { seedConversationRead } from "../utils/readState.js";
+import { recomputeGroupCounts } from "../utils/groupCounts.js";
+import {
+  ACTIVE_ACCOUNT,
+  MAX_RECIPIENTS,
+  blockedIdSet,
+  cleanIds,
+  messageableIdSet,
+  resolveGroupSend,
+} from "../utils/chatAccess.js";
 
 const USER_CARD = "_id username name profilePic isVerified isPrivate";
-
-// Matches the rest of the app (userController's ACTIVE_ACCOUNT_FILTER). An
-// equality check on "active" would silently drop every account created before
-// `accountStatus` existed, since $nin also matches a missing field.
-const ACTIVE_ACCOUNT = {
-  accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] },
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Permission helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-/** Ids the caller has blocked, or who have blocked the caller. Both directions. */
-const blockedIdSet = async (userId, otherIds) => {
-  if (!otherIds.length) return new Set();
-  const rows = await UserRelation.find({
-    kind: "block",
-    $or: [
-      { from: userId, to: { $in: otherIds } },
-      { from: { $in: otherIds }, to: userId },
-    ],
-  })
-    .select("from to")
-    .lean();
-
-  const blocked = new Set();
-  for (const row of rows) {
-    const from = row.from.toString();
-    blocked.add(from === userId.toString() ? row.to.toString() : from);
-  }
-  return blocked;
-};
 
 /** Accounts the caller has hidden from their message-suggestion lists. */
 const hiddenSuggestionIds = async (userId) => {
@@ -54,73 +35,6 @@ const hiddenSuggestionIds = async (userId) => {
     .select("to")
     .lean();
   return new Set(rows.map((r) => r.to.toString()));
-};
-
-/**
- * Which of `recipientIds` will accept a DM from `senderId`, honouring
- * `privacy.whoCanMessage`. Batched — the socket handler does this one user at
- * a time, which is fine for a single send but not for a share to twenty.
- */
-const messageableIdSet = async (senderId, recipientIds) => {
-  if (!recipientIds.length) return new Set();
-
-  const settings = await UserSettings.find({ user: { $in: recipientIds } })
-    .select("user privacy.whoCanMessage")
-    .lean();
-
-  const policyByUser = new Map(
-    settings.map((s) => [s.user.toString(), s.privacy?.whoCanMessage || "everyone"])
-  );
-
-  // Only resolve follow edges if some recipient actually restricts messaging.
-  const restricted = recipientIds.filter((id) => {
-    const policy = policyByUser.get(id.toString()) || "everyone";
-    return policy === "followers" || policy === "followers_following";
-  });
-
-  let recipientFollowsSender = new Set();
-  let senderFollowsRecipient = new Set();
-
-  if (restricted.length) {
-    const [inbound, outbound] = await Promise.all([
-      Follow.find({
-        follower: { $in: restricted },
-        following: senderId,
-        status: "accepted",
-      })
-        .select("follower")
-        .lean(),
-      Follow.find({
-        follower: senderId,
-        following: { $in: restricted },
-        status: "accepted",
-      })
-        .select("following")
-        .lean(),
-    ]);
-    recipientFollowsSender = new Set(inbound.map((f) => f.follower.toString()));
-    senderFollowsRecipient = new Set(outbound.map((f) => f.following.toString()));
-  }
-
-  const allowed = new Set();
-  for (const id of recipientIds) {
-    const key = id.toString();
-    switch (policyByUser.get(key) || "everyone") {
-      case "none":
-        break;
-      case "followers":
-        if (recipientFollowsSender.has(key)) allowed.add(key);
-        break;
-      case "followers_following":
-        if (recipientFollowsSender.has(key) || senderFollowsRecipient.has(key)) {
-          allowed.add(key);
-        }
-        break;
-      default:
-        allowed.add(key);
-    }
-  }
-  return allowed;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -361,8 +275,6 @@ const loadProfileShareTarget = async (viewerId, targetId) => {
   };
 };
 
-const MAX_RECIPIENTS = 25;
-
 export const shareContent = async (req, res) => {
   try {
     const userId = req.user._id;
@@ -379,17 +291,9 @@ export const shareContent = async (req, res) => {
     const target = await loadShareTarget(userId, targetType, targetId);
     if (target.error) return res.status(404).json({ error: target.error });
 
-    const cleanIds = (ids) =>
-      (Array.isArray(ids) ? ids : [])
-        .filter((id) => mongoose.isValidObjectId(id))
-        .map((id) => id.toString())
-        .filter((id) => id !== userId.toString());
-
-    const recipients = [...new Set(cleanIds(recipientIds))];
-    const groups = [...new Set((Array.isArray(groupIds) ? groupIds : []).filter((id) =>
-      mongoose.isValidObjectId(id)
-    ))];
-    const newGroupMembers = [...new Set(cleanIds(newGroupMemberIds))];
+    const recipients = cleanIds(recipientIds, { exclude: userId });
+    const groups = cleanIds(groupIds);
+    const newGroupMembers = cleanIds(newGroupMemberIds, { exclude: userId });
 
     if (!recipients.length && !groups.length && !newGroupMembers.length) {
       return res.status(400).json({ error: "Pick someone to send this to" });
@@ -449,6 +353,10 @@ export const shareContent = async (req, res) => {
         createdBy: userId,
       });
 
+      await seedConversationRead(
+        [userId, ...usable.map((m) => m._id)],
+        Message.groupConversationKey(group._id)
+      );
       await GroupMember.insertMany([
         { group: group._id, user: userId, role: "super_admin", addedBy: userId },
         ...usable.map((m) => ({
@@ -458,10 +366,15 @@ export const shareContent = async (req, res) => {
           addedBy: userId,
         })),
       ]);
-      await Group.updateOne(
-        { _id: group._id },
-        { $set: { "counts.members": usable.length + 1 } }
-      );
+      /*
+       * Derived, and `counts.admins` along with it.
+       *
+       * This path `$set` members from an array length and never touched
+       * `counts.admins` at all — so a group created by sharing a post reported
+       * zero admins forever, while the same group created from the Groups tab
+       * reported one. See utils/groupCounts.js.
+       */
+      await recomputeGroupCounts(group._id);
 
       createdGroup = { _id: group._id, name: group.name, avatar: group.avatar };
       groups.push(group._id.toString());
@@ -565,22 +478,12 @@ export const shareContent = async (req, res) => {
 
     // ── Groups ──────────────────────────────────────────────────────────────
     for (const groupId of groups) {
-      const [membership, groupDoc] = await Promise.all([
-        GroupMember.findOne({ group: groupId, user: userId, isBanned: { $ne: true } }),
-        Group.findById(groupId).select("isActive isDeleted").lean(),
-      ]);
-
-      if (!membership) {
-        results.failed.push({ id: groupId, reason: "You're not in that group" });
-        continue;
-      }
-      if (!groupDoc || groupDoc.isDeleted || groupDoc.isActive === false) {
-        results.failed.push({ id: groupId, reason: "That group is no longer active" });
-        continue;
-      }
-      // Same permission the socket group-send path enforces.
-      if (!membership.getPermissions().sendMessages) {
-        results.failed.push({ id: groupId, reason: "You can't post in that group" });
+      // The same gate the socket send path uses — membership, group liveness,
+      // role permissions, mute and slow mode. This used to check the first
+      // three only, so sharing was a way around a mute.
+      const access = await resolveGroupSend(groupId, userId);
+      if (!access.ok) {
+        results.failed.push({ id: groupId, reason: access.reason });
         continue;
       }
 
@@ -603,7 +506,6 @@ export const shareContent = async (req, res) => {
       // Strip it to a marker; each client gets the real card, evaluated
       // against them, on its next thread fetch.
       io.to(groupId.toString()).emit("receiveGroupMessage", stripSharedSnapshot(populated));
-      await Group.updateOne({ _id: groupId }, { $inc: { "counts.messagesTotal": 1 } });
 
       results.sent.push({ id: groupId, isGroup: true });
     }

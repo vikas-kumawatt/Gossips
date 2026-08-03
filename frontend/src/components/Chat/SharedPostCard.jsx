@@ -100,15 +100,27 @@ const SharedPostCard = ({ sharedContent }) => {
     <div
       role="button"
       tabIndex={0}
+      /*
+       * Named, so a screen reader announces what the card is rather than reading
+       * out the author, the caption and the media alt text as one run of text with
+       * no indication it's a single activatable thing.
+       */
+      aria-label={`Shared post by ${view.authorUsername || "someone"}`}
       onClick={open}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") open(e);
+        if (e.key === "Enter" || e.key === " ") {
+          // Space scrolls the message list by default, so activating the card with
+          // it also jumped the thread. Enter needs no preventDefault, but calling
+          // it for both keeps the two paths identical.
+          e.preventDefault();
+          open(e);
+        }
       }}
       className="w-full max-w-[240px] text-left rounded-2xl border border-neutral-700 bg-neutral-900/60 overflow-hidden hover:border-neutral-600 transition-colors cursor-pointer"
     >
       <div className="flex items-center gap-2 px-3 pt-2.5 pb-2">
         <img
-          src={view.author?.profilePic || view.authorPic || "https://via.placeholder.com/32"}
+          src={view.author?.profilePic || view.authorPic || "/default-avatar.png"}
           alt=""
           className="w-6 h-6 rounded-full object-cover bg-neutral-800 shrink-0"
         />

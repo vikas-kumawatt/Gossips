@@ -11,8 +11,21 @@ const firebaseConfig = {
     appId: import.meta.env.VITE_FIREBASE_APP_ID
   };
 
-// eslint-disable-next-line no-unused-vars
-const app = initializeApp(firebaseConfig);
+export const firebaseApp = initializeApp(firebaseConfig);
+
+/**
+ * Whether the project is actually configured.
+ *
+ * Google sign-in has always assumed it is, and the whole config comes from
+ * `VITE_FIREBASE_*` — so on a deployment without them, `initializeApp` succeeds with
+ * undefined values and every call fails later with an opaque error. Push registration
+ * checks this instead of trying and logging a failure on every login.
+ *
+ * `messagingSenderId` and `appId` are the two Cloud Messaging needs.
+ */
+export const isFirebaseConfigured = Boolean(
+  firebaseConfig.messagingSenderId && firebaseConfig.appId && firebaseConfig.projectId
+);
 
 // google auth
 

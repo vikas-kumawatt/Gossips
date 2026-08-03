@@ -99,14 +99,24 @@ export const useLongPress = (onLongPress, { delay = 450, moveTolerance = 10 } = 
       onContextMenu: (event) => {
         if (timer.current || fired.current) event.preventDefault();
       },
-      style: {
-        // Kills the iOS callout and the blue selection flash on hold.
-        WebkitTouchCallout: "none",
-        WebkitUserSelect: "none",
-        userSelect: "none",
-        touchAction: "manipulation",
-      },
+      /*
+       * `touchAction` only. Selection suppression moved to CSS.
+       *
+       * These were inline styles including `userSelect: "none"`, which applied on
+       * desktop too — where this gesture is disabled anyway (see `start`). So
+       * spreading these handlers onto a message bubble made its text permanently
+       * unselectable with a mouse: you could no longer drag-select part of a message,
+       * and only whole-message "Copy" from the menu survived.
+       *
+       * An inline style can't carry a media query, so the touch-only half lives in
+       * `.long-press-target` in index.css and call sites add that class. `touchAction`
+       * stays here because it's harmless everywhere: it suppresses double-tap-to-zoom,
+       * which nobody does to a chat row, and removes the 300ms tap delay with it.
+       */
+      style: { touchAction: "manipulation" },
     },
+    /** Add to the element's own className — see `.long-press-target`. */
+    className: "long-press-target",
     /** Call from onClick; returns true when the click was a long press. */
     consumeClick: handleClick,
   };

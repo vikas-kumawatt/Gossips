@@ -141,7 +141,7 @@ const AdminLayout = () => {
         </button>
         <div className="flex items-center gap-2.5 px-3 py-2.5 mt-1 min-w-0">
           <img
-            src={session.profilePic || "https://via.placeholder.com/40"}
+            src={session.profilePic || "/default-avatar.png"}
             alt=""
             className="w-7 h-7 rounded-full object-cover bg-neutral-800 shrink-0"
           />

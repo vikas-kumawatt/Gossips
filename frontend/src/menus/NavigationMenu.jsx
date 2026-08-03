@@ -18,6 +18,8 @@ import { authAPI } from "../services/api";
 import { getAccounts, removeAccount } from "../lib/accounts";
 import { clearCachedRequestsByPrefix } from "../utils/requestCache";
 import { deleteFeedCacheForUser } from "../utils/feedCache";
+import { clearAllUnlockGrants } from "../services/chatUnlock";
+import { disablePushNotifications } from "../services/pushNotifications";
 
 export default function NavigationMenu() {
   const { userAuth, setUserAuth } = useContext(UserContext);
@@ -41,6 +43,17 @@ export default function NavigationMenu() {
   const handleLogOut = async () => {
     const accountId = userAuth?.id || userAuth?._id || null;
 
+    /*
+     * Before the session is revoked, not after.
+     *
+     * Clearing the token needs an authenticated request, and `authAPI.logout` is what
+     * takes that away. Without this the token stays registered against the revoked
+     * session, so the next person to use this browser would receive the previous
+     * account's message notifications — on a shared computer that is the whole of the
+     * privacy problem. Best effort: a failure here must not block the sign-out.
+     */
+    await disablePushNotifications().catch(() => {});
+
     try {
       await authAPI.logout(accountId);
     } catch {
@@ -63,6 +76,12 @@ export default function NavigationMenu() {
         deleteFeedCacheForUser(accountId),
       ]);
     }
+    /*
+     * Chat-lock grants too. They're held in sessionStorage and are not keyed by
+     * account, so an unlock proved by one account would otherwise still be sitting
+     * there for the next one to sign in on the same tab.
+     */
+    clearAllUnlockGrants();
     removeFromSession("user");
     setUserAuth({ token: null, savedPosts: [] });
 

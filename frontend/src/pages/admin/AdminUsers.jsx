@@ -238,7 +238,7 @@ const UserDetailSheet = ({ detail, session, onClose, onActed }) => {
         <div className="p-4 flex flex-col gap-5">
           <div className="flex items-center gap-3">
             <img
-              src={user.profilePic || "https://via.placeholder.com/64"}
+              src={user.profilePic || "/default-avatar.png"}
               alt=""
               className="w-14 h-14 rounded-full object-cover bg-neutral-800"
             />

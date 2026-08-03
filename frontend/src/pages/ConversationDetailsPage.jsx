@@ -2,8 +2,10 @@ import React, { useCallback, useContext, useEffect, useMemo, useState } from "re
 import { useNavigate, useParams } from "react-router-dom";
 import { UserContext } from "../contexts/UserContext";
 import { useBlock } from "../contexts/BlockContext";
+import { useChat } from "../contexts/ChatContext";
 import { useReport } from "../contexts/ReportContext";
 import { Icons } from "../components/icons";
+import MediaModal from "../components/MediaModal";
 import { chatAPI, userAPI } from "../services/api";
 import {
   DropdownMenu,
@@ -26,6 +28,10 @@ const THEME_OPTIONS = [
   { label: "Dark", value: "dark" },
 ];
 
+// Messages per media request, not items — the server pages messages, and one
+// message can carry several attachments.
+const MEDIA_PAGE_SIZE = 40;
+
 function formatDisappearingLabel(seconds) {
   if (seconds == null) return "Off";
   const preset = DISAPPEAR_PRESETS.find((p) => p.seconds === seconds);
@@ -38,6 +44,10 @@ const ConversationDetailsPage = () => {
   const { username } = useParams();
   const navigate = useNavigate();
   const { userAuth } = useContext(UserContext);
+  const {
+    preferences,
+    actions: { loadPreferences, applyPreferences, setChatState },
+  } = useChat();
 
   const [peer, setPeer] = useState(null);
   // Tracked but not surfaced anywhere yet; only the setter is used.
@@ -45,9 +55,13 @@ const ConversationDetailsPage = () => {
   const { isBlocked: isUserBlocked, requestBlock, unblock: unblockUser } = useBlock();
   const { openReport } = useReport();
   const youBlocked = isUserBlocked(username);
+  const [youRestricted, setYouRestricted] = useState(false);
   const [loadingUser, setLoadingUser] = useState(true);
   const [media, setMedia] = useState([]);
   const [loadingMedia, setLoadingMedia] = useState(true);
+  const [mediaCursor, setMediaCursor] = useState(null);
+  const [loadingMoreMedia, setLoadingMoreMedia] = useState(false);
+  const [selectedImage, setSelectedImage] = useState(null);
   const [toast, setToast] = useState(null);
   const [prefsLoaded, setPrefsLoaded] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
@@ -71,9 +85,13 @@ const ConversationDetailsPage = () => {
       if (!username || !userAuth?.token) return;
       setLoadingUser(true);
       setBlockedByThem(false);
+      setYouRestricted(false);
       try {
         const data = await userAPI.getProfile(username);
-        if (!cancelled) setPeer(data);
+        if (!cancelled) {
+          setPeer(data);
+          setYouRestricted(Boolean(data?.relationship?.youRestricted));
+        }
       } catch (e) {
         // They blocked us → profile 404s. Show an anonymized "Gossips User".
         if (e?.response?.status === 404) {
@@ -95,38 +113,43 @@ const ConversationDetailsPage = () => {
     };
   }, [username, userAuth?.token, showToast]);
 
+  /*
+   * Read from the provider, which owns preferences (#96).
+   *
+   * This page used to fetch its own copy — behind a 60-second cache — so muting from
+   * here changed this page's state and nothing else, and coming back inside the cache
+   * window re-read the stale value. Derived from one store means the list, the thread
+   * and this page cannot disagree.
+   */
   useEffect(() => {
-    if (!peer?._id || !userAuth?.token) {
+    if (!userAuth?.token) return;
+    // Cached is fine on mount: this is a read, and any change made from here goes
+    // through the provider's own mutations, which update the store directly.
+    loadPreferences({ bypassCache: false });
+  }, [userAuth?.token, loadPreferences]);
+
+  useEffect(() => {
+    if (!peer?._id || !preferences.loaded) {
       setPrefsLoaded(false);
       return;
     }
-    let cancelled = false;
-    (async () => {
-      try {
-        const prefs = await chatAPI.getPreferences();
-        if (cancelled) return;
-        const key = `user_${peer._id}`;
-        setIsMuted((prefs.mutedChats || []).includes(key));
-        setTheme(prefs.theme || "system");
-        const row = (prefs.disappearingByChat || []).find((x) => x.chatId === key);
-        setDisappearingSeconds(row?.seconds ?? null);
-      } catch (e) {
-        console.error(e);
-        showToast("Could not load chat settings");
-      } finally {
-        if (!cancelled) setPrefsLoaded(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [peer?._id, userAuth?.token, showToast]);
+    const key = `user_${peer._id}`;
+    setIsMuted((preferences.mutedChats || []).includes(key));
+    // The account default until this conversation has been given one of its own;
+    // older accounts have no overrides at all.
+    setTheme(preferences.themeByChat?.[key] || preferences.theme || "system");
+    const row = (preferences.disappearingByChat || []).find((x) => x.chatId === key);
+    setDisappearingSeconds(row?.seconds ?? null);
+    setPrefsLoaded(true);
+  }, [peer?._id, preferences]);
 
   const handleToggleMute = async () => {
     if (!chatKey || actionLoading) return;
     setActionLoading("mute");
     try {
-      const res = await chatAPI.updateChatState(chatKey, "mute", !isMuted);
+      // Through the provider: this is the exact action whose invisibility to the chat
+      // list was #96's symptom.
+      const res = await setChatState(chatKey, "mute", !isMuted);
       setIsMuted(!!res.enabled);
       showToast(res.enabled ? "Notifications muted" : "Unmuted");
     } catch (e) {
@@ -138,11 +161,15 @@ const ConversationDetailsPage = () => {
   };
 
   const handleThemeSelect = async (value) => {
-    if (actionLoading) return;
+    if (!chatKey || actionLoading) return;
     setActionLoading("theme");
     try {
-      const res = await chatAPI.updateChatTheme(value);
+      const res = await chatAPI.updateChatTheme(value, chatKey);
       setTheme(res.theme);
+      applyPreferences({ themeByChat: res.themeByChat });
+      // The IndexedDB entry too, so a hard refresh inside the TTL doesn't repaint
+      // with the old theme.
+      await chatAPI.patchCachedPreferencesTheme({ themeByChat: res.themeByChat });
       showToast("Theme saved");
     } catch (e) {
       console.error(e);
@@ -156,8 +183,19 @@ const ConversationDetailsPage = () => {
     if (!chatKey || actionLoading) return;
     setActionLoading("disappear");
     try {
-      await chatAPI.setDisappearingTimer(chatKey, seconds);
+      const res = await chatAPI.setDisappearingTimer(chatKey, seconds);
       setDisappearingSeconds(seconds);
+      /*
+       * Into the store, like mute and theme.
+       *
+       * The response already carries the whole list and this threw it away, so the
+       * conversation page kept deriving its send-time TTL from the previous value —
+       * and its own `loadPreferences` hit the 60-second cache entry written before
+       * this change. Setting a timer here and going straight back sent messages with
+       * the old TTL for up to a minute, which is exactly the class of bug #96 was
+       * about.
+       */
+      applyPreferences({ disappearingByChat: res?.disappearingByChat });
       showToast(
         seconds == null ? "Disappearing messages off" : "Disappearing messages saved"
       );
@@ -175,11 +213,23 @@ const ConversationDetailsPage = () => {
       if (!username || !userAuth?.token) return;
       setLoadingMedia(true);
       try {
-        const res = await chatAPI.getConversationMedia(username, { limit: 120 });
-        if (!cancelled) setMedia(res.media || []);
+        // chatKey carries the unlock grant: the media grid is the conversation's
+        // attachments, so it's behind the same chat lock as the thread.
+        const res = await chatAPI.getConversationMedia(
+          username,
+          { limit: MEDIA_PAGE_SIZE },
+          chatKey
+        );
+        if (!cancelled) {
+          setMedia(res.media || []);
+          setMediaCursor(res.pageInfo?.nextCursor || null);
+        }
       } catch (e) {
         console.error(e);
-        if (!cancelled) setMedia([]);
+        if (!cancelled) {
+          setMedia([]);
+          setMediaCursor(null);
+        }
       } finally {
         if (!cancelled) setLoadingMedia(false);
       }
@@ -188,15 +238,47 @@ const ConversationDetailsPage = () => {
     return () => {
       cancelled = true;
     };
-  }, [username, userAuth?.token]);
+  }, [username, userAuth?.token, chatKey]);
 
-  const handleRestrict = async () => {
+  /*
+   * The cursor is the only thing that says whether more exists. Page sizes are
+   * ragged — the server pages messages and each one contributes however many
+   * attachments it has — so "we got fewer items than we asked for" means
+   * nothing here, and the previous fixed limit of 120 just cut the grid off.
+   */
+  const handleLoadMoreMedia = async () => {
+    if (!mediaCursor || loadingMoreMedia) return;
+    setLoadingMoreMedia(true);
     try {
-      await userAPI.restrict(username);
-      showToast("User restricted");
+      const res = await chatAPI.getConversationMedia(
+        username,
+        { limit: MEDIA_PAGE_SIZE, cursor: mediaCursor },
+        chatKey
+      );
+      setMedia((prev) => [...prev, ...(res.media || [])]);
+      setMediaCursor(res.pageInfo?.nextCursor || null);
     } catch (e) {
       console.error(e);
-      showToast("Could not update restrict");
+      showToast("Could not load more media");
+    } finally {
+      setLoadingMoreMedia(false);
+    }
+  };
+
+  const handleToggleRestrict = async () => {
+    if (actionLoading) return;
+    const next = !youRestricted;
+    setActionLoading("restrict");
+    setYouRestricted(next);
+    try {
+      await (next ? userAPI.restrict(username) : userAPI.unrestrict(username));
+      showToast(next ? "User restricted" : "Restriction removed");
+    } catch (e) {
+      console.error(e);
+      setYouRestricted(!next);
+      showToast(e?.response?.data?.message || "Could not update restrict");
+    } finally {
+      setActionLoading(null);
     }
   };
 
@@ -326,10 +408,10 @@ const ConversationDetailsPage = () => {
               className="bg-neutral-900 border-neutral-700 rounded-2xl w-56 p-2"
             >
               <DropdownMenuItem
-                onClick={handleRestrict}
+                onClick={handleToggleRestrict}
                 className="flex justify-between items-center p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
               >
-                <span>Restrict</span>
+                <span>{youRestricted ? "Restricted" : "Restrict"}</span>
                 <Icons.restrict className="w-5 h-5" />
               </DropdownMenuItem>
               <DropdownMenuItem
@@ -364,7 +446,7 @@ const ConversationDetailsPage = () => {
               <button
                 type="button"
                 className={`${settingRow} w-full disabled:opacity-40`}
-                disabled={!prefsLoaded || actionLoading === "theme"}
+                disabled={!prefsLoaded || !chatKey || actionLoading === "theme"}
               >
                 <span className="flex items-center gap-3 text-sm">
                   <Icons.dark className="w-5 h-5 text-neutral-400 shrink-0" />
@@ -495,40 +577,60 @@ const ConversationDetailsPage = () => {
               No photos or videos shared yet
             </p>
           ) : (
-            <div className="grid grid-cols-3 gap-1 sm:grid-cols-4 md:grid-cols-5">
-              {media.map((item, index) => {
-                const src =
-                  item.thumbnail ||
-                  (item.type === "video" ? item.thumbnail : item.url) ||
-                  item.url;
-                const isVideo =
-                  item.type === "video" || /\.(mp4|webm|mov)(\?|$)/i.test(item.url || "");
-                return (
-                  <a
-                    key={mediaKey(item, index)}
-                    href={item.url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="relative aspect-square overflow-hidden rounded-sm bg-neutral-900 block group"
+            <>
+              <div className="grid grid-cols-3 gap-1 sm:grid-cols-4 md:grid-cols-5">
+                {media.map((item, index) => {
+                  const src =
+                    item.thumbnail ||
+                    (item.type === "video" ? item.thumbnail : item.url) ||
+                    item.url;
+                  const isVideo =
+                    item.type === "video" || /\.(mp4|webm|mov)(\?|$)/i.test(item.url || "");
+                  return (
+                    <button
+                      key={mediaKey(item, index)}
+                      type="button"
+                      onClick={() => setSelectedImage(item.url)}
+                      className="relative aspect-square overflow-hidden rounded-sm bg-neutral-900 block group"
+                    >
+                      <img
+                        src={src}
+                        alt=""
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                      {isVideo && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/25 pointer-events-none">
+                          <Icons.video className="w-8 h-8 text-white/90 drop-shadow-md" />
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {mediaCursor && (
+                <div className="flex justify-center pt-4">
+                  <button
+                    type="button"
+                    onClick={handleLoadMoreMedia}
+                    disabled={loadingMoreMedia}
+                    className="px-4 py-2 rounded-full border border-neutral-700 text-sm text-neutral-300 hover:bg-neutral-900 transition-colors disabled:opacity-40"
                   >
-                    <img
-                      src={src}
-                      alt=""
-                      className="w-full h-full object-cover"
-                      loading="lazy"
-                    />
-                    {isVideo && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/25 pointer-events-none">
-                        <Icons.video className="w-8 h-8 text-white/90 drop-shadow-md" />
-                      </div>
-                    )}
-                  </a>
-                );
-              })}
-            </div>
+                    {loadingMoreMedia ? "Loading…" : "Load more"}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </section>
       </div>
+
+      {selectedImage && (
+        <MediaModal
+          selectedImage={selectedImage}
+          closeModal={() => setSelectedImage(null)}
+        />
+      )}
 
       {toast && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-neutral-800 border border-neutral-700 text-sm text-neutral-200 shadow-lg max-w-[90vw] text-center">

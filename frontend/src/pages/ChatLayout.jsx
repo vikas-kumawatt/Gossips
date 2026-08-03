@@ -9,10 +9,27 @@ import { Icons } from "../components/icons";
 import { UserContext } from "../contexts/UserContext";
 
 const ChatLayout = () => {
-  // Both hooks must run every render — do not use || between useMatch calls (short-circuit breaks Rules of Hooks).
+  /*
+   * Every hook must run every render — do not use || between useMatch calls,
+   * because short-circuiting skips one and breaks the Rules of Hooks.
+   *
+   * The two group patterns are separate entries rather than a looser
+   * `/chat/:a/:b`: groups moved under /chat so they'd inherit this layout, and
+   * with only the two-segment patterns here `hasActiveChat` stayed false for
+   * them — so the Outlet below never rendered and opening a group showed the
+   * "Select a conversation" placeholder instead of the group.
+   */
   const matchConversation = useMatch({ path: "/chat/:username", end: true });
   const matchDetails = useMatch({ path: "/chat/:username/details", end: true });
-  const hasActiveChat = !!(matchConversation || matchDetails);
+  const matchGroup = useMatch({ path: "/chat/group/:groupId", end: true });
+  const matchGroupInfo = useMatch({ path: "/chat/group/:groupId/info", end: true });
+  const hasActiveChat = !!(
+    matchGroup ||
+    matchGroupInfo ||
+    // Checked last: "/chat/group" would otherwise match :username.
+    ((matchConversation || matchDetails) &&
+      (matchConversation || matchDetails).params.username !== "group")
+  );
   const { pathname } = useLocation();
   const { userAuth, unreadNotificationCount } = useContext(UserContext);
 
@@ -22,8 +39,23 @@ const ChatLayout = () => {
   const closeCreateModal = useCallback(() => setIsCreateModalOpen(false), []);
   const layoutContext = { openCreateModal, closeCreateModal };
 
+  /*
+   * `100dvh`, not `h-screen`.
+   *
+   * `100vh` is the *large* viewport height on mobile: it doesn't shrink when the
+   * on-screen keyboard opens, so the composer at the bottom of the conversation was
+   * pushed below the visible area and you couldn't see what you were typing. `dvh`
+   * tracks the dynamic viewport, which is exactly this case.
+   *
+   * A named class in index.css rather than `h-screen h-[100dvh]` side by side. Which
+   * of two competing height utilities wins depends on the order Tailwind emits them,
+   * not the order they appear in the attribute, so that version relied on something
+   * the class list can't express. `.h-dynamic-screen` declares `100vh` then `100dvh`
+   * in one rule, which the browser resolves: anything that doesn't understand `dvh`
+   * discards the second line and keeps the first.
+   */
   return (
-    <div className="flex h-screen overflow-hidden bg-neutral-950">
+    <div className="flex h-dynamic-screen overflow-hidden bg-neutral-950">
       {/* Left panel: chat list */}
       <div
         className={`${

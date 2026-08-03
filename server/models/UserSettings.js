@@ -107,13 +107,34 @@ const userSettingsSchema = new Schema(
       mutedChats:         { type: [String], default: [] },
       hiddenChats:        { type: [String], default: [] },
       lockedChats:        { type: [String], default: [] },
+
+      /*
+       * Superseded by the ConversationRead watermark. These were a pair —
+       * opening a chat wrote to forcedReadChats, which zeroed its unread count
+       * and was only cleared by an explicit mark-as-unread, so a chat you had
+       * opened once could never show a badge again. Nothing reads or writes
+       * them now; kept so existing documents stay loadable, and safe to drop
+       * once no deployment predates the change.
+       */
       manualUnreadChats:  { type: [String], default: [] },
       forcedReadChats:    { type: [String], default: [] },
 
       chatLockPinHash: { type: String, default: "", select: false },
 
+      /*
+       * `_id: false` on all five embedded lists below, matching Post.js, which
+       * sets it on every one of its.
+       *
+       * Mongoose mints an ObjectId per subdocument by default and nothing here
+       * addresses one: categories have their own `id`, and the four per-chat lists
+       * are keyed by `chatId`. Every one of these arrays is returned in full by
+       * `GET /chats/preferences`, so the ids were twelve bytes plus a key per
+       * entry, over the wire, indexed by nothing — and they made a plain
+       * `{chatId, theme}` comparison in the client fail for no visible reason.
+       */
       customCategories: {
         type: [{
+          _id:   false,
           id:    { type: String, required: true },
           name:  { type: String, required: true, trim: true, maxlength: 30 },
           order: { type: Number, required: true, default: 0 },
@@ -122,6 +143,7 @@ const userSettingsSchema = new Schema(
       },
       categoryAssignments: {
         type: [{
+          _id:        false,
           chatId:     { type: String, required: true },
           categoryId: { type: String, required: true },
         }],
@@ -129,13 +151,31 @@ const userSettingsSchema = new Schema(
       },
       disappearingByChat: {
         type: [{
+          _id:     false,
           chatId:  { type: String, required: true },
           seconds: { type: Number, default: null },
         }],
         default: [],
       },
+      /*
+       * Per-conversation override of `chat.theme` above. The theme picker has
+       * always lived in a per-conversation settings page, but wrote the single
+       * account-wide field, so restyling one chat restyled every chat.
+       *
+       * `chat.theme` stays the account default: a conversation with no row here
+       * still follows it, which is what every existing user already has.
+       */
+      themeByChat: {
+        type: [{
+          _id:    false,
+          chatId: { type: String, required: true },
+          theme:  { type: String, required: true },
+        }],
+        default: [],
+      },
       archivedChats: {
         type: [{
+          _id:        false,
           chatId:     { type: String, required: true },
           archivedAt: { type: Date, default: Date.now },
         }],

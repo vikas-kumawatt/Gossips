@@ -103,7 +103,7 @@ const PostHeader = ({
                 followers={author.followers?.length || 0}
                 following={currentUserFollowing || []}
                 profilePic={
-                  author.profilePic || "https://via.placeholder.com/96"
+                  author.profilePic || "/default-avatar.png"
                 }
                 isPrivate={isPrivate || false}
                 isVerified={author.isVerified || false}

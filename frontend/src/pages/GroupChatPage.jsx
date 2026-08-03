@@ -2,22 +2,32 @@ import React, {
   useContext,
   useState,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useCallback,
 } from "react";
 import { UserContext } from "../contexts/UserContext";
 import { useChat } from "../contexts/ChatContext";
 import { useReport } from "../contexts/ReportContext";
-import axios from "axios"; // Still needed for Giphy or other direct calls if any
 import { useParams, useNavigate } from "react-router-dom";
 import { Icons } from "../components/icons";
 import SharedPostCard from "../components/Chat/SharedPostCard";
+import { chatAPI } from "../services/api";
+import PollBubble from "../components/Chat/PollBubble";
+import CreatePollSheet from "../components/Chat/CreatePollSheet";
+import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
+import ReconnectBanner from "../components/Chat/ReconnectBanner";
+import { lockedChatIdFromError } from "../services/chatUnlock";
+import { canEditMessage } from "../utils/messageEditing";
 import EmojiPicker from "emoji-picker-react";
 import ResponsiveMenu from "../components/ui/ResponsiveMenu";
 
 const MESSAGE_RATE_LIMIT = 1000;
 const MAX_MESSAGE_LENGTH = 10000;
-const MAX_FILE_SIZE = 100 * 1024 * 1024;
+// Matches multer's limit on the server. It was 100MB here against 50MB there,
+// so a 60MB file passed this check, uploaded, and then failed.
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 const GroupChatPage = () => {
   const { userAuth } = useContext(UserContext);
@@ -28,12 +38,8 @@ const GroupChatPage = () => {
 
   const {
     messages,
-    loading: messagesLoading,
-    error: messagesError,
-    // Actually ChatContext doesn't explicity track "activeGroup" separate from "currentConversation".
-    // "currentConversation" could be the group. But payload structure varies.
-    // We will trust local 'group' state for header info, and 'messages' from context.
-    // Use context pagination state
+    threadLoading: messagesLoading,
+    threadError: messagesError,
     actions: {
       loadGroupMessages,
       sendGroupMessage,
@@ -41,7 +47,9 @@ const GroupChatPage = () => {
       unsendMessage,
       deleteMessageForMe, // Context handles logic
       pinMessage,
+      voteInPoll,
       setCurrentConversation,
+      markConversationAsRead,
     },
   } = useChat();
 
@@ -58,13 +66,54 @@ const GroupChatPage = () => {
   const [contextMenu, setContextMenu] = useState(null);
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [error, setError] = useState(null); // Added missing error state
+  const [showPollComposer, setShowPollComposer] = useState(false);
+  // Groups had no pinned bar at all — the route existed and always returned
+  // empty, because the handler built a DM key from the group id.
+  const [pinnedMessages, setPinnedMessages] = useState([]);
+  const [pinnedDismissed, setPinnedDismissed] = useState(false);
   const [hasMore, setHasMore] = useState(true); // Added missing hasMore state
+  // The chat lock, enforced server-side — see UserConversationPage for the
+  // reasoning; `lockedChats` holds `group_<id>` entries too.
+  const [lockedChatId, setLockedChatId] = useState(null);
+  const [unlockAttempt, setUnlockAttempt] = useState(0);
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
   const fileInputRef = useRef(null);
   const lastMessageTime = useRef(0);
   const hasFetchedData = useRef(false);
-  const observerRef = useRef(null);
+  const topSentinelRef = useRef(null);
+  const scrollAnchorRef = useRef(null);
+  const isInitialLoadRef = useRef(true);
+  const isLoadingMoreRef = useRef(false);
+
+  const loadPinned = useCallback(async () => {
+    try {
+      const res = await chatAPI.getGroupPinnedMessages(groupId);
+      setPinnedMessages(res.pinnedMessages || []);
+    } catch (err) {
+      // A missing pinned bar isn't worth interrupting the thread over.
+      console.error("Error fetching group pinned messages:", err);
+    }
+  }, [groupId]);
+
+  useEffect(() => {
+    setPinnedDismissed(false);
+    if (groupId) loadPinned();
+  }, [groupId, loadPinned]);
+
+  // Voting is a socket emit, so the only failure it can report synchronously is
+  // "no socket" — the result arrives later as a pollUpdated broadcast.
+  const handleVote = useCallback(
+    (messageId, optionIds) => {
+      try {
+        voteInPoll(messageId, optionIds);
+      } catch (err) {
+        console.error("Error voting in poll:", err);
+        setError("Couldn't record your vote — check your connection.");
+      }
+    },
+    [voteInPoll]
+  );
 
   // Initialization Effect
   useEffect(() => {
@@ -78,18 +127,33 @@ const GroupChatPage = () => {
       setError(null);
 
       try {
-        // Load messages and get group info from response
-        const response = await loadGroupMessages(groupId);
+        /*
+         * Set the conversation BEFORE loading, not after.
+         *
+         * SET_CURRENT_CONVERSATION clears the message array — that is how
+         * switching chats avoids flashing the previous thread. Dispatching it
+         * after loadGroupMessages threw away the page that had just been
+         * fetched, so a group opened from the chat list showed its header and
+         * an empty thread until a live message happened to arrive. The DM page
+         * has always had the ordering the other way round.
+         */
+        setCurrentConversation(groupId);
+
         // response contains { messages, hasMore, groupInfo }
+        const response = await loadGroupMessages(groupId);
 
         if (response && response.groupInfo) {
           setGroup(response.groupInfo);
           setHasMore(response.hasMore); // Update hasMore based on response
         }
-
-        // Set active conversation for socket filtering
-        setCurrentConversation(groupId);
       } catch (err) {
+        // A locked group is a prompt, not a failure — see ChatLockPrompt.
+        const locked = lockedChatIdFromError(err);
+        if (locked) {
+          setLockedChatId(locked);
+          hasFetchedData.current = null;
+          return;
+        }
         console.error("Error in initChat:", err);
         setError("Failed to load group. Please try again.");
       } finally {
@@ -105,15 +169,39 @@ const GroupChatPage = () => {
       hasFetchedData.current = null;
       setCurrentConversation(null);
     };
-  }, [groupId, userAuth.token, loadGroupMessages, setCurrentConversation]);
+  }, [
+    groupId,
+    userAuth.token,
+    loadGroupMessages,
+    setCurrentConversation,
+    // Bumped once the PIN prompt has stored a grant, so the load retries.
+    unlockAttempt,
+  ]);
 
   const loadMoreMessages = useCallback(async () => {
-    if (!hasMore || loadingMore || messagesLoading) return;
+    // A ref, not the `loadingMore` state: the observer is rebuilt whenever this
+    // callback's identity changes and re-observing an already-intersecting
+    // sentinel fires immediately, so two callbacks in one tick would both see
+    // false and request the same cursor.
+    if (isLoadingMoreRef.current) return;
+    if (!hasMore || messagesLoading) return;
+    isLoadingMoreRef.current = true;
+
+    const container = messagesContainerRef.current;
+    if (container) {
+      scrollAnchorRef.current = {
+        prevScrollHeight: container.scrollHeight,
+        prevScrollTop: container.scrollTop,
+      };
+    }
 
     setLoadingMore(true);
     try {
       const oldestMessage = messages[0];
-      if (!oldestMessage) return;
+      if (!oldestMessage) {
+        scrollAnchorRef.current = null;
+        return;
+      }
 
       const cursor = oldestMessage
         ? btoa(
@@ -130,45 +218,33 @@ const GroupChatPage = () => {
     } catch (err) {
       console.error("Error loading more messages:", err);
     } finally {
+      isLoadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [
-    hasMore,
-    loadingMore,
-    messagesLoading,
-    messages,
-    loadGroupMessages,
-    groupId,
-  ]);
+  }, [hasMore, messagesLoading, messages, loadGroupMessages, groupId]);
 
+  /*
+   * Group pagination, which has never worked.
+   *
+   * This observed `[data-first-message]` — an attribute that appears nowhere in
+   * the app, so it observed nothing and older group messages could not be
+   * loaded at all. It also ran before the list had mounted and had no
+   * dependency that changed afterwards, the same dead-observer bug the DM page
+   * had. Now: a real sentinel, gated on `loading`.
+   */
   useEffect(() => {
-    if (!messagesContainerRef.current || !hasMore) return;
+    if (loading || !topSentinelRef.current || !hasMore) return;
 
-    const options = {
-      root: messagesContainerRef.current,
-      rootMargin: "100px",
-      threshold: 0.1,
-    };
-
-    observerRef.current = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting && hasMore && !loadingMore) {
-        loadMoreMessages();
-      }
-    }, options);
-
-    const firstMessage = messagesContainerRef.current.querySelector(
-      "[data-first-message]"
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) loadMoreMessages();
+      },
+      { root: messagesContainerRef.current, rootMargin: "100px", threshold: 0 }
     );
-    if (firstMessage) {
-      observerRef.current.observe(firstMessage);
-    }
 
-    return () => {
-      if (observerRef.current) {
-        observerRef.current.disconnect();
-      }
-    };
-  }, [hasMore, loadingMore, loadMoreMessages]);
+    observer.observe(topSentinelRef.current);
+    return () => observer.disconnect();
+  }, [loading, hasMore, loadMoreMessages]);
 
   useEffect(() => {
     if (messagesError) {
@@ -176,21 +252,68 @@ const GroupChatPage = () => {
     }
   }, [messagesError]);
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  /*
+   * This scrolled to the bottom on every change to the message array — so
+   * loading older messages threw the user straight back to the newest one,
+   * which made pagination useless even once the observer was attached.
+   */
+  useLayoutEffect(() => {
+    const container = messagesContainerRef.current;
+    if (loading || !container || messages.length === 0) return;
 
-  // Handle typing - Group typing might be noisy, often disabled or simplified.
-  // We'll skip outgoing typing events for now or implement if backend supports room typing.
-  // Backend `socket.on("typing")` takes { receiverId }.
-  // For groups, it likely expects receiverId to be groupId?
-  // Let's check backend `handleUserTyping`: `const typingKey = user:${receiverId}`.
-  // It assumes 1:1. It doesn't seem to handle `group:${groupId}` key logic explicitly for broadcasting to room?
-  // lines 411: typingUsers.set(typingKey...
-  // lines 435: const receiverSockets = userSockets.get(receiverId).
-  // It tries to emit to specific user. It does NOT emit to a room.
-  // So typing indicators won't work for groups with current backend logic.
-  // I will disabling typing emission for groups.
+    if (scrollAnchorRef.current) {
+      const { prevScrollHeight, prevScrollTop } = scrollAnchorRef.current;
+      container.scrollTop = container.scrollHeight - prevScrollHeight + prevScrollTop;
+      scrollAnchorRef.current = null;
+      return;
+    }
+
+    if (isInitialLoadRef.current) {
+      container.scrollTop = container.scrollHeight;
+      isInitialLoadRef.current = false;
+      return;
+    }
+
+    const distanceFromBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight;
+    if (distanceFromBottom < 150) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, loading, loadingMore]);
+
+  /*
+   * Mark the group read.
+   *
+   * This page never did — so a group's badge counted up while you sat reading
+   * it, no read watermark was ever written for the group, and every message you
+   * had ever received there stayed unread until you happened to click the group
+   * in the chat list. Mirrors the DM page: newest inbound message only, and only
+   * while the tab is actually visible.
+   */
+  const newestInboundId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const senderId = messages[i]?.sender?._id || messages[i]?.sender;
+      if (String(senderId) !== String(currentUserId)) return messages[i]._id;
+    }
+    return null;
+  }, [messages, currentUserId]);
+
+  useEffect(() => {
+    if (!newestInboundId || !groupId) return;
+
+    const markIfVisible = () => {
+      if (document.visibilityState !== "visible") return;
+      markConversationAsRead(null, `group_${groupId}`, `g:${groupId}`);
+    };
+
+    markIfVisible();
+    document.addEventListener("visibilitychange", markIfVisible);
+    return () => document.removeEventListener("visibilitychange", markIfVisible);
+  }, [newestInboundId, groupId, markConversationAsRead]);
+
+  // No typing indicator for groups: the server's `typing` handler takes a
+  // receiverId and emits to that one user, so there is nothing to broadcast to
+  // a room yet.
 
   const handleInputChange = (e) => {
     const value = e.target.value;
@@ -257,10 +380,14 @@ const GroupChatPage = () => {
       setNewMessage("");
       setShowEmojiPicker(false);
       setReplyingTo(null);
+      setError(null);
       lastMessageTime.current = Date.now();
     } catch (err) {
       console.error("Error sending message:", err);
-      setError("Failed to send message");
+      // The server's own reason — "You're muted in this group", "Slow mode is on —
+      // wait 12s" — reaches here now that the send is acknowledged. A generic
+      // string threw away the only part the user could act on.
+      setError(err?.message || "Failed to send message");
     } finally {
       setIsSending(false);
     }
@@ -273,11 +400,16 @@ const GroupChatPage = () => {
     }
     try {
       await editMessage(editingMessage._id, newMessage.trim());
+      // Only on success. The provider used to swallow the rejection, so this
+      // ran either way and the edit the user had typed was gone.
       setNewMessage("");
       setEditingMessage(null);
+      setError(null);
     } catch (err) {
       console.error("Error editing message:", err);
-      setError("Failed to edit message");
+      setError(
+        err?.response?.data?.error || "Couldn't save that edit. Your text is still here."
+      );
     }
   };
 
@@ -335,43 +467,41 @@ const GroupChatPage = () => {
             ? "voice"
             : "file";
 
+    /*
+     * One field, named for the endpoint it's going to.
+     *
+     * This used to append the file as `file` and then, for voice, append the
+     * same file *again* as `audio`. `/chats/upload/voice` is
+     * `chatUpload.single("audio")`, and multer's single() aborts with
+     * LIMIT_UNEXPECTED_FILE on the first file whose fieldname doesn't match —
+     * `file` arrived first, so every group voice upload 400'd.
+     */
+    const isVoice = messageType === "voice";
+
     const formData = new FormData();
-    formData.append("file", file);
+    formData.append(isVoice ? "audio" : "file", file);
 
     try {
-      const endpoint =
-        messageType === "voice" ? "/chats/upload/voice" : "/chats/upload";
-      // Need to set name manually for voice if needed, but 'file' usually works if multer expects it.
-      if (messageType === "voice") formData.append("audio", file); // Multer expects 'audio' for voice
+      // Through chatAPI (#119): the shared client refreshes an expired token on 401,
+      // which the hand-rolled Authorization header snapshotted at render time never
+      // did — so a long composing session ended in a silent upload failure.
+      //
+      // The upload endpoints return a single flat object — { url, type, ... } from
+      // /chats/upload and { url, duration, waveform } from /upload/voice. Reading
+      // `.media` off it gave undefined, so every group attachment was sent with no
+      // media at all and arrived as an empty bubble.
+      const uploaded = isVoice
+        ? await chatAPI.uploadVoice(formData)
+        : await chatAPI.uploadMedia(formData);
+      if (!uploaded?.url) throw new Error("Upload returned no file");
 
-      const uploadResponse = await axios.post(
-        `${import.meta.env.VITE_SERVER}${endpoint}`,
-        formData,
-        {
-          headers: {
-            Authorization: `Bearer ${userAuth.token}`,
-            "Content-Type": "multipart/form-data",
-          },
-        }
-      );
-      const media = uploadResponse.data.media; // Assuming response structure { media: [...] } or { url: ... }
-      // chatController uploadChatMedia returns { media: [...] } (array of objects)
-
-      await sendMessage(media, messageType);
+      await sendMessage([uploaded], messageType);
 
       setMediaPreview(null);
       setIsPreviewOpen(false);
     } catch (err) {
       console.error("Upload failed", err);
       setError("Failed to upload media");
-    }
-  };
-
-  const handlePinMessage = async (messageId) => {
-    try {
-      await pinMessage(messageId);
-    } catch (err) {
-      console.error("Pin failed", err);
     }
   };
 
@@ -382,6 +512,18 @@ const GroupChatPage = () => {
 
   const handleContextMenuAction = async (action) => {
     if (!selectedMessage) return;
+    // These reject now that the provider stopped swallowing errors, and an
+    // unhandled rejection in a menu handler is a silent no-op to the user.
+    const attempt = async (label, run) => {
+      try {
+        await run();
+        setError(null);
+      } catch (err) {
+        console.error(`${label} failed`, err);
+        setError(err?.response?.data?.error || `Couldn't ${label} that message.`);
+      }
+    };
+
     switch (action) {
       case "reply":
         setReplyingTo(selectedMessage);
@@ -391,13 +533,17 @@ const GroupChatPage = () => {
         setNewMessage(selectedMessage.content);
         break;
       case "unsend":
-        await unsendMessage(selectedMessage._id);
+        await attempt("unsend", () => unsendMessage(selectedMessage._id));
         break;
       case "delete":
-        await deleteMessageForMe(selectedMessage._id);
+        await attempt("delete", () => deleteMessageForMe(selectedMessage._id));
         break;
       case "pin":
-        await handlePinMessage(selectedMessage._id);
+        await attempt("pin", async () => {
+          // The target state, so a double-click doesn't net zero.
+          await pinMessage(selectedMessage._id, !selectedMessage.isPinned);
+          await loadPinned();
+        });
         break;
       case "copy":
         navigator.clipboard.writeText(selectedMessage.content);
@@ -417,6 +563,25 @@ const GroupChatPage = () => {
     setSelectedMessage(null);
   };
 
+  /*
+   * Checked before the loading and not-found branches, because a locked group is
+   * neither: nothing loaded and nothing is missing — a PIN is owed.
+   */
+  if (lockedChatId) {
+    return (
+      <div className="flex flex-col min-h-screen bg-black text-white">
+        <ChatLockPrompt
+          chatId={lockedChatId}
+          onUnlocked={() => {
+            setLockedChatId(null);
+            setUnlockAttempt((n) => n + 1);
+          }}
+          onCancel={() => navigate("/chat")}
+        />
+      </div>
+    );
+  }
+
   if (loading && !messages.length) {
     return (
       <div className="flex items-center justify-center min-h-screen bg-black text-white">
@@ -425,10 +590,28 @@ const GroupChatPage = () => {
     );
   }
 
+  /*
+   * Every failure used to collapse to a bare "Group not found" with no header
+   * and no way back — a removed member, a deleted group and a dropped network
+   * request were indistinguishable, and on desktop the only exit was the
+   * browser's back button.
+   */
   if (!group && !loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-black text-white">
-        Group not found
+      <div className="flex flex-col items-center justify-center gap-3 min-h-screen bg-black text-white px-6 text-center">
+        <Icons.group className="w-10 h-10 text-neutral-600" />
+        <p className="text-neutral-300">
+          {error || "This group isn't available."}
+        </p>
+        <p className="text-sm text-neutral-500">
+          It may have been deleted, or you may no longer be a member.
+        </p>
+        <button
+          onClick={() => navigate("/chat")}
+          className="mt-2 px-4 py-2 rounded-full bg-neutral-800 hover:bg-neutral-700 text-sm"
+        >
+          Back to chats
+        </button>
       </div>
     );
   }
@@ -438,7 +621,17 @@ const GroupChatPage = () => {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 bg-neutral-900 border-b border-neutral-800">
         <div className="flex items-center gap-3">
-          <button onClick={() => navigate("/chat")} className="mr-2 md:hidden">
+          {/*
+            Not md:hidden. The page now lives inside ChatLayout, but a group
+            opened directly still needs an exit on desktop — this was the only
+            back control and it was hidden at exactly the width where the
+            two-pane layout used to disappear.
+          */}
+          <button
+            onClick={() => navigate("/chat")}
+            aria-label="Back to chats"
+            className="mr-2"
+          >
             <Icons.arrowLeft className="w-6 h-6" />
           </button>
           <div className="relative">
@@ -456,23 +649,88 @@ const GroupChatPage = () => {
           </div>
         </div>
         <div className="flex items-center gap-4">
-          {/* Add group specific actions like 'Info' */}
-          <button className="text-neutral-400 hover:text-white">
+          {/* Had no handler at all until the info page existed to open. */}
+          <button
+            onClick={() => navigate(`/chat/group/${groupId}/info`)}
+            aria-label="Group info"
+            className="text-neutral-400 hover:text-white"
+          >
             <Icons.info className="w-6 h-6" />
           </button>
         </div>
       </div>
 
       {/* Messages */}
+      {/*
+        Dismissible. One "Please wait a moment" used to pin this banner above
+        the thread for the rest of the session — nothing anywhere cleared it.
+      */}
       {error && (
-        <div className="mx-4 mt-4 p-3 bg-red-900/50 border border-red-500/50 rounded-lg text-red-200 text-sm text-center">
+        <div className="mx-4 mt-4 p-3 pr-10 relative bg-red-900/50 border border-red-500/50 rounded-lg text-red-200 text-sm text-center">
           {error}
+          <button
+            type="button"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-red-500/20"
+          >
+            <Icons.close className="w-4 h-4" />
+          </button>
         </div>
       )}
+      <ReconnectBanner />
+
+      {/* Outside the scroll container, like the DM page's — a summary that
+          scrolls away with the oldest messages is never on screen. */}
+      {pinnedMessages.length > 0 && !pinnedDismissed && (
+        <div className="shrink-0 mx-2 mt-2 mb-1 p-3 bg-neutral-800 border-l-4 border-yellow-500 rounded-lg">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2">
+              <Icons.pin className="w-4 h-4 text-yellow-500" />
+              <span className="text-sm font-medium text-white">
+                Pinned Messages
+              </span>
+            </div>
+            <button
+              onClick={() => setPinnedDismissed(true)}
+              aria-label="Hide pinned messages"
+              className="text-neutral-400 hover:text-white"
+            >
+              <Icons.close className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="space-y-2 max-h-32 overflow-y-auto">
+            {pinnedMessages.slice(0, 3).map((m) => (
+              <button
+                type="button"
+                key={m._id}
+                onClick={() => {
+                  document
+                    .getElementById(`msg-${m._id}`)
+                    ?.scrollIntoView({ behavior: "smooth", block: "center" });
+                }}
+                className="w-full text-left text-sm text-neutral-300 hover:bg-neutral-700 p-2 rounded"
+              >
+                <div className="text-xs text-neutral-400 mb-0.5">
+                  {m.sender?.username || "Unknown"}
+                </div>
+                <div className="truncate">
+                  {m.isDeleted
+                    ? "This message was deleted"
+                    : m.content || "Attachment"}
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div
         ref={messagesContainerRef}
         className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
       >
+        {/* The sentinel the observer watches. There wasn't one. */}
+        <div ref={topSentinelRef} />
         {loadingMore && (
           <div className="text-center text-neutral-500 py-2">
             Loading more...
@@ -488,6 +746,9 @@ const GroupChatPage = () => {
           return (
             <div
               key={msg._id || msg.tempId}
+              // The anchor the pinned bar scrolls to. The DM page has always
+              // carried one; groups had no pinned bar to need it.
+              id={`msg-${msg._id}`}
               className={`flex ${isOwn ? "justify-end" : "justify-start"} group relative`}
             >
               {!isOwn && (
@@ -519,22 +780,34 @@ const GroupChatPage = () => {
                     </p>
                   )}
 
-                {msg.replyTo && (
+                {/*
+                  `replyTo.sender`, not `replyTo.senderUsername` — no server
+                  path has ever sent the latter, so the author line here was
+                  always blank. Both transports now nested-populate the sender.
+                */}
+                {msg.replyTo && !msg.isDeleted && (
                   <div className="mb-2 p-2 bg-black/20 rounded text-sm border-l-2 border-white/50">
                     <p className="text-xs font-semibold">
-                      {msg.replyTo.senderUsername}
+                      {msg.replyTo.sender?.name ||
+                        msg.replyTo.sender?.username ||
+                        "Unknown"}
                     </p>
                     <p className="truncate opacity-80">
-                      {msg.replyTo.content || "Media"}
+                      {msg.replyTo.isDeleted
+                        ? "This message was deleted"
+                        : msg.replyTo.content || "Media"}
                     </p>
                   </div>
                 )}
 
-                {msg.messageType === "post_share" && msg.sharedContent && (
-                  <div className={msg.content ? "mb-2" : ""}>
-                    <SharedPostCard sharedContent={msg.sharedContent} />
-                  </div>
-                )}
+                {/* !isDeleted: an unsent share kept its card on screen. */}
+                {msg.messageType === "post_share" &&
+                  msg.sharedContent &&
+                  !msg.isDeleted && (
+                    <div className={msg.content ? "mb-2" : ""}>
+                      <SharedPostCard sharedContent={msg.sharedContent} />
+                    </div>
+                  )}
 
                 {msg.media && msg.media.length > 0 && (
                   <div className="mb-2">
@@ -550,6 +823,16 @@ const GroupChatPage = () => {
                         {/* Add other media types handling */}
                       </div>
                     ))}
+                  </div>
+                )}
+
+                {msg.messageType === "poll" && msg.poll && !msg.isDeleted && (
+                  <div className={msg.content ? "mb-2" : ""}>
+                    <PollBubble
+                      message={msg}
+                      isOwn={isOwn}
+                      onVote={handleVote}
+                    />
                   </div>
                 )}
 
@@ -596,10 +879,24 @@ const GroupChatPage = () => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach media"
             className="text-neutral-400 hover:text-white p-2"
           >
             <Icons.plus className="w-6 h-6" />
           </button>
+          <button
+            onClick={() => setShowPollComposer(true)}
+            aria-label="Poll"
+            className="text-neutral-400 hover:text-white p-2"
+          >
+            <Icons.poll className="w-6 h-6" />
+          </button>
+          {showPollComposer && (
+            <CreatePollSheet
+              groupId={groupId}
+              onClose={() => setShowPollComposer(false)}
+            />
+          )}
           <input
             type="file"
             ref={fileInputRef}
@@ -655,14 +952,30 @@ const GroupChatPage = () => {
             <Icons.reply className="w-4 h-4" /> Reply
           </button>
 
-          {(selectedMessage?.isOwn || !selectedMessage) && (
+          {/*
+            isOwnMessage, not selectedMessage.isOwn. `isOwn` is set only on the
+            optimistic object the send path builds, so it was absent from every
+            message that came back from the server — meaning after a reload you
+            could not edit or unsend your own group messages at all. The bubble
+            beside it already aligned them correctly using the same helper.
+          */}
+          {(!selectedMessage || isOwnMessage(selectedMessage)) && (
             <>
-              <button
-                onClick={() => handleContextMenuAction("edit")}
-                className="w-full text-left px-4 py-2 hover:bg-neutral-700 flex items-center gap-2"
-              >
-                <Icons.edit className="w-4 h-4" /> Edit
-              </button>
+              {/*
+                Not offered where the server would refuse it: a poll, a call log, a
+                shared post or anything past the fifteen-minute window. Opening edit
+                mode only to have the save rejected is worse than no menu item.
+                `isOwn` is absent on messages loaded from the server, so the type and
+                age checks are applied to the row directly.
+              */}
+              {canEditMessage({ ...selectedMessage, isOwn: true }) && (
+                <button
+                  onClick={() => handleContextMenuAction("edit")}
+                  className="w-full text-left px-4 py-2 hover:bg-neutral-700 flex items-center gap-2"
+                >
+                  <Icons.edit className="w-4 h-4" /> Edit
+                </button>
+              )}
               <button
                 onClick={() => handleContextMenuAction("unsend")}
                 className="w-full text-left px-4 py-2 hover:bg-neutral-700 flex items-center gap-2 text-red-400"

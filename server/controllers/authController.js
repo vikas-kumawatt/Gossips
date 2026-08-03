@@ -12,6 +12,7 @@ import { sendWelcomeNotification } from "./notificationController.js";
 import { DEFAULT_AVATAR_URL } from "../utils/constants.js";
 import { countryUpdate } from "../utils/geo.js";
 import { generateAvailableUsername } from "../utils/username.js";
+import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
 
 if (!process.env.BREVO_EMAIL || !process.env.BREVO_SMTP_KEY || !process.env.SMTP_USER) {
   throw new Error(
@@ -221,7 +222,7 @@ const readAccountSession = async (req, userId) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+    decoded = jwt.verify(refreshToken, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
   } catch {
     return null;
   }
@@ -711,7 +712,7 @@ export const refreshAccessToken = async (req, res) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+      decoded = jwt.verify(refreshToken, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
     } catch {
       return res.status(401).json({ message: "Invalid refresh token" });
     }
@@ -790,7 +791,7 @@ export const logoutUser = async (req, res) => {
     let loggedOutId = requestedId || null;
     if (typeof target === "string" && target) {
       try {
-        const decoded = jwt.verify(target, process.env.JWT_SECRET);
+        const decoded = jwt.verify(target, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
         loggedOutId = decoded?.id || loggedOutId;
       } catch {
         // An unverifiable token still gets its cookie cleared below.

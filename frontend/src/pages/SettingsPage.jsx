@@ -1,4 +1,4 @@
-import React, { useContext, useState } from "react";
+import React, { useContext, useEffect, useState } from "react";
 import MobileNavbar from "../components/layouts/mobile-navbar";
 import SiteHeader from "../components/layouts/site-header";
 import CreatePost from "../components/CreatePost";
@@ -7,6 +7,11 @@ import { UserContext } from "../contexts/UserContext";
 import InPageNavigation from "../components/InPageNavigation";
 import BlockedAccountsModal from "../components/BlockedAccountsModal";
 import MentionSettingsSheet from "../components/MentionSettingsSheet";
+import {
+  disablePushNotifications,
+  enablePushNotifications,
+  isPushAvailable,
+} from "../services/pushNotifications";
 
 const SettingsPage = () => {
   const { userAuth } = useContext(UserContext);
@@ -22,8 +27,100 @@ const SettingsPage = () => {
     setActiveTab(index);
   };
 
+  /*
+   * Push notification state for this device.
+   *
+   * Three separate facts, because they lead to three different bits of UI: whether the
+   * browser and the project can do push at all, whether the user has permanently
+   * denied it (which no button can undo — only browser settings can), and whether this
+   * device is currently registered.
+   */
+  const [pushSupported, setPushSupported] = useState(false);
+  const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushBlocked, setPushBlocked] = useState(false);
+  const [pushBusy, setPushBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    isPushAvailable().then((supported) => {
+      if (cancelled) return;
+      setPushSupported(supported);
+      if (!supported) return;
+      setPushBlocked(Notification.permission === "denied");
+      setPushEnabled(Notification.permission === "granted");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const togglePush = async () => {
+    setPushBusy(true);
+    try {
+      if (pushEnabled) {
+        await disablePushNotifications();
+        setPushEnabled(false);
+        return;
+      }
+      const result = await enablePushNotifications();
+      setPushEnabled(result.registered);
+      // "denied" is final for the origin — the browser will not ask again, so the row
+      // has to say so rather than leaving the toggle looking broken.
+      if (result.reason === "denied") setPushBlocked(true);
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   const renderPrivacyTab = () => (
     <div className="flex flex-col mt-6 gap-4 items-start mx-2">
+      {/*
+        Message notifications (CF30b).
+
+        The only way to grant permission. Delivery has been built since 8b and the
+        token registration landed with it, but registration is deliberately silent —
+        it never prompts, because a permission prompt fired on login is dismissed
+        permanently by most people and browsers penalise it. So there has to be a
+        deliberate control somewhere, and this is it.
+
+        Hidden entirely when the browser can't do push or Firebase isn't configured:
+        a toggle that cannot work is worse than no toggle, which is the rule
+        featureGate.js states on the server side.
+      */}
+      {pushSupported && (
+        <div className="flex relative items-center gap-4 mb-4 w-full">
+          {/* `Icons.activity` is the bell; there is no `Icons.notification`. */}
+          <Icons.activity className="h-6 w-6" />
+          <div className="flex-1 min-w-0">
+            <p className="text-md">Message notifications</p>
+            <p className="text-xs text-neutral-500">
+              {pushBlocked
+                ? "Blocked in your browser settings for this site"
+                : pushEnabled
+                  ? "On for this device"
+                  : "Off for this device"}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={pushEnabled}
+            aria-label="Message notifications"
+            disabled={pushBusy || pushBlocked}
+            onClick={togglePush}
+            className={`relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:opacity-40 ${
+              pushEnabled ? "bg-blue-600" : "bg-neutral-700"
+            }`}
+          >
+            <span
+              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${
+                pushEnabled ? "translate-x-5" : "translate-x-1"
+              }`}
+            />
+          </button>
+        </div>
+      )}
+
       <div className="flex relative items-center gap-4 mb-4 w-full">
         <Icons.lock className="h-6 w-6" />
         <p className="text-md">Private profile</p>

@@ -1,6 +1,7 @@
 import React, {
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useCallback,
@@ -23,12 +24,13 @@ import toast from "react-hot-toast";
 import { Icons } from "./icons";
 import NoDataMessage from "./NoDataMessage";
 import ProfileCard from "./ProfileCard";
-import { chatAPI, postAPI } from "../services/api";
+import { postAPI } from "../services/api";
 import { useReport } from "../contexts/ReportContext";
 import EditContentSheet from "./EditContentSheet";
 import EditHistorySheet from "./EditHistorySheet";
 import ShareSheet from "./ShareSheet";
 import { useFollow } from "../contexts/FollowContext";
+import { useChat } from "../contexts/ChatContext";
 import { REPLY_RESTRICTED_TEXT } from "../lib/replyAudience";
 import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
@@ -94,51 +96,17 @@ const ensureBulkViewListeners = (token) => {
   });
 };
 
-/** Dedupe getPreferences across post cards; epoch avoids stale GET overwriting after toggle. */
-let favoriteChatIdsCache = null;
-let favoriteChatIdsPromise = null;
-let favoriteChatIdsEpoch = 0;
-
-const bumpFavoriteChatIdsFromToggle = (response) => {
-  favoriteChatIdsEpoch += 1;
-  if (Array.isArray(response?.favoriteChats)) {
-    favoriteChatIdsCache = new Set(response.favoriteChats);
-    // Also patch the IndexedDB cachedGet entry so a hard-refresh within the
-    // 60 s TTL window still returns the correct favourites list.
-    chatAPI.patchCachedPreferencesFavorites(response.favoriteChats).catch(() => {});
-  }
-};
-
-const resetFavoriteChatIdsCache = () => {
-  favoriteChatIdsCache = null;
-  favoriteChatIdsPromise = null;
-  favoriteChatIdsEpoch += 1;
-};
-
-const loadFavoriteChatIdsSet = () => {
-  if (favoriteChatIdsCache && !favoriteChatIdsPromise) {
-    return Promise.resolve(favoriteChatIdsCache);
-  }
-  if (!favoriteChatIdsPromise) {
-    const epochAtFetch = favoriteChatIdsEpoch;
-    favoriteChatIdsPromise = chatAPI
-      .getPreferences()
-      .then((data) => {
-        if (epochAtFetch !== favoriteChatIdsEpoch) {
-          favoriteChatIdsPromise = null;
-          return favoriteChatIdsCache ?? new Set();
-        }
-        favoriteChatIdsCache = new Set(data.favoriteChats || []);
-        favoriteChatIdsPromise = null;
-        return favoriteChatIdsCache;
-      })
-      .catch((err) => {
-        favoriteChatIdsPromise = null;
-        throw err;
-      });
-  }
-  return favoriteChatIdsPromise;
-};
+/*
+ * Favourites used to live here.
+ *
+ * This file kept a module-level `Set` of favourite chat ids, its own `getPreferences`
+ * call to fill it, an in-flight promise to dedupe that call across every card on screen,
+ * and an epoch counter so a slow GET couldn't land on top of a toggle — a small cache
+ * implementation, in a post card, for a list `ChatProvider` already owned. It was written
+ * on the belief that the feed renders outside the chat providers. It doesn't:
+ * `ChatProvider` wraps the whole route tree (App.jsx), so this reads the one copy through
+ * `useChat()` and the rest is gone (CF37).
+ */
 
 const PostCard = ({
   item,
@@ -204,7 +172,6 @@ const PostCard = ({
   const [repliesHasMore, setRepliesHasMore] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  const [isAuthorFavorite, setIsAuthorFavorite] = useState(null);
   const [isTogglingFavorite, setIsTogglingFavorite] = useState(false);
   const [whoCanReply, setWhoCanReply] = useState(data?.whoCanReply || "anyone");
   const [isDismissed, setIsDismissed] = useState(false);
@@ -220,6 +187,10 @@ const PostCard = ({
   const { followUpdates } = useFollow();
   const { mute: muteAccount, unmute: unmuteAccount } = useMute();
   const { isBlocked, requestBlock, unblock: unblockAccount } = useBlock();
+  const {
+    preferences: { favoriteChats, loaded: preferencesLoaded },
+    actions: { toggleFavoriteChat },
+  } = useChat();
   const { openReport } = useReport();
 
   const [isLiking, setIsLiking] = useState(false);
@@ -476,37 +447,38 @@ const PostCard = ({
     if (userAuth?.token) ensureBulkViewListeners(userAuth.token);
   }, [userAuth?.token]);
 
-  useEffect(() => {
-    if (!userAuth?.token) {
-      resetFavoriteChatIdsCache();
-    }
-  }, [userAuth?.token]);
-
-  useEffect(() => {
+  /*
+   * Derived, not fetched and not mirrored in state (CF37).
+   *
+   * `null` still means "don't offer the menu item" — signed out, no author, the author is
+   * you, or the list hasn't arrived yet. That last case is why `loaded` exists: an empty
+   * `favoriteChats` before the fetch is indistinguishable from having no favourites, and
+   * treating it as the latter would render "Add to favorites" over an author who is
+   * already starred. The effect this replaces held `null` for the same window, because it
+   * was waiting on its own fetch.
+   *
+   * The difference is that a toggle anywhere now moves this, since there is one list: it
+   * used to be a `useState` seeded from a module-level cache, so favouriting from the chat
+   * list left every card already on screen showing the old star.
+   */
+  const isAuthorFavorite = useMemo(() => {
     if (
       !userAuth?.token ||
       !author?._id ||
-      author.username === userAuth.username
+      author.username === userAuth.username ||
+      !preferencesLoaded
     ) {
-      setIsAuthorFavorite(null);
-      return;
+      return null;
     }
-
-    let cancelled = false;
-    const chatKey = `user_${author._id}`;
-
-    loadFavoriteChatIdsSet()
-      .then((set) => {
-        if (!cancelled) setIsAuthorFavorite(set.has(chatKey));
-      })
-      .catch(() => {
-        if (!cancelled) setIsAuthorFavorite(false);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [userAuth?.token, author?._id, author?.username, userAuth?.username]);
+    return favoriteChats.includes(`user_${author._id}`);
+  }, [
+    userAuth?.token,
+    userAuth?.username,
+    author?._id,
+    author?.username,
+    favoriteChats,
+    preferencesLoaded,
+  ]);
 
   useEffect(() => {
     if (
@@ -987,43 +959,23 @@ const PostCard = ({
     ) {
       return;
     }
-    const chatId = `user_${author._id}`;
-    const prevFavorite = isAuthorFavorite;
-    const optimisticNext = !prevFavorite;
-
-    // Optimistic update — instant UI feedback
-    setIsAuthorFavorite(optimisticNext);
-    if (favoriteChatIdsCache) {
-      if (optimisticNext) {
-        favoriteChatIdsCache.add(chatId);
-      } else {
-        favoriteChatIdsCache.delete(chatId);
-      }
-    }
-
+    /*
+     * No optimistic star, and nothing to revert.
+     *
+     * The star is derived from the provider's list now, so the only way to move it
+     * optimistically would be to write a guess into shared state that three other
+     * surfaces render — and then unwind it there on failure. The request is one round
+     * trip and the button is disabled for its duration, which is the same feedback the
+     * optimistic path was buying, without a rollback that can race a real update.
+     */
     setIsTogglingFavorite(true);
     try {
-      const response = await chatAPI.toggleFavoriteChat(
-        encodeURIComponent(chatId)
-      );
-      const next = Boolean(response?.isFavorite);
-      setIsAuthorFavorite(next);
-      bumpFavoriteChatIdsFromToggle(response);
-      toast.success(
-        next ? "Added to favorites" : "Removed from favorites"
-      );
-    } catch (error) {
-      console.error("Error toggling favorite chat:", error);
-      // Revert optimistic update
-      setIsAuthorFavorite(prevFavorite);
-      if (favoriteChatIdsCache) {
-        if (prevFavorite) {
-          favoriteChatIdsCache.add(chatId);
-        } else {
-          favoriteChatIdsCache.delete(chatId);
-        }
+      const response = await toggleFavoriteChat(`user_${author._id}`);
+      if (!response) {
+        toast.error("Could not update favorites");
+        return;
       }
-      toast.error("Could not update favorites");
+      toast.success(response.isFavorite ? "Added to favorites" : "Removed from favorites");
     } finally {
       setIsTogglingFavorite(false);
     }
@@ -1033,7 +985,7 @@ const PostCard = ({
     author?._id,
     author?.username,
     isTogglingFavorite,
-    isAuthorFavorite,
+    toggleFavoriteChat,
   ]);
 
   const handleReport = () => {
@@ -1611,7 +1563,7 @@ const PostCard = ({
           bio={author.bio || ""}
           followers={author.followers?.length || 0}
           following={userAuth?.following || []}
-          profilePic={author.profilePic || "https://via.placeholder.com/96"}
+          profilePic={author.profilePic || "/default-avatar.png"}
           isPrivate={author.isPrivate || false}
           isVerified={author.isVerified || false}
           isModal={true}

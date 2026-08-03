@@ -1,5 +1,4 @@
 import { Schema, model } from "mongoose";
-import { escapeRegex } from "../utils/respond.js";
 
 /**
  * Group — core group/channel document. Members are in GroupMember.
@@ -18,90 +17,98 @@ const groupSchema = new Schema(
     avatar:      { type: String, default: "/default-group-avatar.png" },
     coverPhoto:  { type: String, default: "" },
 
-    type: { type: String, enum: ["public", "private", "secret"], default: "private", index: true },
+    type: { type: String, enum: ["public", "private", "secret"], default: "private" },
 
-    inviteLink:           { type: String, unique: true, sparse: true },
-    inviteLinkExpiresAt:  { type: Date },
-
-    // Settings
+    /*
+     * Settings, and only the ones that are actually enforced.
+     *
+     * This block used to carry another eleven — approvalRequired,
+     * membersCanInvite, maxMembers, messageHistory, antiSpam, maxFileSizeMB,
+     * profilePhotosVisible, memberListVisible, linkedGroups, invite links — plus
+     * a `features` block of six toggles and an embedded `pinnedMessages` array.
+     * Not one of them was read or written anywhere. A schema that describes
+     * behaviour the code doesn't have is worse than a smaller one: it reads as a
+     * promise, and the next person wires a settings screen to fields that do
+     * nothing. Add them back alongside the code that honours them.
+     *
+     * `messageHistory` came back that way: it is the one of the eleven with a
+     * plausible use, and it arrived with the eight read paths that honour it.
+     *
+     * Enforced in utils/chatAccess.js → resolveGroupSend (send-side) and
+     * historyFloors (read-side).
+     */
     settings: {
-      approvalRequired:  { type: Boolean, default: false },
-      membersCanInvite:  { type: Boolean, default: true },
-      maxMembers:        { type: Number,  default: 1000 },
-
       slowModeSeconds: { type: Number, default: 0 },
+      mediaSharing:    { type: Boolean, default: true },
+      fileSharing:     { type: Boolean, default: true },
+
+      /*
+       * How much of the past a member may read.
+       *
+       *   visible — everything, whenever they joined. The default, and what every
+       *             group written before this field existed means.
+       *   hidden  — nothing from before their own GroupMember.joinedAt.
+       *
+       * Two values, not the three the old schema named (`visible`,
+       * `visible_to_new`, `hidden`): the middle one described the same observable
+       * behaviour as `visible`, so it could never be tested apart from it, and a
+       * branch nothing can distinguish is a branch that gets enforced
+       * inconsistently.
+       *
+       * The floor is `joinedAt`, and leaving deletes the GroupMember row — so
+       * rejoining gives a *new* joinedAt and a tighter floor. That is the safe
+       * direction: leaving and coming back cannot be used to reopen history.
+       *
+       * No role exemption. An admin added last week cannot read last year's
+       * messages either, which is what "hidden" plainly says, and it keeps the
+       * rule to one predicate with no role branch in any of the eight places
+       * that apply it.
+       */
       messageHistory: {
         type: String,
-        enum: ["visible", "visible_to_new", "hidden"],
+        enum: ["visible", "hidden"],
         default: "visible",
       },
-      antiSpam: { type: Boolean, default: true },
-
-      mediaSharing:        { type: Boolean, default: true },
-      fileSharing:         { type: Boolean, default: true },
-      maxFileSizeMB:       { type: Number,  default: 100 },
-
-      profilePhotosVisible: { type: Boolean, default: true },
-      memberListVisible:    { type: Boolean, default: true },
-
-      linkedGroups: [{ type: Schema.Types.ObjectId, ref: "Group" }],
     },
 
-    features: {
-      polls:      { type: Boolean, default: true },
-      events:     { type: Boolean, default: true },
-      payments:   { type: Boolean, default: false },
-      voiceRooms: { type: Boolean, default: true },
-      videoCalls: { type: Boolean, default: true },
-      bots:       { type: Boolean, default: true },
-    },
-
-    // Pinned messages — bounded list (cap enforced in code, e.g. 5)
-    pinnedMessages: [{
-      message:  { type: Schema.Types.ObjectId, ref: "Message" },
-      pinnedBy: { type: Schema.Types.ObjectId, ref: "User" },
-      pinnedAt: { type: Date, default: Date.now },
-    }],
-
-    // Group rules — small list, fine to embed
-    rules: [{
-      title:       { type: String, required: true, maxlength: 100 },
-      description: { type: String, maxlength: 500 },
-      addedBy:     { type: Schema.Types.ObjectId, ref: "User" },
-      addedAt:     { type: Date, default: Date.now },
-    }],
-
-    // Cached counts — kept fresh by GroupMember create/delete
+    /*
+     * Cached counts, derived from GroupMember by utils/groupCounts.js on every
+     * membership change rather than incremented from several places at once.
+     *
+     * `messagesTotal` is gone. It was incremented by two of the four paths that
+     * create a group message — the socket send and /share, but never a group
+     * forward or a group poll — and never decremented on unsend, so it was always
+     * wrong. And nothing read it: a repo-wide grep returned the schema line and the
+     * two writes. So it was an extra write to the Group document on every group
+     * message, buying an inaccurate number nobody looked at.
+     *
+     * If a UI ever wants it, `Message.countDocuments({conversation})` gives the
+     * true figure on demand, and the only place that would show it is the group
+     * info page, which is not a hot path. A derived count that is right beats a
+     * cached one that drifts.
+     */
     counts: {
-      members:       { type: Number, default: 0, min: 0 },
-      admins:        { type: Number, default: 0, min: 0 },
-      messagesTotal: { type: Number, default: 0, min: 0 },
+      members: { type: Number, default: 0, min: 0 },
+      admins:  { type: Number, default: 0, min: 0 },
     },
 
     isActive:  { type: Boolean, default: true },
     isDeleted: { type: Boolean, default: false },
-    deletedAt: { type: Date },
 
-    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: true }
 );
 
 // Search & discovery
-groupSchema.index({ name: "text", description: "text" });
+/*
+ * The text index is gone: `globalSearch` is the only group search and it uses
+ * an unanchored $regex, never $text. Mongo allows one text index per collection
+ * and charges the most to maintain it, so an unused one is the worst kind.
+ *
+ * {type, isActive, isDeleted} stays — it's what a public-group discovery query
+ * would need and it's the only compound here.
+ */
 groupSchema.index({ type: 1, isActive: 1, isDeleted: 1 });
-
-groupSchema.statics.searchPublic = function (query, limit = 20) {
-  const safe = escapeRegex(query);
-  const rx = new RegExp(safe, "i");
-  return this.find({
-    type: "public",
-    isActive: true,
-    isDeleted: false,
-    $or: [{ name: rx }, { description: rx }],
-  })
-    .limit(limit)
-    .lean();
-};
 
 export default model("Group", groupSchema);

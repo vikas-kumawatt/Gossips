@@ -15,6 +15,7 @@ import {
   getReposts,
   isFollowingMe,
   restrictUser,
+  unrestrictUser,
   blockUser,
   unblockUser,
   muteUser,
@@ -30,6 +31,8 @@ import {
   changeUsername,
   getPrivacySettings,
   updatePrivacySettings,
+  setPushToken,
+  deletePushToken,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import upload from "../config/multerConfig.js";
@@ -73,6 +76,18 @@ router.get("/username-status", protect, getUsernameStatus);
 // Hyphenated, so neither can be mistaken for a profile route.
 router.get("/privacy-settings", protect, getPrivacySettings);
 router.patch("/privacy-settings", protect, updatePrivacySettings);
+
+/*
+ * Push registration (CF30b).
+ *
+ * The delivery path has been complete since 8b with nowhere to deliver to:
+ * `UserSession.push.token` is what it reads and nothing wrote it, because there was
+ * no route. Not gated on `requireActiveAccount` — registering a device is how a
+ * suspended user finds out they've been reinstated, and delivery itself applies every
+ * other rule (mute, blocks, the account's own status).
+ */
+router.put("/push-token", protect, setPushToken);
+router.delete("/push-token", protect, deletePushToken);
 router.patch("/username", protect, changeLimiter, changeUsername);
 router.get("/users", protect, getUsers);
 router.get("/muted", protect, getMutedUsers);
@@ -85,6 +100,7 @@ router.get("/pending-request/:username", protect, checkPendingRequestStatus);
 router.post("/follow/:username", protect, followUser);
 router.post("/unfollow/:username", protect, unfollowUser);
 router.post("/restrict/:username", protect, restrictUser);
+router.post("/unrestrict/:username", protect, unrestrictUser);
 router.post("/block/:username", protect, blockUser);
 router.post("/unblock/:username", protect, unblockUser);
 router.post("/mute/:username", protect, muteUser);

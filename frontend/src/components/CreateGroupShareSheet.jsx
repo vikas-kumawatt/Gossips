@@ -136,7 +136,7 @@ const CreateGroupShareSheet = ({ targetType, targetId, onSent, onClose }) => {
                 >
                   <span className="relative">
                     <img
-                      src={user.profilePic || "https://via.placeholder.com/48"}
+                      src={user.profilePic || "/default-avatar.png"}
                       alt=""
                       className="w-12 h-12 rounded-full object-cover bg-neutral-800"
                     />
@@ -175,7 +175,7 @@ const CreateGroupShareSheet = ({ targetType, targetId, onSent, onClose }) => {
                       className="flex-1 min-w-0 flex items-center gap-3 py-2.5 text-left cursor-pointer"
                     >
                       <img
-                        src={user.profilePic || "https://via.placeholder.com/44"}
+                        src={user.profilePic || "/default-avatar.png"}
                         alt=""
                         className="w-11 h-11 rounded-full object-cover bg-neutral-800 shrink-0"
                       />

@@ -80,7 +80,7 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
                   className="flex items-center gap-3 px-4 py-3 hover:bg-neutral-900"
                 >
                   <img
-                    src={u.profilePic || "https://via.placeholder.com/96"}
+                    src={u.profilePic || "/default-avatar.png"}
                     alt={u.username}
                     onClick={() => {
                       onClose();
