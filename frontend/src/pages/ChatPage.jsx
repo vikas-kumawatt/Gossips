@@ -49,6 +49,7 @@ import CreatePost from "../components/CreatePost";
 import ResponsiveMenu from "../components/ui/ResponsiveMenu";
 import ResponsiveSheet from "../components/ui/responsive-sheet";
 import { useLongPress } from "../hooks/useLongPress";
+import { useDebounce } from "../hooks/useDebounce";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import ReconnectBanner from "../components/Chat/ReconnectBanner";
 
@@ -195,7 +196,6 @@ const ChatPage = ({ embedded = false }) => {
 
   const [filteredUsers, setFilteredUsers] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
-  const [showSearchResults, setShowSearchResults] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [activeFilter, setActiveFilter] = useState("all");
@@ -222,7 +222,6 @@ const ChatPage = ({ embedded = false }) => {
   const [pinAction, setPinAction] = useState("toggle");
   const [builtInTabs, setBuiltInTabs] = useState(DEFAULT_BUILT_IN_TABS);
   const navigate = useNavigate();
-  const searchTimeoutRef = useRef(null);
   const tabLongPressTimerRef = useRef(null);
   const filterTriggerRef = useRef(null);
   const filterDropdownRef = useRef(null);
@@ -315,46 +314,76 @@ const ChatPage = ({ embedded = false }) => {
 
   // fetchUnreadCounts removed - handled by ChatContext
 
-  const searchUsers = async (query) => {
-    if (!query.trim()) {
+  /*
+   * Search state is derived from the query, not tracked alongside it.
+   *
+   * There used to be a `showSearchResults` boolean set independently of
+   * `searchQuery`, and the request had no staleness guard. Clearing the box while a
+   * request was in flight went: the box empties and the flag goes false, then the
+   * old response lands and sets it back to true — so the chat list stayed hidden
+   * behind a results panel headed `Search for ""`, listing whatever the abandoned
+   * query had matched, with no spinner to explain it. Typing again was the only way
+   * out. The same two-sources-of-truth also meant that during the 300ms debounce
+   * neither render branch was taken and the page below the search bar went blank.
+   *
+   * Deriving the panel from the query makes both states unrepresentable, and the
+   * `cancelled` flag drops responses for queries the user has moved on from. This
+   * is the shape the in-conversation search already used.
+   */
+  const debouncedSearchQuery = useDebounce(searchQuery, 300);
+  const trimmedQuery = searchQuery.trim();
+  const showSearchResults = trimmedQuery !== "";
+
+  /*
+   * Results in hand are for `debouncedSearchQuery`; the panel is headed with
+   * `searchQuery`. While those disagree the results on screen belong to a query
+   * the user has already edited, so they're withheld rather than shown as if they
+   * answered the new one.
+   */
+  const searchPending =
+    showSearchResults &&
+    (searchLoading || debouncedSearchQuery.trim() !== trimmedQuery);
+
+  useEffect(() => {
+    const query = debouncedSearchQuery.trim();
+    if (!query) {
       setFilteredUsers([]);
-      setShowSearchResults(false);
-      return;
+      setSearchLoading(false);
+      return undefined;
     }
 
+    let cancelled = false;
     setSearchLoading(true);
-    try {
-      const data = await userAPI.searchUsers(query);
-      setFilteredUsers(data.users || []);
-      setShowSearchResults(true);
-    } catch (error) {
-      console.error("Error searching users:", error);
-      setFilteredUsers([]);
-      setShowSearchResults(true);
-    } finally {
-      setSearchLoading(false);
-    }
-  };
+
+    userAPI
+      .searchUsers(query)
+      .then((data) => {
+        if (!cancelled) setFilteredUsers(data.users || []);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.error("Error searching users:", error);
+        setFilteredUsers([]);
+      })
+      .finally(() => {
+        if (!cancelled) setSearchLoading(false);
+      });
+
+    // Covers both a superseded query and unmount, so no response can land on a
+    // page that has moved on or gone away.
+    return () => {
+      cancelled = true;
+    };
+  }, [debouncedSearchQuery]);
 
   const handleSearchChange = (e) => {
-    const query = e.target.value;
-    setSearchQuery(query);
+    setSearchQuery(e.target.value);
+  };
 
-    // Clear previous timeout
-    if (searchTimeoutRef.current) {
-      clearTimeout(searchTimeoutRef.current);
-    }
-
-    if (query.trim() === "") {
-      setShowSearchResults(false);
-      setFilteredUsers([]);
-      return;
-    }
-
-    // Set new timeout for debouncing
-    searchTimeoutRef.current = setTimeout(() => {
-      searchUsers(query);
-    }, 300);
+  const clearSearch = () => {
+    setSearchQuery("");
+    setFilteredUsers([]);
+    searchInputRef.current?.focus();
   };
 
   // handleNewMessage removed - handled by ChatContext
@@ -1691,8 +1720,25 @@ const ChatPage = ({ embedded = false }) => {
             className="absolute left-0 ml-4 mt-4 w-5 h-5 "
             strokeColor="#404040"
           />
-          {searchLoading && (
+          {/*
+            A way out of the search that isn't "select all and delete". There was
+            none — no clear button, and no `type="search"` either, so the browser's
+            own affordance wasn't there to fall back on. Sized to 44px, and it takes
+            the place of the spinner rather than sitting beside it.
+          */}
+          {searchLoading ? (
             <Icons.spinner className="absolute right-0 mr-4 mt-4 w-5 h-5 animate-spin text-neutral-500" />
+          ) : (
+            searchQuery !== "" && (
+              <button
+                type="button"
+                onClick={clearSearch}
+                aria-label="Clear search"
+                className="absolute right-0 mr-1 mt-4 w-11 h-11 flex items-center justify-center text-neutral-500 hover:text-white transition-colors"
+              >
+                <Icons.close className="w-4 h-4" />
+              </button>
+            )
           )}
         </div>
 
@@ -1864,7 +1910,17 @@ const ChatPage = ({ embedded = false }) => {
                     : `Search for "${searchQuery}"`}
                 </p>
               </div>
-              {filteredUsers.length > 0 ? (
+              {/*
+                Three states, not two. "No users found" used to also stand in for
+                "still searching" and for "the request failed", so a slow network and
+                a genuine empty result were indistinguishable.
+              */}
+              {searchPending ? (
+                <div className="p-4 text-center text-neutral-500" role="status">
+                  <Icons.spinner className="animate-spin mx-auto w-5 h-5" />
+                  <span className="sr-only">Searching</span>
+                </div>
+              ) : filteredUsers.length > 0 ? (
                 filteredUsers
                   .slice(0, 5)
                   .map((user) => (
@@ -1877,7 +1933,7 @@ const ChatPage = ({ embedded = false }) => {
               )}
             </div>
           </>
-        ) : searchQuery === "" ? (
+        ) : (
           <>
             {filteredItems.length > 0 ? (
               <div className="mt-4 space-y-0" role="list" aria-label="Conversations">
@@ -1912,9 +1968,14 @@ const ChatPage = ({ embedded = false }) => {
               </div>
             )}
           </>
-        ) : null}
+        )}
 
-        {chatLoading && (
+        {/*
+          Only when there is nothing to show. The list renders from cache on open,
+          so a spinner underneath a populated list is just noise — and it used to
+          appear on every tab switch, below rows that were already on screen.
+        */}
+        {chatLoading && filteredItems.length === 0 && !showSearchResults && (
           <div className="text-center py-10 text-neutral-400">
             <Icons.spinner className="animate-spin mx-auto w-8 h-8" />
           </div>

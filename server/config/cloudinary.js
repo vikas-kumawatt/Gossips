@@ -70,6 +70,56 @@ export const deleteFromCloudinary = async (url) => {
   }
 };
 
+/**
+ * A poster frame for an uploaded video, as a Cloudinary derivative URL.
+ *
+ * Cloudinary's upload response carries no `thumbnail_url` for a video, and the chat
+ * upload handler used to fall back to `secure_url` — so `media.thumbnail` was the
+ * .mp4 itself. Anything treating that as an image got a file that downloads with a
+ * 200 and then fails to decode, which is the one failure mode `<video poster>`
+ * handles badly: the element commits to a poster and paints an empty box instead of
+ * falling back to the first frame.
+ *
+ * Asking for the video asset with `format: "jpg"` makes Cloudinary render a still on
+ * first request and cache it, so there is nothing to generate at upload time and
+ * nothing to store. `start_offset: "auto"` lets Cloudinary choose the frame rather
+ * than taking t=0, because a great many videos open on a black or near-black frame
+ * and that is exactly the thumbnail you don't want.
+ *
+ * `c_limit` only ever shrinks, so a small video is not upscaled into a blurry
+ * poster. Returns null for a non-video, and callers must send null rather than the
+ * video URL — a wrong image is worse than none.
+ */
+export const videoStillUrl = (result) => {
+  if (!result?.public_id || result.resource_type !== "video") return null;
+
+  return cloudinary.url(result.public_id, {
+    resource_type: "video",
+    format: "jpg",
+    secure: true,
+    /*
+     * The SDK otherwise appends its own `?_a=<token>` analytics parameter. Harmless
+     * on a one-off delivery URL, but this one is persisted on every video message
+     * and would sit in the database forever, so it is turned off here.
+     */
+    analytics: false,
+    /*
+     * The asset's real version rather than the SDK's `v1` placeholder, so a
+     * re-upload to the same public id can't be served from a cached still.
+     */
+    version: result.version || undefined,
+    transformation: [
+      {
+        start_offset: "auto",
+        width: 640,
+        height: 640,
+        crop: "limit",
+        quality: "auto",
+      },
+    ],
+  });
+};
+
 export const uploadToCloudinary = (filePath, folder = "posts") => {
   return new Promise((resolve, reject) => {
     cloudinary.uploader.upload(

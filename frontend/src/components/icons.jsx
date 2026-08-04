@@ -2434,6 +2434,27 @@ export const Icons = {
     </svg>
   ),
 
+  /*
+   * Solid counterpart to `video` above, for badges over media.
+   *
+   * The outline version is drawn with a 2px stroke on a 24px grid; rendered at the
+   * 14px a corner badge allows, that stroke is most of the glyph and the shape
+   * closes up into a grey smudge — and it sits on video frames, which are busy and
+   * arbitrarily coloured. A filled glyph keeps its silhouette at small sizes and
+   * against any background.
+   */
+  videocam: (props) => (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+      {...props}
+    >
+      <path d="M17 10.5V7a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3.5l4 4v-11l-4 4z" />
+    </svg>
+  ),
+
   mic: (props) => (
     <svg
       xmlns="http://www.w3.org/2000/svg"

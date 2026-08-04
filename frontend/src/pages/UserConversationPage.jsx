@@ -16,8 +16,10 @@ import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { Icons } from "../components/icons";
 import SharedPostCard from "../components/Chat/SharedPostCard";
 import PollBubble from "../components/Chat/PollBubble";
-import CreatePollSheet from "../components/Chat/CreatePollSheet";
 import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
+import VoiceNoteBubble from "../components/Chat/VoiceNoteBubble";
+import ChatVideoBubble from "../components/Chat/ChatVideoBubble";
+import { downloadMedia } from "../lib/downloadMedia";
 import { lockedChatIdFromError } from "../services/chatUnlock";
 import { canEditMessage } from "../utils/messageEditing";
 import { useDebounce } from "../hooks/useDebounce";
@@ -86,118 +88,6 @@ const COMPOSER_ACCEPT = [
   "video/webm",
   "video/x-msvideo",
 ].join(",");
-
-// ── Instagram-style voice note player bubble ──────────────────────────────
-const VOICE_BUBBLE_GRADIENT = {
-  background:
-    "linear-gradient(to bottom, #C026D3, #A21CAF, #8B5CF6, #7C3AED, #5B21B6, #4F46E5, #2563EB, #1D4ED8, #C026D3, #A21CAF)",
-  backgroundAttachment: "fixed",
-};
-
-const VoiceNoteBubble = ({ item, isOwn = false, bubbleRadius = "rounded-[18px]" }) => {
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [audioDuration, setAudioDuration] = useState(item.duration || 0);
-  const audioRef = useRef(null);
-
-  // Normalise waveform to 0-1 range for 32 display bars
-  const waveformBars = useMemo(() => {
-    if (item.waveform?.length >= 10) {
-      const bars = [];
-      const step = item.waveform.length / 32;
-      for (let i = 0; i < 32; i++) {
-        const val = item.waveform[Math.floor(i * step)] || 0;
-        // backend sends 0-1 values; clamp just in case
-        bars.push(Math.min(1, Math.max(0, val)));
-      }
-      return bars;
-    }
-    return Array.from({ length: 32 }, (_, i) => 0.15 + Math.abs(Math.sin(i * 0.7 + 1)) * 0.65);
-  }, [item.waveform]);
-
-  const progress = audioDuration > 0 ? currentTime / audioDuration : 0;
-
-  const togglePlay = () => {
-    if (!audioRef.current) {
-      audioRef.current = new Audio(item.url);
-      audioRef.current.onloadedmetadata = () => {
-        if (audioRef.current) setAudioDuration(audioRef.current.duration);
-      };
-      audioRef.current.ontimeupdate = () => {
-        if (audioRef.current) setCurrentTime(audioRef.current.currentTime);
-      };
-      audioRef.current.onended = () => {
-        setIsPlaying(false);
-        setCurrentTime(0);
-      };
-    }
-    if (isPlaying) {
-      audioRef.current.pause();
-      setIsPlaying(false);
-    } else {
-      audioRef.current.play().catch(console.error);
-      setIsPlaying(true);
-    }
-  };
-
-  useEffect(() => {
-    return () => {
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current.src = "";
-        audioRef.current = null;
-      }
-    };
-  }, []);
-
-  const fmtTime = (s) => {
-    const t = Math.floor(s || 0);
-    return `${Math.floor(t / 60).toString().padStart(2, "0")}:${(t % 60).toString().padStart(2, "0")}`;
-  };
-
-  return (
-    <div
-      className={`flex items-center gap-2.5 px-3 py-[9px] min-w-[220px] max-w-[260px] ${bubbleRadius} ${
-        isOwn ? "" : "bg-[#262626]"
-      }`}
-      style={isOwn ? VOICE_BUBBLE_GRADIENT : undefined}
-    >
-      <button
-        onClick={togglePlay}
-        className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center shrink-0 hover:bg-white/30 active:scale-95 transition-all"
-      >
-        {isPlaying ? (
-          /* Pause — two thick rounded bars */
-          <svg viewBox="0 0 24 24" fill="currentColor" className="w-[18px] h-[18px] text-white">
-            <rect x="5" y="4" width="4.5" height="16" rx="2" />
-            <rect x="14.5" y="4" width="4.5" height="16" rx="2" />
-          </svg>
-        ) : (
-          /* Play — bold solid teardrop triangle */
-          <svg viewBox="0 0 24 24" fill="currentColor" className="w-[18px] h-[18px] text-white translate-x-[1px]">
-            <path d="M6.5 4.98c0-1.37 1.5-2.17 2.67-1.43l10.6 7.02c1.1.73 1.1 2.33 0 3.06L9.17 20.45C7.99 21.19 6.5 20.39 6.5 19V4.98z" />
-          </svg>
-        )}
-      </button>
-      <div className="flex flex-col gap-[5px] flex-1 min-w-0">
-        <div className="flex items-center gap-[2.5px] h-[20px]">
-          {waveformBars.map((amp, i) => (
-            <div
-              key={i}
-              className={`w-[2px] rounded-full flex-none transition-colors duration-75 ${
-                i / waveformBars.length < progress ? "bg-white" : "bg-white/30"
-              }`}
-              style={{ height: `${Math.max(3, amp * 18)}px` }}
-            />
-          ))}
-        </div>
-        <span className="text-[11px] text-white/50 leading-none tabular-nums">
-          {isPlaying || currentTime > 0 ? fmtTime(currentTime) : fmtTime(audioDuration)}
-        </span>
-      </div>
-    </div>
-  );
-};
 
 /** Pure helpers — no component state, so they live out here. */
 
@@ -667,18 +557,22 @@ const MessageBubble = React.memo(function MessageBubble({
                 );
               }
               if (item.type === "video") {
-                return (
-                  <video
-                    key={idx}
-                    src={item.url}
-                    controls
-                    className={`block max-w-[260px] max-h-[340px] w-auto h-auto ${cornerClass}`}
-                  >
-                    Your browser does not support video.
-                  </video>
-                );
+                return <ChatVideoBubble key={idx} item={item} cornerClass={cornerClass} />;
               }
-              if (item.type === "audio") {
+              /*
+               * `voice` as well as `audio`.
+               *
+               * The recorder's optimistic preview hardcodes `type: "audio"`, but the
+               * upload endpoint returns a descriptor with `type: "voice"` — see the
+               * `descriptor` in chatController's voice handler — and `voice` is a
+               * legitimate value in the Message media enum. So the clip rendered
+               * while it was uploading and then vanished the instant the real
+               * message replaced the preview: this branch didn't match, the map
+               * returned null, and because a voice note has no text the bubble is
+               * `noBg`/`bg-transparent` — not an empty grey bubble, nothing at all.
+               * Reloading didn't help, since `voice` is what's persisted.
+               */
+              if (item.type === "audio" || item.type === "voice") {
                 // Compute the same corner radii a text bubble would use
                 let vRadius = "rounded-[18px]";
                 if (!isSingle) {
@@ -711,13 +605,25 @@ const MessageBubble = React.memo(function MessageBubble({
                         {(item.fileSize / 1024 / 1024).toFixed(1)} MB
                       </p>
                     </div>
-                    <a
-                      href={item.url}
-                      download={item.filename}
+                    {/*
+                      A button that fetches, not an `<a download>`.
+                      The attribute is honoured same-origin only, and these files
+                      are on Cloudinary — so this control navigated to the document
+                      rather than saving it, dropping the user out of the thread.
+                    */}
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadMedia(item).catch((error) => {
+                          console.error("Failed to download document:", error);
+                          toast.error("Couldn't download that");
+                        })
+                      }
+                      aria-label={`Download ${item.filename || "file"}`}
                       className="opacity-50 hover:opacity-90 transition-opacity shrink-0"
                     >
                       <Icons.download className="w-4 h-4" />
-                    </a>
+                    </button>
                   </div>
                 );
               }
@@ -821,6 +727,7 @@ const UserConversationPage = () => {
       voteInPoll,
       setCurrentConversation,
       loadPreferences,
+      hydrateThreadFromCache,
     },
   } = useChat();
 
@@ -855,7 +762,6 @@ const UserConversationPage = () => {
     selectedUser && typingUsers ? typingUsers[selectedUser._id] : false;
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showGifPicker, setShowGifPicker] = useState(false);
-  const [showPollComposer, setShowPollComposer] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
@@ -1034,6 +940,23 @@ const UserConversationPage = () => {
       setBlockedByThem(false);
       setLockedChatId(null);
 
+      /*
+       * The thread from its last snapshot, painted before anything is awaited.
+       *
+       * Everything below waits on `userAPI.getProfile`, which is deliberately
+       * `bypassCache: true` — so a conversation could not show a single message
+       * until a full round trip finished, on every open, including reopening the
+       * chat you were just in. This runs alongside that request rather than
+       * before it: nothing here is awaited, the provider declines if the network
+       * has already filled the thread, and `loading` is released as soon as
+       * something is on screen so the spinner stops hiding it.
+       */
+      hydrateThreadFromCache("dm", username)
+        .then((painted) => {
+          if (painted) setLoading(false);
+        })
+        .catch(() => {});
+
       try {
         /*
          * The thread endpoint is the authority on who this is.
@@ -1168,6 +1091,7 @@ const UserConversationPage = () => {
     checkUserStatus,
     loadMessages,
     setCurrentConversation,
+    hydrateThreadFromCache,
     // Bumped by the PIN prompt once a grant exists, so the load retries.
     unlockAttempt,
   ]);
@@ -2287,6 +2211,25 @@ const UserConversationPage = () => {
       case "react":
         setReactingTo(selectedMessage._id);
         break;
+      /*
+       * Saves in place, without navigating.
+       *
+       * `downloadMedia` fetches to a blob first because the `download` attribute is
+       * ignored cross-origin, and chat media is on Cloudinary — the document
+       * bubble's plain `<a download>` has always navigated to the file instead of
+       * saving it, which on mobile means leaving the thread. Awaited so a failure
+       * can be reported rather than silently doing nothing.
+       */
+      case "download":
+        try {
+          await Promise.all(
+            (selectedMessage.media || []).map((item) => downloadMedia(item))
+          );
+        } catch (error) {
+          console.error("Failed to download media:", error);
+          toast.error("Couldn't download that");
+        }
+        break;
       case "pin":
         await handlePinMessage(selectedMessage._id, selectedMessage.isPinned);
         break;
@@ -3041,6 +2984,20 @@ const UserConversationPage = () => {
           <span>Forward</span>
           <Icons.forward className="w-4 h-4" />
         </DropdownMenuItem>
+        {/*
+          Only on a message that has something to save, and not on a tombstone —
+          an unsent message's media is gone from the CDN, so the item would be an
+          offer to download a 404.
+        */}
+        {selectedMessage?.media?.length > 0 && !selectedMessage?.isDeleted && (
+          <DropdownMenuItem
+            onClick={() => handleContextMenuAction("download")}
+            className="flex justify-between items-center p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
+          >
+            <span>{selectedMessage.media.length > 1 ? "Download all" : "Download"}</span>
+            <Icons.download className="w-4 h-4" />
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem
           onClick={() => handleContextMenuAction("pin")}
           className="flex justify-between items-center p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
@@ -3293,7 +3250,14 @@ const UserConversationPage = () => {
         aria-label={`Conversation with ${selectedUser?.name || selectedUser?.username || username}`}
         className="flex-1 min-h-0 overflow-y-auto custom-scrollbar"
       >
-        {loading ? (
+        {/*
+          The spinner only when there is nothing to show. `loading` covers the
+          whole of initChat — profile, thread, pinned messages, presence — so
+          gating on it alone meant a thread warm-started from cache was hidden
+          behind a spinner until every one of those finished, which defeats the
+          point of having the snapshot.
+        */}
+        {loading && messages.length === 0 ? (
           <div className="flex justify-center items-center min-h-[200px]">
             <Icons.spinner className="animate-spin w-8 h-8 text-neutral-400" />
           </div>
@@ -3790,18 +3754,14 @@ const UserConversationPage = () => {
                   <Icons.gif className="w-6 h-6" />
                 </button>
                 {/*
-                  The only way to create a poll. The endpoint and the socket
-                  vote handler have both existed and been permission-gated for
-                  a while with nothing on the client able to reach them.
+                  No poll composer here: a poll is a group instrument. Between two
+                  people it collapses into a question you could just ask, and the
+                  anonymous-vote setting is meaningless at n=1 — whoever answers is
+                  identifiable by elimination, so "anonymous" would be a promise the
+                  shape of the conversation can't keep. The button lives on
+                  GroupChatPage only. PollBubble stays wired up below so DM polls
+                  created before this still render and remain votable.
                 */}
-                <button
-                  onClick={() => setShowPollComposer(true)}
-                  className="text-neutral-400 hover:text-white p-1.5 sm:p-2 transition-colors disabled:opacity-50"
-                  disabled={isSending || blocked}
-                  aria-label="Poll"
-                >
-                  <Icons.poll className="w-6 h-6" />
-                </button>
               </div>
             )}
           </div>
@@ -3810,13 +3770,6 @@ const UserConversationPage = () => {
             <GifPicker
               onSelect={handleGifSelect}
               onClose={() => setShowGifPicker(false)}
-            />
-          )}
-
-          {showPollComposer && selectedUser?._id && (
-            <CreatePollSheet
-              receiverId={selectedUser._id}
-              onClose={() => setShowPollComposer(false)}
             />
           )}
           </>

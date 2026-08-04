@@ -5,6 +5,39 @@ import { useSocket } from "./useSocket";
 import { chatAPI } from "../services/api";
 import { ChatContext } from "./ChatContext";
 import { UserContext } from "./UserContext";
+import {
+  getCachedChatList,
+  setCachedChatList,
+  getCachedThread,
+  setCachedThread,
+} from "../utils/chatCache";
+
+/*
+ * Which cached list a set of `GET /chats` params belongs to.
+ *
+ * The list is refetched per tab with server-side filters, so one cache entry per
+ * account would have the Archived tab's rows warming the All tab. A search is
+ * never cached: the results are transient and there is no tab to come back to.
+ */
+const listCacheKey = (params = {}) => {
+  if (params.search) return null;
+  const view = params.view || "all";
+  const archived = params.archived === "true" ? "archived" : "active";
+  return params.categoryId
+    ? `${view}:${params.categoryId}:${archived}`
+    : `${view}:${archived}`;
+};
+
+/*
+ * Thread cache keys.
+ *
+ * A DM thread is addressed by username everywhere on the client — that is what the
+ * route carries and what `getMessages` takes — so it is keyed by username here
+ * too, lowercased because usernames are case-insensitive and `/Alice` and `/alice`
+ * are one conversation. Groups are keyed by id.
+ */
+const dmThreadCacheKey = (username) => `dm:${String(username || "").toLowerCase()}`;
+const groupThreadCacheKey = (groupId) => `group:${String(groupId || "")}`;
 
 /*
  * What to show a user when a request fails.
@@ -184,7 +217,9 @@ function chatReducer(state, action) {
           ...state.unreadCounts,
           ...Object.fromEntries(action.payload.map((c) => [c.id, c.unreadCount || 0])),
         },
-        listLoading: false,
+        // `keepLoading` is the warm-start path: rows are on screen but the request
+        // that will replace them is still in flight.
+        listLoading: Boolean(action.keepLoading),
         listLoadingMore: false,
         listError: null,
         listIsUnfiltered: action.isUnfiltered !== false,
@@ -250,8 +285,19 @@ function chatReducer(state, action) {
          * the peer's id only *after* loading the thread — when the profile
          * endpoint 404s because that person blocked you — where clearing would
          * throw away the messages it just fetched.
+         *
+         * Re-selecting the conversation already open also keeps them. That isn't
+         * a switch, so there is no previous thread to avoid flashing — and the
+         * warm-start path depends on it: the cache sets the conversation and its
+         * messages before the profile request resolves, and initChat then sets
+         * the same id again from the response. Clearing there would throw away
+         * the cached thread a moment after painting it.
          */
-        messages: action.keepMessages ? state.messages : [],
+        messages:
+          action.keepMessages ||
+          (action.payload && action.payload === state.currentConversation)
+            ? state.messages
+            : [],
         replyMessage: null,
       };
     }
@@ -609,6 +655,28 @@ export function ChatProvider({ children }) {
    * a re-render on every load would be pointless churn.
    */
   const lastListParamsRef = React.useRef({});
+
+  /*
+   * The viewer's id, for scoping cache keys.
+   *
+   * Written during render for the same reason as socketRef: `actions` is built once
+   * with `[]` deps, so it can't close over `userAuth`. Every cached record is keyed
+   * by account — two people using one browser must not warm-start into each
+   * other's threads.
+   */
+  const viewerIdRef = React.useRef(null);
+  viewerIdRef.current = userAuth?.token ? userAuth?.id || userAuth?._id || null : null;
+
+  /*
+   * Which thread the cache-persisting effect below should write to, and which
+   * cached list the same applies to.
+   *
+   * Set by whichever loader ran last rather than derived from
+   * `state.currentConversation`, because that holds a bare user/group id and
+   * nothing on it says which of the two it is.
+   */
+  const activeThreadCacheKeyRef = React.useRef(null);
+  const listCacheKeyRef = React.useRef(null);
 
   // Socket event handlers
   useEffect(() => {
@@ -978,23 +1046,81 @@ export function ChatProvider({ children }) {
 
   const actions = React.useMemo(
     () => ({
+      /*
+       * The chat list, from cache immediately and from the network always.
+       *
+       * The list used to open on a spinner every time, including when the rows were
+       * unchanged from a moment ago — `GET /chats` is `no-store` and excluded from
+       * the axios cache, correctly, so there was nothing to render until it
+       * answered. This paints the last known rows first and then replaces them with
+       * the response. The request is started *before* the cache is read so a slow
+       * IndexedDB open can never delay the network, and the cached rows are dropped
+       * if the response has already landed — repainting stale rows over fresh ones
+       * would be a visible step backwards.
+       */
       loadConversations: async (params = {}) => {
+        // Without the cursor: this is always the first page. A caller passing one would
+        // make the "fresh load" path silently continue an older query.
+        const { cursor: _ignored, ...firstPage } = params;
+        lastListParamsRef.current = firstPage;
+        // A view or a search means this is a subset of the user's chats.
+        const isUnfiltered =
+          !firstPage.search && (!firstPage.view || firstPage.view === "all");
+
+        const viewerId = viewerIdRef.current;
+        const cacheKey = listCacheKey(firstPage);
+        listCacheKeyRef.current = cacheKey;
+
+        dispatch({ type: "SET_LIST_LOADING", payload: true });
+
+        const request = chatAPI.getConversations(firstPage);
+        let settled = false;
+        // Attached before the await below so the flag is set the moment the
+        // response arrives, whichever of the two finishes first.
+        request.then(
+          () => {
+            settled = true;
+          },
+          () => {
+            settled = true;
+          }
+        );
+
+        if (viewerId && cacheKey) {
+          try {
+            const cached = await getCachedChatList(viewerId, cacheKey);
+            if (cached?.chats?.length && !settled) {
+              dispatch({
+                type: "SET_CONVERSATIONS",
+                payload: cached.chats,
+                pageInfo: cached.pageInfo,
+                isUnfiltered,
+                // The request is still out; the list must keep saying so, or the
+                // spinner and the sentinel both read as "finished".
+                keepLoading: true,
+              });
+            }
+          } catch (error) {
+            console.error("Failed to hydrate cached chat list:", error);
+          }
+        }
+
         try {
-          dispatch({ type: "SET_LIST_LOADING", payload: true });
-          // Without the cursor: this is always the first page. A caller passing one would
-          // make the "fresh load" path silently continue an older query.
-          const { cursor: _ignored, ...firstPage } = params;
-          lastListParamsRef.current = firstPage;
-          const response = await chatAPI.getConversations(firstPage);
-          // A view or a search means this is a subset of the user's chats.
-          const isUnfiltered =
-            !firstPage.search && (!firstPage.view || firstPage.view === "all");
+          const response = await request;
           dispatch({
             type: "SET_CONVERSATIONS",
             payload: response.chats,
             pageInfo: response.pageInfo,
             isUnfiltered,
           });
+          if (viewerId && cacheKey) {
+            setCachedChatList(viewerId, cacheKey, {
+              chats: response.chats,
+              pageInfo: response.pageInfo,
+            }).catch((error) => {
+              console.error("Failed to cache chat list:", error);
+            });
+          }
         } catch (error) {
           dispatch({ type: "SET_LIST_ERROR", payload: readableError(error) });
         }
@@ -1128,6 +1254,8 @@ export function ChatProvider({ children }) {
        *   can't be attached by an interceptor that only sees the username.
        */
       loadMessages: async (conversationId, cursor = null, chatId = undefined) => {
+        const threadKey = dmThreadCacheKey(conversationId);
+        if (!cursor) activeThreadCacheKeyRef.current = threadKey;
         try {
           dispatch({ type: "SET_THREAD_LOADING", payload: true });
           const response = await chatAPI.getMessages(
@@ -1144,6 +1272,26 @@ export function ChatProvider({ children }) {
               isPagination: !!cursor,
             },
           });
+
+          /*
+           * Written on the first page only, and written even when it is empty —
+           * an emptied thread has to overwrite its snapshot or the cache would
+           * keep warm-starting into messages the server no longer has. Older
+           * pages are left out on purpose: the cap keeps the newest tail, and
+           * writing a prepended page would just churn the same records.
+           */
+          if (!cursor && viewerIdRef.current) {
+            setCachedThread(viewerIdRef.current, threadKey, {
+              messages: response.messages,
+              hasMore: response.pageInfo?.hasNextPage ?? response.hasMore,
+              // Read from state rather than the response: initChat sets the
+              // conversation before calling this, and `response.conversation` is a
+              // conversation key, not the peer's user id.
+              peerId: stateRef.current.currentConversation,
+            }).catch((error) => {
+              console.error("Failed to cache thread:", error);
+            });
+          }
 
           // How far they've read, so Seen is right on a cold load and not only
           // after a live conversationRead event arrives.
@@ -1163,6 +1311,8 @@ export function ChatProvider({ children }) {
       },
 
       loadGroupMessages: async (groupId, cursor = null) => {
+        const threadKey = groupThreadCacheKey(groupId);
+        if (!cursor) activeThreadCacheKeyRef.current = threadKey;
         try {
           dispatch({ type: "SET_THREAD_LOADING", payload: true });
           const response = await chatAPI.getGroupMessages(groupId, { cursor });
@@ -1175,11 +1325,79 @@ export function ChatProvider({ children }) {
               isPagination: !!cursor,
             },
           });
+
+          // First page only, same contract as the DM loader above.
+          if (!cursor && viewerIdRef.current) {
+            setCachedThread(viewerIdRef.current, threadKey, {
+              messages: response.messages,
+              hasMore: response.pageInfo?.hasNextPage ?? response.hasMore,
+              peerId: groupId,
+            }).catch((error) => {
+              console.error("Failed to cache group thread:", error);
+            });
+          }
           return response;
         } catch (error) {
           // Same contract as loadMessages: the caller reports it.
           dispatch({ type: "SET_THREAD_LOADING", payload: false });
           throw error;
+        }
+      },
+
+      /**
+       * Paint a thread from its last snapshot, before the network is asked anything.
+       *
+       * Called at the very top of a conversation page's init, in parallel with the
+       * profile/group request that init otherwise waits on — that request is
+       * `bypassCache: true` by design, so without this the thread cannot render
+       * until a full round trip completes, which is the "opens on a spinner every
+       * time" the cache is here to remove.
+       *
+       * Declines to do anything if the thread already has messages: the network may
+       * have won the race, and painting a snapshot over a fresh thread would be a
+       * visible step backwards.
+       *
+       * @param {"dm"|"group"} kind
+       * @param {string} identifier Username for a DM, group id for a group.
+       * @returns {Promise<boolean>} Whether anything was painted.
+       */
+      hydrateThreadFromCache: async (kind, identifier) => {
+        const viewerId = viewerIdRef.current;
+        if (!viewerId || !identifier) return false;
+
+        const threadKey =
+          kind === "group" ? groupThreadCacheKey(identifier) : dmThreadCacheKey(identifier);
+
+        try {
+          const cached = await getCachedThread(viewerId, threadKey);
+          if (!cached?.messages?.length) return false;
+          if (stateRef.current.messages.length > 0) return false;
+
+          activeThreadCacheKeyRef.current = threadKey;
+
+          /*
+           * The conversation is marked active first, for two reasons: a live message
+           * arriving during the warm window is only added to the open thread by
+           * ADD_MESSAGE_IF_ACTIVE, and setting it here means init's own
+           * `setCurrentConversation` with the same id is a no-op that leaves these
+           * messages alone rather than clearing them.
+           */
+          if (cached.peerId) {
+            dispatch({ type: "SET_CURRENT_CONVERSATION", payload: cached.peerId });
+          }
+
+          dispatch({
+            type: "SET_MESSAGES",
+            payload: {
+              messages: cached.messages,
+              hasMore: cached.hasMore,
+              isPagination: false,
+            },
+          });
+          return true;
+        } catch (error) {
+          console.error("Failed to hydrate cached thread:", error);
+          return false;
         }
       },
 
@@ -1422,6 +1640,66 @@ export function ChatProvider({ children }) {
     preferencesAccountRef.current = id;
     actions.loadPreferences().catch(() => {});
   }, [userAuth?.token, userAuth?.id, userAuth?._id, actions]);
+
+  /*
+   * Keep the snapshots current as state changes, rather than only at fetch time.
+   *
+   * Watching the reduced state instead of instrumenting each mutation is what makes
+   * this cheap to be correct: a live `receiveMessage`, an edit, a reaction, an
+   * unsend and an optimistic send all land in `state.messages` or
+   * `state.conversations`, so all of them are picked up here without a write at
+   * every call site — and none can be forgotten when a new one is added.
+   *
+   * Debounced because a burst (a page of reactions, a rapid exchange) would
+   * otherwise open a transaction per change.
+   */
+  useEffect(() => {
+    const viewerId = viewerIdRef.current;
+    const threadKey = activeThreadCacheKeyRef.current;
+    /*
+     * An empty thread is not persisted here. Switching conversations clears
+     * `messages` before the next thread loads, and writing that would blank the
+     * snapshot of the chat we just left. A genuinely emptied thread is still
+     * overwritten — by the unconditional write in the loaders.
+     */
+    if (!viewerId || !threadKey || state.messages.length === 0) return undefined;
+
+    const timer = setTimeout(() => {
+      setCachedThread(viewerId, threadKey, {
+        messages: state.messages,
+        hasMore: state.hasMoreMessages,
+        peerId: state.currentConversation,
+      }).catch((error) => {
+        console.error("Failed to update cached thread:", error);
+      });
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [state.messages, state.hasMoreMessages, state.currentConversation]);
+
+  useEffect(() => {
+    const viewerId = viewerIdRef.current;
+    const cacheKey = listCacheKeyRef.current;
+    /*
+     * Not while a fresh load is in flight. Switching tabs points the key at the new
+     * view immediately, but `conversations` still holds the old view's rows until
+     * the response lands — and a live message arriving in that window mutates them,
+     * which would otherwise write the previous tab's rows under the new tab's key.
+     */
+    if (!viewerId || !cacheKey || state.listLoading) return undefined;
+    if (state.conversations.length === 0) return undefined;
+
+    const timer = setTimeout(() => {
+      setCachedChatList(viewerId, cacheKey, {
+        chats: state.conversations,
+        pageInfo: state.listPageInfo,
+      }).catch((error) => {
+        console.error("Failed to update cached chat list:", error);
+      });
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [state.conversations, state.listPageInfo, state.listLoading]);
 
   const value = React.useMemo(
     () => ({

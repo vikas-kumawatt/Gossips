@@ -8,7 +8,7 @@ import UserRelation from "../models/UserRelation.js";
 import MessageReaction from "../models/MessageReaction.js";
 import ConversationRead from "../models/ConversationRead.js";
 import Follow from "../models/Follow.js";
-import { deleteFromCloudinary, uploadToCloudinary } from "../config/cloudinary.js";
+import { deleteFromCloudinary, uploadToCloudinary, videoStillUrl } from "../config/cloudinary.js";
 import { CHAT_UPLOAD_TYPES } from "../config/multerConfig.js";
 import { getIO } from "../config/socket.js";
 import { v4 as uuidv4 } from "uuid";
@@ -2623,8 +2623,29 @@ export const uploadChatMedia = async (req, res) => {
     if (req.file.mimetype.startsWith("audio/")) fileType = "audio";
 
     const result = await uploadToCloudinary(req.file.path, "chat_media");
+
+    /*
+     * A video's thumbnail is a generated still, never the video URL.
+     *
+     * Cloudinary returns no `thumbnail_url` for a video, so the `|| secure_url`
+     * fallback made `thumbnail` the .mp4 for every chat video ever uploaded. That
+     * is not merely useless, it is actively harmful to any consumer that expects an
+     * image: a `<video poster>` pointed at it downloads a 200, fails to decode it,
+     * and renders an empty box rather than falling back to the first frame — which
+     * is precisely how videos stopped appearing in the thread.
+     *
+     * `videoStillUrl` returns null if it can't build one, and null is what gets
+     * stored in that case. The client treats a missing thumbnail as "paint the
+     * first frame yourself", which is a good outcome; it cannot do anything sensible
+     * with a thumbnail that lies.
+     */
+    const thumbnail =
+      fileType === "video"
+        ? videoStillUrl(result)
+        : result.thumbnail_url || result.secure_url;
+
     const descriptor = {
-      url: result.secure_url, thumbnail: result.thumbnail_url || result.secure_url,
+      url: result.secure_url, thumbnail: thumbnail || null,
       fileSize: req.file.size, type: fileType, filename: req.file.originalname,
       duration: result.duration || null,
       dimensions: result.width && result.height ? { width: result.width, height: result.height } : null,
@@ -2769,6 +2790,21 @@ export const createPoll = async (req, res) => {
     }
     if (Boolean(receiverId) === Boolean(groupId)) {
       return res.status(400).json({ error: "Pick either a person or a group for this poll" });
+    }
+
+    /*
+     * Polls are a group feature. Between two people a poll collapses into a
+     * question you could just ask, and `settings.anonymous` becomes a promise the
+     * conversation can't keep — with one possible voter, any vote identifies its
+     * voter by elimination. The DM composer no longer offers the button; this is
+     * the matching server rule, so removing the UI isn't the only thing standing
+     * between a caller and a DM poll.
+     *
+     * Existing DM polls are untouched and stay votable: the socket vote handler
+     * gates on `isMessageParticipant`, not on this route.
+     */
+    if (receiverId) {
+      return res.status(400).json({ error: "Polls are only available in group chats" });
     }
 
     // Resolved before anything is written, and the conversation key is built

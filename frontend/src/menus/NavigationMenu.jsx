@@ -18,6 +18,7 @@ import { authAPI } from "../services/api";
 import { getAccounts, removeAccount } from "../lib/accounts";
 import { clearCachedRequestsByPrefix } from "../utils/requestCache";
 import { deleteFeedCacheForUser } from "../utils/feedCache";
+import { deleteChatCacheForUser } from "../utils/chatCache";
 import { clearAllUnlockGrants } from "../services/chatUnlock";
 import { disablePushNotifications } from "../services/pushNotifications";
 
@@ -74,6 +75,9 @@ export default function NavigationMenu() {
       await Promise.allSettled([
         clearCachedRequestsByPrefix(`v1::${accountId}::`),
         deleteFeedCacheForUser(accountId),
+        // The chat list and thread snapshots, which is what makes the
+        // "and conversations" above actually true.
+        deleteChatCacheForUser(accountId),
       ]);
     }
     /*

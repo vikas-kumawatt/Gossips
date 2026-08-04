@@ -18,6 +18,10 @@ import PollBubble from "../components/Chat/PollBubble";
 import CreatePollSheet from "../components/Chat/CreatePollSheet";
 import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
 import ReconnectBanner from "../components/Chat/ReconnectBanner";
+import VoiceNoteBubble from "../components/Chat/VoiceNoteBubble";
+import ChatVideoBubble from "../components/Chat/ChatVideoBubble";
+import LongPressArea from "../components/Chat/LongPressArea";
+import { downloadMedia } from "../lib/downloadMedia";
 import { lockedChatIdFromError } from "../services/chatUnlock";
 import { canEditMessage } from "../utils/messageEditing";
 import EmojiPicker from "emoji-picker-react";
@@ -50,6 +54,7 @@ const GroupChatPage = () => {
       voteInPoll,
       setCurrentConversation,
       markConversationAsRead,
+      hydrateThreadFromCache,
     },
   } = useChat();
 
@@ -126,6 +131,18 @@ const GroupChatPage = () => {
       setLoading(true);
       setError(null);
 
+      /*
+       * The thread from its last snapshot, alongside the request rather than
+       * before it — nothing here is awaited, so the network is never delayed, and
+       * the provider declines if the fetch has already filled the thread. `loading`
+       * is released as soon as something is painted so the spinner stops hiding it.
+       */
+      hydrateThreadFromCache("group", groupId)
+        .then((painted) => {
+          if (painted) setLoading(false);
+        })
+        .catch(() => {});
+
       try {
         /*
          * Set the conversation BEFORE loading, not after.
@@ -174,6 +191,7 @@ const GroupChatPage = () => {
     userAuth.token,
     loadGroupMessages,
     setCurrentConversation,
+    hydrateThreadFromCache,
     // Bumped once the PIN prompt has stored a grant, so the load retries.
     unlockAttempt,
   ]);
@@ -510,6 +528,26 @@ const GroupChatPage = () => {
   const isOwnMessage = (msg) =>
     msg?.sender?._id === userAuth?.id || msg?.sender === userAuth?.id;
 
+  /*
+   * Anchors the menu at the press, falling back to the bubble.
+   *
+   * The inline handler this replaces read `e.clientX/clientY` straight off the
+   * event, which is 0,0 for a keyboard-invoked menu — the same bug the DM page
+   * already fixed. A long press arrives as a pointer event and does carry
+   * coordinates.
+   */
+  const handleMessageContextMenu = (msg, event) => {
+    event.preventDefault?.();
+    event.stopPropagation?.();
+
+    setSelectedMessage(msg);
+
+    const rect = event.currentTarget?.getBoundingClientRect?.();
+    const x = Number.isFinite(event.clientX) && event.clientX ? event.clientX : rect?.left ?? 0;
+    const y = Number.isFinite(event.clientY) && event.clientY ? event.clientY : rect?.bottom ?? 0;
+    setContextMenu({ x, y });
+  };
+
   const handleContextMenuAction = async (action) => {
     if (!selectedMessage) return;
     // These reject now that the provider stopped swallowing errors, and an
@@ -547,6 +585,13 @@ const GroupChatPage = () => {
         break;
       case "copy":
         navigator.clipboard.writeText(selectedMessage.content);
+        break;
+      // Fetched to a blob rather than linked, because `download` on an anchor is
+      // ignored cross-origin and this media lives on Cloudinary.
+      case "download":
+        await attempt("download", () =>
+          Promise.all((selectedMessage.media || []).map((item) => downloadMedia(item)))
+        );
         break;
       case "report":
         openReport({
@@ -762,15 +807,11 @@ const GroupChatPage = () => {
                   />
                 </div>
               )}
-              <div
+              <LongPressArea
                 className={`max-w-[70%] rounded-2xl px-4 py-2 ${
                   isOwn ? "bg-blue-600 text-white" : "bg-neutral-800 text-white"
                 } ${msg.isDeleted ? "italic opacity-70" : ""}`}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setSelectedMessage(msg);
-                  setContextMenu({ x: e.clientX, y: e.clientY });
-                }}
+                onTrigger={(e) => handleMessageContextMenu(msg, e)}
               >
                 {!isOwn &&
                   (index === 0 ||
@@ -809,20 +850,84 @@ const GroupChatPage = () => {
                     </div>
                   )}
 
-                {msg.media && msg.media.length > 0 && (
-                  <div className="mb-2">
-                    {msg.media.map((m, i) => (
-                      <div key={i} className="rounded overflow-hidden">
-                        {m.type === "image" && (
-                          <img
-                            src={m.url}
-                            alt="media"
-                            className="max-w-full h-auto"
+                {/*
+                  Every media type, not just images.
+
+                  This branched on `type === "image"` alone and left a placeholder
+                  comment where the rest should have been, so a group video, GIF,
+                  voice note or document rendered as an empty rounded box. Voice was
+                  the worst of it: the group composer has always been able to record
+                  and upload one, so the message was stored, delivered, counted in
+                  the unread badge, previewed in the chat list as "Sent a voice
+                  message" — and displayed as nothing at all.
+                */}
+                {msg.media && msg.media.length > 0 && !msg.isDeleted && (
+                  <div className="mb-2 flex flex-col gap-1 w-fit max-w-full">
+                    {msg.media.map((m, i) => {
+                      if (m.type === "video") {
+                        return <ChatVideoBubble key={i} item={m} cornerClass="rounded-xl" />;
+                      }
+                      // `voice` is what the upload endpoint returns and what the
+                      // Message media enum persists; `audio` is what the optimistic
+                      // preview uses. Both are voice notes.
+                      if (m.type === "audio" || m.type === "voice") {
+                        return (
+                          <VoiceNoteBubble
+                            key={i}
+                            item={m}
+                            isOwn={isOwn}
+                            bubbleRadius="rounded-xl"
                           />
-                        )}
-                        {/* Add other media types handling */}
-                      </div>
-                    ))}
+                        );
+                      }
+                      if (m.type === "image" || m.type === "gif" || m.type === "sticker") {
+                        return (
+                          <img
+                            key={i}
+                            src={m.url}
+                            alt={m.type === "gif" ? "GIF" : "media"}
+                            width={m.dimensions?.width || undefined}
+                            height={m.dimensions?.height || undefined}
+                            className="block max-w-full h-auto rounded-xl"
+                            loading="lazy"
+                          />
+                        );
+                      }
+                      if (m.type === "document") {
+                        return (
+                          <div
+                            key={i}
+                            className="flex items-center gap-2.5 min-w-[190px] max-w-[260px] py-0.5"
+                          >
+                            <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+                              <Icons.file className="w-5 h-5 text-white" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[13px] font-medium truncate">{m.filename}</p>
+                              {m.fileSize > 0 && (
+                                <p className="text-[11px] text-white/40">
+                                  {(m.fileSize / 1024 / 1024).toFixed(1)} MB
+                                </p>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                downloadMedia(m).catch((err) => {
+                                  console.error("Failed to download document:", err);
+                                  setError("Couldn't download that.");
+                                })
+                              }
+                              aria-label={`Download ${m.filename || "file"}`}
+                              className="opacity-50 hover:opacity-90 transition-opacity shrink-0"
+                            >
+                              <Icons.download className="w-4 h-4" />
+                            </button>
+                          </div>
+                        );
+                      }
+                      return null;
+                    })}
                   </div>
                 )}
 
@@ -847,7 +952,7 @@ const GroupChatPage = () => {
                     })}
                   </span>
                 </div>
-              </div>
+              </LongPressArea>
             </div>
           );
         })}
@@ -983,6 +1088,17 @@ const GroupChatPage = () => {
                 <Icons.trash className="w-4 h-4" /> Unsend
               </button>
             </>
+          )}
+          {/* Only where there is something to save, and never on a tombstone —
+              an unsent message's media is gone from the CDN. */}
+          {selectedMessage?.media?.length > 0 && !selectedMessage?.isDeleted && (
+            <button
+              onClick={() => handleContextMenuAction("download")}
+              className="w-full text-left px-4 py-2 hover:bg-neutral-700 flex items-center gap-2"
+            >
+              <Icons.download className="w-4 h-4" />{" "}
+              {selectedMessage.media.length > 1 ? "Download all" : "Download"}
+            </button>
           )}
           <button
             onClick={() => handleContextMenuAction("delete")}

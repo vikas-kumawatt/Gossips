@@ -1,0 +1,12 @@
+{
+  "name": "gossips",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Root runner for Gossips. The frontend (Vite) and server (Express) keep their own package.json and their own dependencies; this package only starts them together.",
+  "scripts": {
+    "dev": "concurrently -k -n server,web -c cyan,magenta \"npm --prefix server run dev\" \"npm --prefix frontend run dev\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
