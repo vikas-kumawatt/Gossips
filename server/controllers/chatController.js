@@ -2574,6 +2574,20 @@ const pinnedMessagesFor = async (req, res, scope) => {
 export const getPinnedMessages = (req, res) => pinnedMessagesFor(req, res, "dm");
 export const getGroupPinnedMessages = (req, res) => pinnedMessagesFor(req, res, "group");
 
+/*
+ * What the shared-media gallery is for: pictures and video.
+ *
+ * With no `type` this returned *every* attachment, so the grid was a mix of photos,
+ * videos, GIF reactions, voice notes and documents — and a voice note has no visual
+ * form at all, so it rendered as a blank tile that opened a blank lightbox. A gallery
+ * is a visual index; the things that aren't images don't belong in it and are still
+ * reachable in the thread where they were sent.
+ *
+ * Also the allow-list for an explicit `?type=`, so a caller can't ask for the
+ * categories the grid can't draw.
+ */
+const GALLERY_MEDIA_TYPES = ["image", "video"];
+
 export const getConversationMedia = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -2581,7 +2595,7 @@ export const getConversationMedia = async (req, res) => {
     const { type, limit = 50, cursor } = req.query;
     const limitNum = parseCursorLimit(limit, 50);
     const parsedCursor = decodeCursor(cursor);
-    const typeFilter = typeof type === "string" && type ? type : null;
+    const typeFilter = GALLERY_MEDIA_TYPES.includes(type) ? type : null;
 
     const receiver = await User.findOne({ username }).select("_id").lean();
     if (!receiver) return res.status(404).json({ error: "User not found" });
@@ -2596,7 +2610,9 @@ export const getConversationMedia = async (req, res) => {
         "media.0": { $exists: true },
         isDeleted: { $ne: true },
         ...notDeletedForUser(userId),
-        ...(typeFilter ? { "media.type": typeFilter } : {}),
+        // Narrowed to the gallery's types even with no `type` asked for, so a
+        // conversation of voice notes doesn't page through empty tiles.
+        "media.type": typeFilter || { $in: GALLERY_MEDIA_TYPES },
       },
       parsedCursor
     );
@@ -2623,7 +2639,9 @@ export const getConversationMedia = async (req, res) => {
     const { items: pagedMessages, pageInfo } = buildCursorPageInfo(messages, limitNum);
     const media = pagedMessages.flatMap((msg) =>
       (msg.media || [])
-        .filter((m) => !typeFilter || m.type === typeFilter)
+        .filter((m) =>
+          typeFilter ? m.type === typeFilter : GALLERY_MEDIA_TYPES.includes(m.type)
+        )
         .map((m) => ({ ...m, messageId: msg._id, timestamp: msg.createdAt, sender: msg.sender }))
     );
 

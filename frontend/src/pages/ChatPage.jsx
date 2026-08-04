@@ -1877,13 +1877,13 @@ const ChatPage = ({ embedded = false }) => {
           <input
             ref={searchInputRef}
             aria-label="Search chats and users"
-            className="border border-neutral-800 rounded-xl outline-0 flex items-center justify-center w-full mx-auto py-3 sm:py-5 px-12 mt-4 bg-neutral-950 text-white placeholder-neutral-500"
+            className="border border-neutral-800 rounded-xl outline-0 flex items-center justify-center w-full mx-auto py-3 px-12 mt-1 bg-neutral-950 text-white placeholder-neutral-500"
             placeholder="Search users to chat"
             value={searchQuery}
             onChange={handleSearchChange}
           />
           <Icons.search
-            className="absolute left-0 ml-4 mt-4 w-5 h-5 "
+            className="absolute left-0 ml-4 mt-1 w-5 h-5 "
             strokeColor="#404040"
           />
           {/*
@@ -1892,15 +1892,22 @@ const ChatPage = ({ embedded = false }) => {
             own affordance wasn't there to fall back on. Sized to 44px, and it takes
             the place of the spinner rather than sitting beside it.
           */}
+          {/*
+            `mt-1`, matching the input and the search icon.
+            These two share one slot — the spinner while a query is in flight, the
+            clear button otherwise — so they have to agree, or the control jumps as a
+            search finishes. Both were `mt-4`, which lined up with the input's old
+            `sm:py-5`; with the shorter input they sat below centre.
+          */}
           {searchLoading ? (
-            <Icons.spinner className="absolute right-0 mr-4 mt-4 w-5 h-5 animate-spin text-neutral-500" />
+            <Icons.spinner className="absolute right-0 mr-4 mt-1 w-5 h-5 animate-spin text-neutral-500" />
           ) : (
             searchQuery !== "" && (
               <button
                 type="button"
                 onClick={clearSearch}
                 aria-label="Clear search"
-                className="absolute right-0 mr-1 mt-4 w-11 h-11 flex items-center justify-center text-neutral-500 hover:text-white transition-colors"
+                className="absolute right-0 mr-1 mt-1 w-11 h-11 flex items-center justify-center text-neutral-500 hover:text-white transition-colors"
               >
                 <Icons.close className="w-4 h-4" />
               </button>
@@ -1909,7 +1916,7 @@ const ChatPage = ({ embedded = false }) => {
         </div>
 
         {/* Instagram-like rounded DM filters */}
-        <div className="flex items-center gap-2 mt-6 overflow-x-auto scrollbar-hide pb-1">
+        <div className="flex items-center gap-2 mt-4 overflow-x-auto scrollbar-hide">
           <div ref={filterTriggerRef} className="relative shrink-0">
             <button
               ref={filterButtonRef}

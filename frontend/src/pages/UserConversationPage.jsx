@@ -19,6 +19,7 @@ import PollBubble from "../components/Chat/PollBubble";
 import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
 import VoiceNoteBubble from "../components/Chat/VoiceNoteBubble";
 import ChatVideoBubble from "../components/Chat/ChatVideoBubble";
+import VideoPlayerOverlay from "../components/Chat/VideoPlayerOverlay";
 import { downloadMedia } from "../lib/downloadMedia";
 import { lockedChatIdFromError } from "../services/chatUnlock";
 import { canEditMessage } from "../utils/messageEditing";
@@ -4054,11 +4055,25 @@ const UserConversationPage = () => {
         the 44px minimum. `aria-modal` plus a focus trap is what makes "modal" true
         rather than merely visual.
       */}
-      {bigPreviewMedia && (
+      {/*
+        A video goes to the app's own player, not this lightbox.
+        This rendered `<video controls autoPlay>`, so opening a video here brought back
+        the browser's control strip and its Download / Picture-in-Picture kebab — the
+        exact chrome the message bubble was changed to avoid. The lightbox below is now
+        only ever an image.
+      */}
+      {bigPreviewMedia && bigPreviewMedia.type !== "image" && (
+        <VideoPlayerOverlay
+          src={bigPreviewMedia.url}
+          onClose={() => setBigPreviewMedia(null)}
+        />
+      )}
+
+      {bigPreviewMedia?.type === "image" && (
         <div
           role="dialog"
           aria-modal="true"
-          aria-label={bigPreviewMedia.type === "image" ? "Image preview" : "Video preview"}
+          aria-label="Image preview"
           ref={lightboxRef}
           tabIndex={-1}
           className="fixed inset-0 bg-black/90 flex items-center justify-center z-50"
@@ -4070,13 +4085,13 @@ const UserConversationPage = () => {
               return;
             }
             /*
-             * The trap. Two focusable elements at most (close, and a video's
-             * controls), so cycling between the first and last is the whole of it —
-             * without this, Tab left the dialog and walked the thread underneath.
+             * The trap. One focusable element now that video has its own player, so
+             * cycling between the first and last is the whole of it — without this,
+             * Tab left the dialog and walked the thread underneath.
              */
             if (event.key !== "Tab") return;
             const focusable = lightboxRef.current?.querySelectorAll(
-              "button, video[controls], [href], [tabindex]:not([tabindex='-1'])"
+              "button, [href], [tabindex]:not([tabindex='-1'])"
             );
             if (!focusable?.length) return;
             const first = focusable[0];
@@ -4103,20 +4118,11 @@ const UserConversationPage = () => {
             >
               <Icons.close className="w-4 h-4 text-white" />
             </button>
-            {bigPreviewMedia.type === "image" ? (
-              <img
-                src={bigPreviewMedia.url}
-                alt=""
-                className="max-w-[90vw] max-h-[90vh] object-contain rounded-xl"
-              />
-            ) : (
-              <video
-                src={bigPreviewMedia.url}
-                controls
-                autoPlay
-                className="max-w-[90vw] max-h-[90vh] rounded-xl"
-              />
-            )}
+            <img
+              src={bigPreviewMedia.url}
+              alt=""
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded-xl"
+            />
           </div>
         </div>
       )}

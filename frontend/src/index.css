@@ -93,6 +93,58 @@ body {
   touch-action: none;
 }
 
+/*
+ * The video scrubber's input, made invisible without being disabled.
+ *
+ * The track and handle are real elements underneath (see Chat/VideoPlayerOverlay) so
+ * they can show buffered progress and match the app; this input lies on top purely to
+ * supply the interaction — drag, arrow keys, Home/End — and the slider role. A range
+ * input can only be restyled through UA pseudo-elements, which differ per engine and
+ * cannot be drawn on top of each other, hence hiding it rather than styling it.
+ *
+ * The thumb keeps its full height so the whole 44px strip is draggable: `opacity: 0`
+ * on the element would work visually but `appearance: none` alone leaves a thin
+ * default track that limits where a touch registers.
+ */
+.video-scrubber {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  margin: 0;
+}
+
+.video-scrubber:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 4px;
+  border-radius: 9999px;
+}
+
+.video-scrubber::-webkit-slider-runnable-track {
+  background: transparent;
+  height: 100%;
+}
+
+.video-scrubber::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 44px;
+  height: 44px;
+  background: transparent;
+  border: none;
+}
+
+.video-scrubber::-moz-range-track {
+  background: transparent;
+  height: 100%;
+}
+
+.video-scrubber::-moz-range-thumb {
+  width: 44px;
+  height: 44px;
+  background: transparent;
+  border: none;
+}
+
 @utility input-box {
   @apply w-[100%] rounded-xl p-4 text-white bg-neutral-800 border border-transparent placeholder:text-neutral-500 outline-0 focus:ring-0 focus:border-neutral-500 caret-white;
 }

@@ -1,11 +1,24 @@
 import React from "react";
 import { guessMediaType } from "../lib/mediaTypes";
+import VideoPlayerOverlay from "./Chat/VideoPlayerOverlay";
 
 const MediaModal = ({ selectedImage, closeModal }) => {
   // The lightbox is opened with a bare URL from the media strip, so the type
   // has to be guessed here rather than passed through. The shared guess is at
   // least the same one every other renderer uses.
   const isVideo = (url) => guessMediaType(url) === "video";
+
+  /*
+   * Video gets the app's own player.
+   *
+   * This rendered `<video controls autoPlay>`, so a video opened from the shared-media
+   * gallery or a post showed the browser's control strip — including the kebab menu
+   * offering Download and Picture-in-Picture on a raw Cloudinary URL. The player has
+   * the scrubber, the keyboard handling and the focus management this modal never had.
+   */
+  if (isVideo(selectedImage)) {
+    return <VideoPlayerOverlay src={selectedImage} onClose={closeModal} />;
+  }
 
   return (
     <div
@@ -44,26 +57,14 @@ const MediaModal = ({ selectedImage, closeModal }) => {
             </svg>
           </button>
 
-          {isVideo(selectedImage) ? (
-            <video
-              src={selectedImage}
-              controls
-              autoPlay
-              className="max-h-screen max-w-full object-contain"
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-            />
-          ) : (
-            <img
-              src={selectedImage}
-              alt="Full size image"
-              className="max-h-screen max-w-full object-contain"
-              onClick={(e) => {
-                e.stopPropagation();
-              }}
-            />
-          )}
+          <img
+            src={selectedImage}
+            alt="Full size image"
+            className="max-h-screen max-w-full object-contain"
+            onClick={(e) => {
+              e.stopPropagation();
+            }}
+          />
         </div>
       </div>
     </div>
