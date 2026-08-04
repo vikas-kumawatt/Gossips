@@ -91,6 +91,55 @@ const COMPOSER_ACCEPT = [
 
 /** Pure helpers — no component state, so they live out here. */
 
+/** How many envelope samples a sent voice note carries. */
+const WAVEFORM_BUCKETS = 64;
+
+/**
+ * Average an arbitrarily long amplitude series down to a fixed number of buckets.
+ *
+ * The recorder samples once per animation frame — around 60 a second — so the raw
+ * series is far longer than any bubble can draw, and its length varies with both
+ * clip length and frame rate. Averaging into fixed buckets makes the stored envelope
+ * a *shape* rather than a sample count, so the same recording looks the same however
+ * long it is and whatever the device's frame rate was.
+ *
+ * Averaging rather than picking every Nth sample: sampling would alias, and on a
+ * voice envelope that shows up as bars that jitter between loud and silent for no
+ * reason the listener can hear.
+ */
+const downsampleWaveform = (samples, buckets = WAVEFORM_BUCKETS) => {
+  if (!Array.isArray(samples) || samples.length === 0) return [];
+  if (samples.length <= buckets) {
+    return samples.map((n) => Math.min(1, Math.max(0, Number(n) || 0)));
+  }
+
+  const out = [];
+  const size = samples.length / buckets;
+  for (let i = 0; i < buckets; i++) {
+    const start = Math.floor(i * size);
+    const end = Math.min(samples.length, Math.floor((i + 1) * size));
+    let sum = 0;
+    let count = 0;
+    for (let j = start; j < end; j++) {
+      const value = Number(samples[j]);
+      if (Number.isFinite(value)) {
+        sum += value;
+        count += 1;
+      }
+    }
+    out.push(count ? Math.min(1, Math.max(0, sum / count)) : 0);
+  }
+  return out;
+};
+
+/** `mm:ss` from a possibly-fractional number of seconds. */
+const formatClock = (seconds) => {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${Math.floor(total / 60)
+    .toString()
+    .padStart(2, "0")}:${(total % 60).toString().padStart(2, "0")}`;
+};
+
 const formatInstagramTimestamp = (dateString) => {
   const messageDate = new Date(dateString);
   const now = new Date();
@@ -891,7 +940,14 @@ const UserConversationPage = () => {
   const maxRecordingTimerRef = useRef(null);
   const isStartingRecordingRef = useRef(false);
   const lastWaveformPaintRef = useRef(0);
+  /** The trailing window the live bar strip scrolls through. */
   const waveformHistoryRef = useRef([]);
+  /** Every sample of the current recording, for the envelope that gets sent. */
+  const fullWaveformRef = useRef([]);
+  /** `Date.now()` at record start, for a sub-second duration. */
+  const recordingStartedAtRef = useRef(0);
+  /** How far into the voice preview playback we are, in seconds. */
+  const [voicePreviewTime, setVoicePreviewTime] = useState(0);
   /** Per-DM disappearing TTL (seconds); loaded from chat preferences */
   const [conversationDisappearingSeconds, setConversationDisappearingSeconds] =
     useState(null);
@@ -1972,6 +2028,7 @@ const UserConversationPage = () => {
       source.connect(analyserRef.current);
       const freqData = new Uint8Array(analyserRef.current.frequencyBinCount);
       waveformHistoryRef.current = [];
+      fullWaveformRef.current = [];
 
       const tick = () => {
         if (!analyserRef.current) return;
@@ -1986,6 +2043,19 @@ const UserConversationPage = () => {
           ? 0.02 + Math.random() * 0.04
           : Math.min(1, rms * 4);
         waveformHistoryRef.current = [...waveformHistoryRef.current, amp].slice(-52);
+        /*
+         * The whole recording, kept separately from the scrolling display window.
+         *
+         * `waveformHistoryRef` is `.slice(-52)` because the live bar strip is meant to
+         * scroll — but that is also what was being sent as the "recorded waveform",
+         * so a 30-second note shipped its final 0.9 seconds stretched across the
+         * bubble. This one never drops a sample; it is averaged down to a fixed number
+         * of buckets at stop, so the bubble draws the envelope of the whole clip.
+         *
+         * A push per frame: ~60/s, so 7,200 floats at the 120s cap. Negligible, and
+         * it avoids the per-frame array copy the display window pays for.
+         */
+        fullWaveformRef.current.push(amp);
 
         /*
          * Throttled to ~15fps.
@@ -2027,11 +2097,26 @@ const UserConversationPage = () => {
         const audioBlob = new Blob(audioChunksRef.current, { type: mimeType });
         const audioUrl = trackObjectUrl(URL.createObjectURL(audioBlob));
         const ext = mimeType === "audio/webm" ? "webm" : "mp4";
+        /*
+         * Wall-clock elapsed, not the whole seconds the display counter ticked.
+         *
+         * The counter is a `setInterval(…, 1000)` that starts at 0, so it reads 0 for
+         * anything under a second and truncates everything else — a 4.9s note was
+         * recorded as "4". The clip's real length is the only number that can line the
+         * playback progress up with the bar strip, so it is measured properly here and
+         * the counter stays what it is: a display.
+         */
+        const elapsed = recordingStartedAtRef.current
+          ? Math.max(0.1, (Date.now() - recordingStartedAtRef.current) / 1000)
+          : recordingTimeRef.current;
+
         setVoicePreview({
           file: new File([audioBlob], `voice-message.${ext}`, { type: mimeType }),
           url: audioUrl,
-          duration: recordingTimeRef.current,
-          waveformSnapshot: [...waveformHistoryRef.current],
+          duration: elapsed,
+          // The whole envelope, averaged into fixed buckets — not the trailing
+          // window the live strip scrolls through.
+          waveformSnapshot: downsampleWaveform(fullWaveformRef.current),
         });
       };
 
@@ -2039,6 +2124,7 @@ const UserConversationPage = () => {
       setIsRecording(true);
       setRecordingTime(0);
       recordingTimeRef.current = 0;
+      recordingStartedAtRef.current = Date.now();
 
       recordingTimerRef.current = setInterval(() => {
         setRecordingTime((prev) => {
@@ -2100,6 +2186,18 @@ const UserConversationPage = () => {
     setRecordingTime(0);
   };
 
+  /*
+   * 0..1 through the preview clip.
+   *
+   * Divided by the recorder's own measured duration rather than the audio element's:
+   * `HTMLAudioElement.duration` is `Infinity` for MediaRecorder webm until the whole
+   * blob has been walked, which would make the progress zero for the entire clip.
+   */
+  const voicePreviewProgress =
+    voicePreview?.duration > 0
+      ? Math.min(1, voicePreviewTime / voicePreview.duration)
+      : 0;
+
   const cancelVoicePreview = () => {
     if (voicePreviewAudioRef.current) {
       voicePreviewAudioRef.current.pause();
@@ -2109,14 +2207,33 @@ const UserConversationPage = () => {
     if (voicePreview?.url) releaseObjectUrl(voicePreview.url);
     setVoicePreview(null);
     setIsVoicePreviewPlaying(false);
+    setVoicePreviewTime(0);
     setRecordingTime(0);
   };
 
+  /*
+   * Playing the preview drives the bars and the clock.
+   *
+   * The only listener attached here was `onended`, so pressing play changed exactly
+   * one thing — the play/pause glyph. Nothing read `currentTime`, so no render
+   * happened while the clip played: the bars kept a constant colour and the label
+   * kept showing the total length. `ontimeupdate` is the same mechanism the sent
+   * bubble already uses (VoiceNoteBubble), so the preview and the bubble now behave
+   * identically, which is the point of a preview.
+   */
   const toggleVoicePreviewPlay = () => {
     if (!voicePreview) return;
     if (!voicePreviewAudioRef.current) {
-      voicePreviewAudioRef.current = new Audio(voicePreview.url);
-      voicePreviewAudioRef.current.onended = () => setIsVoicePreviewPlaying(false);
+      const audio = new Audio(voicePreview.url);
+      audio.ontimeupdate = () => setVoicePreviewTime(audio.currentTime || 0);
+      audio.onended = () => {
+        setIsVoicePreviewPlaying(false);
+        // Back to the start, so the bars reset and a second press replays rather
+        // than sitting at the end doing nothing.
+        setVoicePreviewTime(0);
+        audio.currentTime = 0;
+      };
+      voicePreviewAudioRef.current = audio;
     }
     if (isVoicePreviewPlaying) {
       voicePreviewAudioRef.current.pause();
@@ -2145,11 +2262,15 @@ const UserConversationPage = () => {
       isOwn: true,
       isUploading: true,
       messageType: "voice",
-      media: [{ type: "audio", url: blobUrl, duration }],
+      // `waveform` too: without it the in-flight bubble drew the synthetic sine
+      // strip, so the envelope visibly changed at the moment of sending even when
+      // everything else worked.
+      media: [{ type: "audio", url: blobUrl, duration, waveform: waveformSnapshot }],
       createdAt: new Date().toISOString(),
     });
 
     setVoicePreview(null);
+    setVoicePreviewTime(0);
     setRecordingTime(0);
 
     try {
@@ -2165,11 +2286,17 @@ const UserConversationPage = () => {
        * of hundred pixels wide, not data anyone reads precisely.
        */
       const points = Array.isArray(waveformSnapshot) ? waveformSnapshot : [];
-      const step = Math.max(1, Math.ceil(points.length / 120));
-      formData.append(
-        "waveform",
-        JSON.stringify(points.filter((_, i) => i % step === 0))
-      );
+      formData.append("waveform", JSON.stringify(points));
+
+      /*
+       * The measured length, which was not being sent at all.
+       *
+       * The server fell back to Cloudinary's `result.duration`, and that is empty for
+       * MediaRecorder webm — it writes no container duration — so notes were stored
+       * claiming 0:00. The browser is the only party that actually timed the
+       * recording; the server clamps what it receives.
+       */
+      formData.append("duration", String(duration));
 
       const response = { data: await chatAPI.uploadVoice(formData) };
 
@@ -2971,8 +3098,33 @@ const UserConversationPage = () => {
               {item.type === "image" ? (
                 <img src={item.url} alt="" className="w-full h-full object-cover" />
               ) : (
-                <div className="w-full h-full bg-neutral-800 flex items-center justify-center">
-                  <Icons.video className="w-6 h-6 text-white/70" />
+                /*
+                 * The video's first frame, not a grey box with an icon in it.
+                 *
+                 * The blob URL was already here and simply wasn't used — the video
+                 * branch rendered a placeholder, so a strip of selected clips was
+                 * indistinguishable from one another and you couldn't tell which
+                 * video you had picked. `preload="metadata"` is what paints the
+                 * frame, and `muted` is required for iOS to render one at all; the
+                 * background stays as the fallback for a codec the browser won't
+                 * decode.
+                 */
+                <div className="relative w-full h-full bg-neutral-800">
+                  <video
+                    src={item.url}
+                    preload="metadata"
+                    muted
+                    playsInline
+                    tabIndex={-1}
+                    className="w-full h-full object-cover"
+                  />
+                  {/* Marks it as a video, since a still frame reads as a photo. */}
+                  <span
+                    aria-hidden="true"
+                    className="absolute bottom-0.5 right-0.5 flex items-center justify-center w-4 h-4 rounded-full bg-black/60 pointer-events-none"
+                  >
+                    <Icons.videocam className="w-2.5 h-2.5 text-white" />
+                  </span>
                 </div>
               )}
             </button>
@@ -3696,23 +3848,40 @@ const UserConversationPage = () => {
                 )}
               </button>
 
-              {/* Snapshot waveform (static) */}
+              {/* The recorded envelope, filling as it plays. */}
               <div className="flex-1 flex items-center justify-start gap-[2px] h-9 overflow-hidden">
-                {(voicePreview.waveformSnapshot?.length > 0
-                  ? voicePreview.waveformSnapshot
-                  : voiceStaticWaveform
-                ).map((amp, i) => (
-                  <div
-                    key={i}
-                    className="w-[2.5px] rounded-full bg-white/70 shrink-0"
-                    style={{ height: `${Math.max(3, amp * 30)}px` }}
-                  />
-                ))}
+                {(() => {
+                  const bars =
+                    voicePreview.waveformSnapshot?.length > 0
+                      ? voicePreview.waveformSnapshot
+                      : voiceStaticWaveform;
+                  return bars.map((amp, i) => (
+                    <div
+                      key={i}
+                      // Played bars are solid, the rest are dimmed — the same
+                      // treatment the sent bubble gives them.
+                      className={`w-[2.5px] rounded-full shrink-0 transition-colors duration-75 ${
+                        i / bars.length < voicePreviewProgress
+                          ? "bg-white"
+                          : "bg-white/40"
+                      }`}
+                      style={{ height: `${Math.max(3, amp * 30)}px` }}
+                    />
+                  ));
+                })()}
               </div>
 
-              {/* Duration */}
+              {/*
+                Counts up while playing, total when idle.
+                It was bound to `voicePreview.duration` and so never moved, which made
+                a playing clip indistinguishable from a stopped one.
+              */}
               <span className="text-white text-[13px] font-semibold tabular-nums shrink-0 min-w-[38px] text-right">
-                {`${Math.floor((voicePreview.duration || 0) / 60).toString().padStart(2, "0")}:${((voicePreview.duration || 0) % 60).toString().padStart(2, "0")}`}
+                {formatClock(
+                  isVoicePreviewPlaying || voicePreviewTime > 0
+                    ? voicePreviewTime
+                    : voicePreview.duration
+                )}
               </span>
 
               {/* Send */}

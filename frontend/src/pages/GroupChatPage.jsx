@@ -661,10 +661,20 @@ const GroupChatPage = () => {
     );
   }
 
+  /*
+   * `flex-1 min-h-0`, not `h-screen`.
+   *
+   * This page renders inside ChatLayout, whose shell is already exactly one dynamic
+   * viewport tall. Asking for `h-screen` (`100vh`) on top of that made the group thread
+   * taller than the box containing it — `100vh` is the *large* viewport height, so with
+   * the keyboard open the composer was pushed off the bottom and the header off the
+   * top. Filling the parent instead inherits the shell's keyboard-aware height, and
+   * `min-h-0` is what lets the message list below actually scroll rather than stretch.
+   */
   return (
-    <div className="flex flex-col h-screen bg-black text-white">
+    <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-black text-white">
       {/* Header */}
-      <div className="flex items-center justify-between px-4 py-3 bg-neutral-900 border-b border-neutral-800">
+      <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-neutral-900 border-b border-neutral-800">
         <div className="flex items-center gap-3">
           {/*
             Not md:hidden. The page now lives inside ChatLayout, but a group
@@ -770,9 +780,11 @@ const GroupChatPage = () => {
         </div>
       )}
 
+      {/* `min-h-0`: without it a flex child refuses to shrink below its content, so
+          the list pushed the composer out of the shell instead of scrolling. */}
       <div
         ref={messagesContainerRef}
-        className="flex-1 overflow-y-auto px-4 py-4 space-y-4"
+        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
       >
         {/* The sentinel the observer watches. There wasn't one. */}
         <div ref={topSentinelRef} />
@@ -960,7 +972,12 @@ const GroupChatPage = () => {
       </div>
 
       {/* Input Area */}
-      <div className="p-4 bg-neutral-900 border-t border-neutral-800">
+      {/* `shrink-0` so the composer keeps its height when the keyboard shortens the
+          shell, and safe-area padding so it clears the home indicator. */}
+      <div
+        className="shrink-0 p-4 bg-neutral-900 border-t border-neutral-800"
+        style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}
+      >
         {replyingTo && (
           <div className="mb-2 p-2 bg-neutral-800 rounded flex items-center justify-between">
             <div>
@@ -1141,18 +1158,59 @@ const GroupChatPage = () => {
         <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4">
           <div className="bg-neutral-900 p-4 rounded-xl max-w-lg w-full">
             <h3 className="text-lg font-semibold mb-4">Send Media</h3>
+            {/*
+              Every type, not just images.
+              This branched on `image` and left a `{/* Others *}` placeholder, so
+              picking a video, an audio file or a document opened a modal with an
+              empty box and a Send button — no way to tell what you were about to
+              send, or whether the right file had been picked.
+            */}
             <div className="flex justify-center mb-4">
               {mediaPreview.type === "image" && (
                 <img
                   src={mediaPreview.url}
+                  alt={mediaPreview.file?.name || "Selected image"}
                   className="max-h-[300px] object-contain"
                 />
               )}
-              {/* Others */}
+              {mediaPreview.type === "video" && (
+                // `controls` here, unlike the message bubble: this is a confirmation
+                // step, so scrubbing to check you picked the right clip is the point.
+                <video
+                  src={mediaPreview.url}
+                  controls
+                  preload="metadata"
+                  playsInline
+                  className="max-h-[300px] max-w-full rounded-lg"
+                />
+              )}
+              {mediaPreview.type === "audio" && (
+                <audio src={mediaPreview.url} controls className="w-full" />
+              )}
+              {mediaPreview.type === "document" && (
+                <div className="flex items-center gap-3 w-full px-3 py-4 rounded-lg bg-neutral-800">
+                  <Icons.file className="w-8 h-8 text-white shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium truncate">
+                      {mediaPreview.file?.name || "Document"}
+                    </p>
+                    {mediaPreview.file?.size > 0 && (
+                      <p className="text-xs text-neutral-400">
+                        {(mediaPreview.file.size / 1024 / 1024).toFixed(1)} MB
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => {
+                  // Revoked, which it wasn't: cancelling leaked the blob URL and the
+                  // file behind it stayed in memory for the life of the tab.
+                  if (mediaPreview?.url?.startsWith("blob:")) {
+                    URL.revokeObjectURL(mediaPreview.url);
+                  }
                   setIsPreviewOpen(false);
                   setMediaPreview(null);
                 }}

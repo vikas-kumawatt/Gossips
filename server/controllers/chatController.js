@@ -2743,11 +2743,33 @@ export const uploadVoiceNote = async (req, res) => {
       waveform = [];
     }
 
+    /*
+     * The recorder's own measurement, preferred over Cloudinary's.
+     *
+     * `result.duration` was the only source, and it is unreliable for exactly the
+     * files this endpoint receives: MediaRecorder muxes `audio/webm` for streaming
+     * and writes no Duration element into the Segment Info, so a probe commonly
+     * returns nothing and `|| 0` turned that into a voice note that claims to be
+     * 0:00. Safari's fragmented `audio/mp4` has the same gap.
+     *
+     * The browser timed the recording and now sends it. Clamped rather than trusted:
+     * a number, positive, and no longer than the composer's own recording cap, so a
+     * hand-rolled request can't store a nonsense length. It is decorative — it isn't
+     * covered by `signMedia`, and nothing but the label depends on it — so a clamp is
+     * the appropriate level of suspicion. Cloudinary remains the fallback.
+     */
+    const MAX_DURATION_SECONDS = 121; // the composer stops at 120s
+    const claimed = Number(req.body?.duration);
+    const duration =
+      Number.isFinite(claimed) && claimed > 0
+        ? Math.min(claimed, MAX_DURATION_SECONDS)
+        : result.duration || 0;
+
     const descriptor = {
       url: result.secure_url,
       type: "voice",
       fileSize: req.file.size,
-      duration: result.duration || 0,
+      duration,
       waveform,
     };
     res.status(200).json({ ...descriptor, token: signMedia(descriptor) });

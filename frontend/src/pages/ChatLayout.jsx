@@ -7,8 +7,20 @@ import MobileNavbar from "../components/layouts/mobile-navbar";
 import NavigationMenu from "../menus/NavigationMenu";
 import { Icons } from "../components/icons";
 import { UserContext } from "../contexts/UserContext";
+import { useVisualViewportHeight } from "../hooks/useVisualViewportHeight";
 
 const ChatLayout = () => {
+  /*
+   * Publishes `--app-height` for `.h-dynamic-screen` below.
+   *
+   * The viewport meta's `interactive-widget=resizes-content` makes `100dvh` correct
+   * when the keyboard opens on Chrome/Android; iOS Safari ignores it and pans the page
+   * instead, which slid the whole shell — header included — off the top. This is the
+   * iOS half of that fix, and it lives here because it takes over the document scroll
+   * position, which is only appropriate for a screen that owns the whole viewport.
+   */
+  useVisualViewportHeight();
+
   /*
    * Every hook must run every render — do not use || between useMatch calls,
    * because short-circuiting skips one and breaks the Rules of Hooks.

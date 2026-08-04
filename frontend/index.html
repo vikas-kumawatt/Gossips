@@ -3,7 +3,22 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/images/logo2.jpg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `interactive-widget=resizes-content` so the on-screen keyboard shrinks the
+      layout viewport instead of panning it. Without it the default is
+      `resizes-visual`: `100dvh` stays the full screen height and the browser slides
+      the whole page up to reveal the focused input, which took the chat header off
+      the top of the screen. With it, `dvh` shrinks and a flex column just gets
+      shorter — the header stays put and only the message list loses height.
+
+      `viewport-fit=cover` because the composer already pads itself with
+      `env(safe-area-inset-bottom)`, and that resolves to 0px without this — so on a
+      notched phone the send row sat under the home indicator.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <meta name="theme-color" content="#0a0a0a" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />

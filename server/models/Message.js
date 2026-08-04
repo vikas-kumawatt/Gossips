@@ -117,6 +117,20 @@ const messageSchema = new Schema(
       filename:   String,
       fileSize:   Number,
       duration:   Number,
+      /*
+       * The recorded amplitude envelope of a voice note, 0-1 per sample.
+       *
+       * This field did not exist, and its absence was invisible: the browser captured
+       * real samples, the upload endpoint validated and returned them, and the socket
+       * send path carried them all the way to `new Message(...)` — where Mongoose's
+       * strict mode silently dropped the unknown path. So every voice note in the
+       * database has no waveform, and the bubble falls back to a synthetic sine
+       * strip, which is why they all look identical.
+       *
+       * `default: undefined` rather than `[]`, matching Post.js, so a message with no
+       * waveform has no key instead of an empty array every reader has to test.
+       */
+      waveform:   { type: [Number], default: undefined },
       dimensions: { width: Number, height: Number },
       caption:    String,
       isSpoiler:  { type: Boolean, default: false },

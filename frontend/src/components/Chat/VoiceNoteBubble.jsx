@@ -21,15 +21,36 @@ const VoiceNoteBubble = ({ item, isOwn = false, bubbleRadius = "rounded-[18px]" 
   const [audioDuration, setAudioDuration] = useState(item.duration || 0);
   const audioRef = useRef(null);
 
-  // Normalise waveform to 0-1 range for 32 display bars
+  /*
+   * The recorded envelope, averaged into 32 display bars.
+   *
+   * Averaging rather than picking every Nth sample, which is what this did: on a
+   * voice envelope, sampling aliases and produces bars that jump between loud and
+   * silent for no reason you can hear. The stored series is 64 buckets, so this is
+   * pairs of samples.
+   *
+   * The `Math.sin` fallback stays for the notes already in the database, which have
+   * no waveform at all — the field was missing from the Message schema, so nothing
+   * ever persisted one.
+   */
   const waveformBars = useMemo(() => {
-    if (item.waveform?.length >= 10) {
+    const source = Array.isArray(item.waveform) ? item.waveform : [];
+    if (source.length >= 8) {
       const bars = [];
-      const step = item.waveform.length / 32;
+      const size = source.length / 32;
       for (let i = 0; i < 32; i++) {
-        const val = item.waveform[Math.floor(i * step)] || 0;
-        // backend sends 0-1 values; clamp just in case
-        bars.push(Math.min(1, Math.max(0, val)));
+        const start = Math.floor(i * size);
+        const end = Math.max(start + 1, Math.min(source.length, Math.floor((i + 1) * size)));
+        let sum = 0;
+        let count = 0;
+        for (let j = start; j < end; j++) {
+          const value = Number(source[j]);
+          if (Number.isFinite(value)) {
+            sum += value;
+            count += 1;
+          }
+        }
+        bars.push(count ? Math.min(1, Math.max(0, sum / count)) : 0);
       }
       return bars;
     }
@@ -42,7 +63,15 @@ const VoiceNoteBubble = ({ item, isOwn = false, bubbleRadius = "rounded-[18px]" 
     if (!audioRef.current) {
       audioRef.current = new Audio(item.url);
       audioRef.current.onloadedmetadata = () => {
-        if (audioRef.current) setAudioDuration(audioRef.current.duration);
+        /*
+         * Only if the element actually knows. `HTMLAudioElement.duration` is
+         * `Infinity` for MediaRecorder webm until the whole blob has been walked, and
+         * assigning that made `fmtTime` print nonsense and pinned `progress` at zero
+         * so the bars never filled. The recorder's measured value, which the server
+         * now stores, is the better answer whenever this one isn't finite.
+         */
+        const reported = audioRef.current?.duration;
+        if (Number.isFinite(reported) && reported > 0) setAudioDuration(reported);
       };
       audioRef.current.ontimeupdate = () => {
         if (audioRef.current) setCurrentTime(audioRef.current.currentTime);

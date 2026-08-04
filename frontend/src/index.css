@@ -41,12 +41,32 @@
  *
  * `100vh` is the large viewport height on mobile and does not shrink when the
  * on-screen keyboard opens, which pushed the chat composer below the visible area.
- * Both declarations in one rule so the browser picks: `dvh` wins where it's
- * understood, and where it isn't the line is discarded and `100vh` stands.
+ * Three declarations, most-preferred last, each discarded by browsers that don't
+ * understand it:
+ *
+ *   100vh              — the floor: wrong when a keyboard is open, but always valid.
+ *   100dvh             — correct once the *layout* viewport shrinks, which it does
+ *                        thanks to `interactive-widget=resizes-content` in index.html.
+ *   var(--app-height)  — iOS Safari, which ignores that hint and pans the page
+ *                        instead. `useVisualViewportHeight` publishes the visual
+ *                        viewport's height here; the fallback keeps this valid on
+ *                        every other browser, where the variable is never set.
  */
 .h-dynamic-screen {
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height, 100dvh);
+}
+
+/*
+ * No rubber-banding behind the app shell.
+ *
+ * The shell is exactly viewport-tall and clips its own overflow, so a drag that
+ * reaches the document can only produce an elastic bounce that detaches the fixed
+ * header from the top of the screen — the same visual failure the keyboard caused.
+ */
+body {
+  overscroll-behavior-y: none;
 }
 
 /*
