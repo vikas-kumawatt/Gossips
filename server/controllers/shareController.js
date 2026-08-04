@@ -9,7 +9,7 @@ import GroupMember from "../models/GroupMember.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
 import { escapeRegex } from "../utils/respond.js";
-import { getIO, getUserSocket } from "../config/socket.js";
+import { addUserToRoom, getIO } from "../config/socket.js";
 import { loadVisibleContent } from "../utils/contentVisibility.js";
 import { attachSharedContent, stripSharedSnapshot } from "../utils/resolveSharedContent.js";
 import { seedConversationRead } from "../utils/readState.js";
@@ -382,14 +382,12 @@ export const shareContent = async (req, res) => {
       // Pull everyone online into the room, the sender included — otherwise
       // io.to(group) skips them and their own share never appears.
       for (const m of [...usable, { _id: userId }]) {
-        const sockets = getUserSocket(m._id.toString());
-        if (sockets) {
-          for (const socketId of sockets) {
-            io.sockets.sockets.get(socketId)?.join(group._id.toString());
-            if (!m._id.equals?.(userId)) {
-              io.to(socketId).emit("addedToGroup", { group: createdGroup, addedBy: userId });
-            }
-          }
+        // `addUserToRoom` and a room emit, both of which cross the process boundary —
+        // `io.sockets.sockets` and `getUserSocket` only ever saw this instance, so a
+        // member connected elsewhere was neither put in the group's room nor told.
+        addUserToRoom(m._id, group._id);
+        if (!m._id.equals?.(userId)) {
+          io.to(m._id.toString()).emit("addedToGroup", { group: createdGroup, addedBy: userId });
         }
       }
     }
@@ -446,31 +444,28 @@ export const shareContent = async (req, res) => {
         const forRecipient = JSON.parse(JSON.stringify(populated));
         await attachSharedContent([forRecipient], user._id);
 
-        const sockets = getUserSocket(user._id.toString());
-        if (sockets) {
-          for (const socketId of sockets) {
-            io.to(socketId).emit("receiveMessage", { ...forRecipient, isOwn: false });
-            // Deep copy: a shallow spread shares the same `sharedContent`
-            // object, so stripping it here would also strip `resolved` off the
-            // message emitted above — the card would arrive with no media.
-            io.to(socketId).emit("chatUpdated", {
-              user: { _id: userId, username: req.user.username },
-              latestMessage: stripSharedSnapshot(JSON.parse(JSON.stringify(forRecipient))),
-              unreadCount: 1,
-            });
-          }
-        }
+        /*
+         * The recipient's room, which spans instances — `getUserSocket` did not, so a
+         * share reached them only when they were served by the node handling the request.
+         * Emitting to a room with nobody in it is free, so the "are they connected" check
+         * this replaces isn't needed.
+         */
+        const recipientRoom = user._id.toString();
+        io.to(recipientRoom).emit("receiveMessage", { ...forRecipient, isOwn: false });
+        // Deep copy: a shallow spread shares the same `sharedContent` object, so
+        // stripping it here would also strip `resolved` off the message emitted above —
+        // the card would arrive with no media.
+        io.to(recipientRoom).emit("chatUpdated", {
+          user: { _id: userId, username: req.user.username },
+          latestMessage: stripSharedSnapshot(JSON.parse(JSON.stringify(forRecipient))),
+          unreadCount: 1,
+        });
 
         // Echo to the sender's own sockets — otherwise sharing into a thread
         // you already have open shows nothing until you reload.
-        const senderSockets = getUserSocket(userId.toString());
-        if (senderSockets) {
-          const forSender = JSON.parse(JSON.stringify(populated));
-          await attachSharedContent([forSender], userId);
-          for (const socketId of senderSockets) {
-            io.to(socketId).emit("receiveMessage", { ...forSender, isOwn: true });
-          }
-        }
+        const forSender = JSON.parse(JSON.stringify(populated));
+        await attachSharedContent([forSender], userId);
+        io.to(userId.toString()).emit("receiveMessage", { ...forSender, isOwn: true });
 
         results.sent.push({ id, username: user.username });
       }

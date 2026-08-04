@@ -251,6 +251,41 @@ const messageSchema = new Schema(
     },
 
     /**
+     * A group event — "Ana changed the group name", "Ben added Cal".
+     *
+     * `messageType: "system"` has been in the enum from the start and nothing has ever
+     * written one. This is the shape that makes it usable.
+     *
+     * **Structured, not a rendered sentence.** Storing "Ana added Ben" as `content`
+     * would be less code and three things worse: the names couldn't link to profiles,
+     * the string couldn't be translated, and — the one that actually matters — it bakes
+     * one viewer's perspective into a row every member reads. Ben needs to see "Ana
+     * added you", and that is not a substitution you can do on a finished sentence.
+     *
+     * `actor` is who did it; `targets` is who it was done to (several, for an add);
+     * `value` carries the new name for a rename or the new role for a role change.
+     * `system` messages stay server-only — `CLIENT_MESSAGE_TYPES` excludes the type, so
+     * a client cannot forge a notice that renders as an official one.
+     */
+    system: {
+      kind: {
+        type: String,
+        enum: [
+          "group_renamed",
+          "group_avatar_changed",
+          "members_added",
+          "member_removed",
+          "member_left",
+          "member_joined",
+          "role_changed",
+        ],
+      },
+      actor:   { type: Schema.Types.ObjectId, ref: "User" },
+      targets: [{ type: Schema.Types.ObjectId, ref: "User" }],
+      value:   String,
+    },
+
+    /**
      * A post, comment or profile shared into the chat.
      *
      * `post` / `comment` / `profile` is the live reference — the card renders the

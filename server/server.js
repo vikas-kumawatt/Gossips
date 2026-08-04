@@ -20,7 +20,7 @@ import { startScheduler } from "./utils/scheduler.js";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { createServer } from "http";
-import { initializeSocket, getIO, getUserSocket } from "./config/socket.js";
+import { initializeSocket, getIO } from "./config/socket.js";
 import { ALLOWED_ORIGINS } from "./config/origins.js";
 import hashtagRoutes from "./routes/hashtagRoutes.js";
 import { MulterError } from "multer";
@@ -137,7 +137,7 @@ app.use((req, res, next) => {
 const server = createServer(app);
 
 const io = initializeSocket(server);
-export { io, getIO, getUserSocket };
+export { io, getIO };
 
 mongoose
   .connect(process.env.MONGO_URI)

@@ -1,6 +1,8 @@
+import crypto from "crypto";
 import mongoose from "mongoose";
 import Group from "../models/Group.js";
 import GroupMember from "../models/GroupMember.js";
+import Follow from "../models/Follow.js";
 import Message from "../models/Message.js";
 import User from "../models/User.js";
 import {
@@ -15,6 +17,8 @@ import { seedConversationRead } from "../utils/readState.js";
 import { recomputeGroupCounts } from "../utils/groupCounts.js";
 import { addUserToRoom, getIO, removeUserFromRoom } from "../config/socket.js";
 import { parseCursorLimit } from "../utils/cursorPagination.js";
+import { writeGroupEvent } from "../utils/groupEvents.js";
+import { deleteFromCloudinary, uploadToCloudinary } from "../config/cloudinary.js";
 
 /**
  * Group management.
@@ -76,6 +80,22 @@ const targetUserId = (req) => {
   if (!mongoose.isValidObjectId(raw)) return null;
   return String(raw).toLowerCase();
 };
+
+/**
+ * The group fields a joiner needs to open the thread — no invite token, no settings.
+ *
+ * Separate from `getGroup`'s richer payload on purpose: this answers "which group did I
+ * just join", and echoing `inviteToken` back would hand the link to whoever followed
+ * one, which is a different permission from being able to use it.
+ */
+const publicGroup = (group) => ({
+  _id: group._id,
+  name: group.name,
+  description: group.description,
+  avatar: group.avatar,
+  type: group.type,
+  counts: group.counts,
+});
 
 const publicMember = (row) => ({
   _id: row._id,
@@ -302,10 +322,40 @@ export const getGroupMembers = async (req, res) => {
      * with it, so it doesn't leave this endpoint.
      */
     const hasMore = rows.length > limit;
-    const members = rows
-      .slice(0, limit)
-      .filter((row) => row.user)
-      .map(publicMember);
+    const visible = rows.slice(0, limit).filter((row) => row.user);
+
+    /*
+     * Whether the caller follows each member, resolved for the page in one query.
+     *
+     * The People screen groups a group's members into "Following" and "Others", and
+     * nothing on the member payload said which was which — the alternative is the
+     * client fetching its entire following list and intersecting, which is a second
+     * unbounded request to answer a question about fifty rows. Batched by id, the same
+     * shape `messageableIdSet` uses.
+     *
+     * Own row excluded: "do you follow yourself" is not a question, and including it
+     * would put the caller in the Following bucket.
+     */
+    const otherIds = visible
+      .map((row) => row.user._id)
+      .filter((id) => id.toString() !== req.user.id.toString());
+
+    let following = new Set();
+    if (otherIds.length) {
+      const edges = await Follow.find({
+        follower: req.user.id,
+        following: { $in: otherIds },
+        status: "accepted",
+      })
+        .select("following")
+        .lean();
+      following = new Set(edges.map((edge) => edge.following.toString()));
+    }
+
+    const members = visible.map((row) => ({
+      ...publicMember(row),
+      isFollowing: following.has(row.user._id.toString()),
+    }));
 
     res.status(200).json({
       members,
@@ -330,9 +380,34 @@ export const updateGroup = async (req, res) => {
       req.user.id
     );
     if (error) return res.status(404).json({ error: "Group not found" });
-    if (!permissions.changeGroupInfo) {
+
+    /*
+     * Two tiers, because "the group's details" is two different kinds of thing.
+     *
+     * Name and description are *identity* — every member should be able to fix a typo
+     * in a group they're part of, which is how every other messenger behaves, and every
+     * change writes a system notice naming who made it. That accountability is what
+     * makes it safe to open up.
+     *
+     * `type` and `settings` are *governance* — slow mode, who may share media, whether
+     * history is visible to new members. Those stay behind `changeGroupInfo`: they
+     * change what other people are allowed to do, and a notice after the fact is no
+     * substitute for not being able to do it.
+     *
+     * `sendMessages` rather than an unconditional yes: a member with the `restricted`
+     * role has been silenced in this group, and letting them rename it instead would
+     * make the restriction meaningless.
+     */
+    const wantsGovernance =
+      req.body?.type !== undefined || req.body?.settings !== undefined;
+    if (wantsGovernance && !permissions.changeGroupInfo) {
+      return res.status(403).json({ error: "You can't change this group's settings" });
+    }
+    if (!permissions.sendMessages) {
       return res.status(403).json({ error: "You can't change this group's details" });
     }
+
+    const previousName = group.name;
 
     const updates = {};
     if (typeof req.body?.name === "string") {
@@ -410,10 +485,270 @@ export const updateGroup = async (req, res) => {
       settings: fresh.settings,
     });
 
+    /*
+     * A notice for the rename only, and only when the name actually changed.
+     *
+     * Not for a description edit or a settings change: those are quiet by design, and a
+     * thread that announces every slow-mode tweak is a thread people stop reading. A
+     * rename changes what the conversation *is called* in everyone's chat list, which is
+     * the one edit worth interrupting for.
+     *
+     * Not awaited — the rename has already been committed and answered.
+     */
+    if (updates.name && updates.name !== previousName) {
+      writeGroupEvent({
+        groupId: group._id,
+        actorId: req.user.id,
+        kind: "group_renamed",
+        value: updates.name,
+      });
+    }
+
     res.status(200).json({ group: fresh });
   } catch (err) {
     console.error("updateGroup error:", err);
     res.status(500).json({ error: "Failed to update group" });
+  }
+};
+
+/**
+ * Change the group's picture.
+ *
+ * `Group.avatar` has existed from the start with **no write path anywhere** —
+ * `createGroup` explicitly refuses a client-supplied one because there was no upload
+ * behind it, and `updateGroup` never touched the field. So every group has shown the
+ * default image since the feature was written. This is the missing endpoint.
+ *
+ * Same permission as renaming: any member who can speak in the group, with a system
+ * notice naming who changed it.
+ */
+export const updateGroupAvatar = async (req, res) => {
+  try {
+    const { group, permissions, error } = await loadMembership(
+      req.params.groupId,
+      req.user.id
+    );
+    if (error) return res.status(404).json({ error: "Group not found" });
+    if (!permissions.sendMessages) {
+      return res.status(403).json({ error: "You can't change this group's details" });
+    }
+    if (!req.file) return res.status(400).json({ error: "No image uploaded" });
+
+    /*
+     * `image/` only. Multer's filter for this instance accepts every MEDIA_TYPE, which
+     * includes video — a 40MB mp4 as a group avatar would upload happily and then
+     * render as a broken image everywhere.
+     */
+    if (!req.file.mimetype.startsWith("image/")) {
+      return res.status(400).json({ error: "That file isn't an image" });
+    }
+
+    const previous = group.avatar;
+    const result = await uploadToCloudinary(req.file.path, "group_avatars");
+
+    group.avatar = result.secure_url;
+    await group.save();
+
+    /*
+     * The old image, deleted after the new one is saved.
+     *
+     * After, not before: if the upload or the save fails, the group keeps a picture that
+     * still exists. Skipped for the default avatar, which is a static asset and not ours
+     * to delete. Best effort — `deleteFromCloudinary` logs and swallows.
+     */
+    if (previous && !previous.startsWith("/")) {
+      deleteFromCloudinary(previous).catch(() => {});
+    }
+
+    emitToGroup(group._id, "groupUpdated", {
+      groupId: group._id,
+      name: group.name,
+      description: group.description,
+      avatar: group.avatar,
+      type: group.type,
+      settings: group.settings,
+    });
+
+    writeGroupEvent({
+      groupId: group._id,
+      actorId: req.user.id,
+      kind: "group_avatar_changed",
+    });
+
+    res.status(200).json({ avatar: group.avatar });
+  } catch (err) {
+    console.error("updateGroupAvatar error:", err);
+    res.status(500).json({ error: "Failed to update the group photo" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Invite links
+// ─────────────────────────────────────────────────────────────────────────────
+
+/*
+ * 16 characters of base64url from the CSPRNG — 96 bits.
+ *
+ * The token *is* the authorisation to join, so it has to be unguessable: anyone who
+ * can enumerate one is a member of that group. Not `randomUUID`, because this ends up
+ * in a link people paste into messages and 36 characters of hyphenated hex is longer
+ * than it needs to be for the same practical unguessability.
+ */
+const newInviteToken = () => crypto.randomBytes(12).toString("base64url");
+
+/**
+ * The group's invite token, creating one on first ask.
+ *
+ * Lazily rather than at creation time: most groups are never shared by link, and a
+ * token that exists is a token that can leak. Any member may read it — the link's
+ * whole premise is that members invite people — but only someone who can change the
+ * group's info may *rotate* it, because rotating revokes everyone else's copy.
+ */
+export const getGroupInvite = async (req, res) => {
+  try {
+    const { group, permissions, error } = await loadMembership(
+      req.params.groupId,
+      req.user.id
+    );
+    if (error) return res.status(404).json({ error: "Group not found" });
+
+    if (!group.inviteToken) {
+      group.inviteToken = newInviteToken();
+      group.inviteRotatedAt = new Date();
+      await group.save();
+    }
+
+    res.status(200).json({
+      token: group.inviteToken,
+      rotatedAt: group.inviteRotatedAt ?? null,
+      canRotate: !!permissions.changeGroupInfo,
+    });
+  } catch (err) {
+    console.error("getGroupInvite error:", err);
+    res.status(500).json({ error: "Failed to load the invite link" });
+  }
+};
+
+/**
+ * Replace the invite token, which is the only way to revoke a link that has spread.
+ */
+export const rotateGroupInvite = async (req, res) => {
+  try {
+    const { group, permissions, error } = await loadMembership(
+      req.params.groupId,
+      req.user.id
+    );
+    if (error) return res.status(404).json({ error: "Group not found" });
+    if (!permissions.changeGroupInfo) {
+      return res.status(403).json({ error: "You can't reset this group's link" });
+    }
+
+    group.inviteToken = newInviteToken();
+    group.inviteRotatedAt = new Date();
+    await group.save();
+
+    res.status(200).json({
+      token: group.inviteToken,
+      rotatedAt: group.inviteRotatedAt,
+      canRotate: true,
+    });
+  } catch (err) {
+    console.error("rotateGroupInvite error:", err);
+    res.status(500).json({ error: "Failed to reset the invite link" });
+  }
+};
+
+/**
+ * Join a group by its invite token.
+ *
+ * Deliberately does *not* consult `group.type`: a link is an explicit act of invitation
+ * by a member, and a private group's whole point is that you get in by invitation. What
+ * it does enforce is the member cap and — importantly — a ban, because otherwise a link
+ * is a way around being removed.
+ *
+ * Idempotent: someone who follows a link twice, or who is already a member, gets the
+ * group back rather than an error. The alternative is a scary failure message for
+ * having done nothing wrong.
+ */
+export const joinGroupByInvite = async (req, res) => {
+  try {
+    const token = String(req.params.token || "");
+    // Bounded before it reaches the database: the index is on an exact string.
+    if (!token || token.length > 64) {
+      return res.status(404).json({ error: "That invite link isn't valid" });
+    }
+
+    const group = await Group.findOne({
+      inviteToken: token,
+      isActive: { $ne: false },
+      isDeleted: { $ne: true },
+    });
+    if (!group) {
+      return res.status(404).json({ error: "That invite link has expired" });
+    }
+
+    const existing = await GroupMember.findOne({ group: group._id, user: req.user.id });
+    if (existing?.isBanned) {
+      return res.status(403).json({ error: "You can't rejoin this group" });
+    }
+    if (existing) {
+      return res.status(200).json({ group: publicGroup(group), joined: false });
+    }
+
+    const memberCount = await GroupMember.countDocuments({
+      group: group._id,
+      isBanned: { $ne: true },
+    });
+    if (memberCount >= MAX_GROUP_MEMBERS) {
+      return res.status(400).json({ error: "This group is full" });
+    }
+
+    await GroupMember.create({
+      group: group._id,
+      user: req.user.id,
+      role: "member",
+      // No `addedBy`: nobody added them, they followed a link. Recording the link's
+      // creator would be a lie about who chose to let them in.
+    });
+    await recomputeGroupCounts(group._id);
+
+    /*
+     * The same three things `addGroupMembers` does for someone it adds, in the same
+     * order — a read watermark so the group isn't all-unread, the socket room so live
+     * messages arrive, and a notification to the group that someone joined. Skipping
+     * any of them leaves a member who is in the group but not really in it.
+     */
+    await seedConversationRead([req.user.id], Message.groupConversationKey(group._id));
+    addUserToRoom(req.user.id.toString(), group._id.toString());
+
+    const joiner = await User.findById(req.user.id)
+      .select("username name profilePic isVerified")
+      .lean();
+
+    emitToGroup(group._id, "groupMembersAdded", {
+      groupId: group._id,
+      members: joiner ? [{ user: joiner, role: "member" }] : [],
+    });
+
+    // "joined", not "added": nobody added them, they followed a link — and the
+    // difference is the whole point of showing it.
+    writeGroupEvent({
+      groupId: group._id,
+      actorId: req.user.id,
+      kind: "member_joined",
+    });
+
+    res.status(200).json({ group: publicGroup(group), joined: true });
+  } catch (err) {
+    /*
+     * A duplicate key here means two taps on the same link raced each other. Both
+     * wanted the same outcome and it happened, so it is a success.
+     */
+    if (err?.code === 11000) {
+      return res.status(200).json({ joined: false });
+    }
+    console.error("joinGroupByInvite error:", err);
+    res.status(500).json({ error: "Failed to join the group" });
   }
 };
 
@@ -527,6 +862,15 @@ export const addGroupMembers = async (req, res) => {
       members: added.map(publicMember),
     });
 
+    // One notice for the batch, not one per person: adding four people is a single
+    // act and four consecutive lines saying so is noise.
+    writeGroupEvent({
+      groupId: group._id,
+      actorId: req.user.id,
+      kind: "members_added",
+      targets: added.map((row) => row.user._id),
+    });
+
     res.status(201).json({ members: added.map(publicMember) });
   } catch (err) {
     console.error("addGroupMembers error:", err);
@@ -576,6 +920,13 @@ export const removeGroupMember = async (req, res) => {
       groupId: group._id,
       userId: targetId,
       removedBy: req.user.id,
+    });
+
+    writeGroupEvent({
+      groupId: group._id,
+      actorId: req.user.id,
+      kind: "member_removed",
+      targets: [targetId],
     });
     try {
       getIO().to(targetId.toString()).emit("removedFromGroup", {
@@ -684,6 +1035,24 @@ export const updateGroupMember = async (req, res) => {
       groupId: group._id,
       member: publicMember(fresh),
     });
+
+    /*
+     * A notice for a *role* change only — never for a mute.
+     *
+     * `updates.role` is set only when the role actually differs (see the guard above), so
+     * a no-op patch writes nothing. Muting is deliberately excluded: it is moderation
+     * aimed at one person, and announcing it to everyone turns a quiet correction into a
+     * public one. It stays visible where it belongs, on the member's row.
+     */
+    if (updates.role) {
+      writeGroupEvent({
+        groupId: group._id,
+        actorId: req.user.id,
+        kind: "role_changed",
+        targets: [targetId],
+        value: updates.role,
+      });
+    }
 
     res.status(200).json({ member: publicMember(fresh) });
   } catch (err) {
@@ -906,6 +1275,19 @@ export const leaveGroup = async (req, res) => {
       left: true,
       newOwnerId: successor?.user ?? null,
     });
+
+    /*
+     * Only when the group survives. `leaveGroup` soft-deletes a group whose last member
+     * walks out, and writing a notice into a thread nobody can open is a row that will
+     * never be read.
+     */
+    if (remaining > 0) {
+      writeGroupEvent({
+        groupId: group._id,
+        actorId: req.user.id,
+        kind: "member_left",
+      });
+    }
 
     res.status(200).json({
       message: "You left the group",

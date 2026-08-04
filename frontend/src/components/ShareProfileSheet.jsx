@@ -5,10 +5,11 @@ import { toast } from "react-hot-toast";
 import ResponsiveSheet from "./ui/responsive-sheet";
 import ProfileQRCode from "./ProfileQRCode";
 import QRScannerSheet from "./QRScannerSheet";
+import { scannedCodeRoute } from "../lib/scannedCode";
 import ShareSheet from "./ShareSheet";
 import { Icons } from "./icons";
 import { buildProfileUrl } from "../lib/profileLink";
-import { buildProfileQrSvg } from "../lib/profileQr";
+import { downloadQrPng } from "../lib/qrDownload";
 
 /**
  * Share profile — the QR code, and the ways out of it.
@@ -18,63 +19,6 @@ import { buildProfileQrSvg } from "../lib/profileQr";
  * destinations. Nothing here is duplicated from it.
  */
 
-/** Target size of the saved PNG's longest edge. */
-const DOWNLOAD_WIDTH = 1080;
-
-/**
- * Rasterise the QR to a PNG.
- *
- * The SVG is pure inline geometry — no <image>, no web font — so drawing it to a
- * canvas leaves the canvas untainted and `toBlob` works. A remote logo would
- * make this throw a security error instead.
- */
-const downloadQrPng = async ({ value, username }) => {
-  const svg = buildProfileQrSvg({ value, username });
-  const svgUrl = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-
-  const save = (href, filename) => {
-    const link = document.createElement("a");
-    link.href = href;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-  };
-
-  try {
-    const image = new Image();
-    await new Promise((resolve, reject) => {
-      image.onload = resolve;
-      image.onerror = () => reject(new Error("svg failed to load"));
-      image.src = svgUrl;
-    });
-
-    const scale = DOWNLOAD_WIDTH / (image.width || DOWNLOAD_WIDTH);
-    const canvas = document.createElement("canvas");
-    canvas.width = Math.round((image.width || DOWNLOAD_WIDTH) * scale);
-    canvas.height = Math.round((image.height || DOWNLOAD_WIDTH) * scale);
-    const context = canvas.getContext("2d");
-    context.drawImage(image, 0, 0, canvas.width, canvas.height);
-
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    if (!blob) throw new Error("toBlob returned nothing");
-
-    const pngUrl = URL.createObjectURL(blob);
-    save(pngUrl, `gossips-${username}.png`);
-    // Revoked on the next tick: revoking synchronously can cancel the download
-    // in Safari before it starts.
-    setTimeout(() => URL.revokeObjectURL(pngUrl), 10_000);
-  } catch {
-    /*
-     * Some older Safari builds won't rasterise an SVG through an <img> reliably.
-     * The vector file is the same code and scans just as well, so save that
-     * rather than failing outright.
-     */
-    save(svgUrl, `gossips-${username}.svg`);
-  } finally {
-    setTimeout(() => URL.revokeObjectURL(svgUrl), 10_000);
-  }
-};
 
 const ActionRow = ({ icon, label, onClick }) => (
   <button
@@ -112,7 +56,7 @@ const ShareProfileSheet = ({ username, userId, onClose }) => {
     if (downloading) return;
     setDownloading(true);
     try {
-      await downloadQrPng({ value: profileUrl, username });
+      await downloadQrPng({ value: profileUrl, caption: username, filename: `gossips-${username}` });
     } catch {
       toast.error("Couldn't save the QR code");
     } finally {
@@ -125,10 +69,14 @@ const ShareProfileSheet = ({ username, userId, onClose }) => {
   if (scannerOpen) {
     return (
       <QRScannerSheet
-        onFound={(scannedUsername) => {
+        onFound={(result) => {
+          const route = scannedCodeRoute(result);
+          if (!route) return;
           setScannerOpen(false);
           onClose();
-          navigate(`/${scannedUsername}`);
+          // A profile or a group invite — the scanner recognises both, and the route
+          // comes from the parsed result rather than from the scanned text.
+          navigate(route);
         }}
         onClose={() => setScannerOpen(false)}
       />

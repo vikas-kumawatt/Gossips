@@ -701,6 +701,18 @@ export const groupAPI = {
   updateGroup: (groupId, updates) =>
     api.patch(`/groups/${groupId}`, updates).then((r) => r.data),
 
+  /**
+   * The group photo.
+   *
+   * Multipart, so no explicit Content-Type — the browser sets it with the boundary, and
+   * naming it by hand omits the boundary and the server parses nothing.
+   */
+  updateAvatar: (groupId, file) => {
+    const form = new FormData();
+    form.append("avatar", file);
+    return api.patch(`/groups/${groupId}/avatar`, form).then((r) => r.data);
+  },
+
   addMembers: (groupId, userIds) =>
     api.post(`/groups/${groupId}/members`, { userIds }).then((r) => r.data),
 
@@ -727,6 +739,24 @@ export const groupAPI = {
 
   leaveGroup: (groupId) =>
     api.post(`/groups/${groupId}/leave`).then((r) => r.data),
+
+  /*
+   * ── Invite links ──────────────────────────────────────────────────────────
+   *
+   * Uncached, all three. The token can be rotated by any admin at any moment, and a
+   * 60-second cached copy is a link that has already been revoked — which fails for
+   * whoever it was sent to with no way to tell why.
+   */
+  getInvite: (groupId) =>
+    api
+      .get(`/groups/${groupId}/invite`, { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
+  rotateInvite: (groupId) =>
+    api.post(`/groups/${groupId}/invite/rotate`).then((r) => r.data),
+
+  joinByInvite: (token) =>
+    api.post(`/groups/join/${encodeURIComponent(token)}`).then((r) => r.data),
 };
 
 // ─── Chat (existing — kept for backwards compat) ─────────────────────────────

@@ -12,23 +12,34 @@ import { useChat } from "../contexts/ChatContext";
 import { useReport } from "../contexts/ReportContext";
 import { useParams, useNavigate } from "react-router-dom";
 import { Icons } from "../components/icons";
-import SharedPostCard from "../components/Chat/SharedPostCard";
 import { chatAPI } from "../services/api";
-import PollBubble from "../components/Chat/PollBubble";
 import CreatePollSheet from "../components/Chat/CreatePollSheet";
 import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
 import ReconnectBanner from "../components/Chat/ReconnectBanner";
-import VoiceNoteBubble from "../components/Chat/VoiceNoteBubble";
-import ChatVideoBubble from "../components/Chat/ChatVideoBubble";
-import LongPressArea from "../components/Chat/LongPressArea";
+import MessageList from "../components/Chat/MessageList";
+import VideoPlayerOverlay from "../components/Chat/VideoPlayerOverlay";
+import ChatComposer from "../components/Chat/ChatComposer";
+import MessageBubble from "../components/Chat/MessageBubble";
+import { useVoiceRecorder } from "../hooks/useVoiceRecorder";
+import useMediaTray from "../hooks/useMediaTray";
+import { groupMessagesBySender } from "../lib/chatMessage";
+import { MAX_MESSAGE_LENGTH } from "../lib/composerMedia";
 import { downloadMedia } from "../lib/downloadMedia";
 import { lockedChatIdFromError } from "../services/chatUnlock";
 import { canEditMessage } from "../utils/messageEditing";
-import EmojiPicker from "emoji-picker-react";
 import ResponsiveMenu from "../components/ui/ResponsiveMenu";
 
 const MESSAGE_RATE_LIMIT = 1000;
-const MAX_MESSAGE_LENGTH = 10000;
+/** Matches the DM composer's cap. */
+const MAX_RECORDING_MS = 120_000;
+/*
+ * The flat placeholder the preview bar falls back to when a clip carries no envelope.
+ * Normalised 0-1, because the renderer sizes bars as `amp * 30px`.
+ */
+const VOICE_IDLE_WAVEFORM = Array.from(
+  { length: 32 },
+  (_, i) => 0.18 + Math.abs(Math.sin(i * 0.7 + 1)) * 0.65
+);
 // Matches multer's limit on the server. It was 100MB here against 50MB there,
 // so a 60MB file passed this check, uploaded, and then failed.
 const MAX_FILE_SIZE = 50 * 1024 * 1024;
@@ -52,6 +63,9 @@ const GroupChatPage = () => {
       deleteMessageForMe, // Context handles logic
       pinMessage,
       voteInPoll,
+      // Group messages were always reactable over the socket; nothing on this page
+      // called it.
+      reactToMessage,
       setCurrentConversation,
       markConversationAsRead,
       hydrateThreadFromCache,
@@ -63,7 +77,7 @@ const GroupChatPage = () => {
   const [group, setGroup] = useState(null); // Group info
   const [loading, setLoading] = useState(true);
   const [isSending, setIsSending] = useState(false); // Corrected declaration
-  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [uploadingPreview, setUploadingPreview] = useState(null);
   const [mediaPreview, setMediaPreview] = useState(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
@@ -71,6 +85,14 @@ const GroupChatPage = () => {
   const [contextMenu, setContextMenu] = useState(null);
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [error, setError] = useState(null); // Added missing error state
+  /*
+   * Attachments, the same tray the DM composer uses.
+   *
+   * `mediaPreview` above is now only the document path: the picker this replaces took
+   * one file at a time into a modal, so sending three photos to a group meant three
+   * separate messages and three trips through it.
+   */
+  const tray = useMediaTray({ onReject: (message) => setError(message) });
   const [showPollComposer, setShowPollComposer] = useState(false);
   // Groups had no pinned bar at all — the route existed and always returned
   // empty, because the handler built a DM key from the group id.
@@ -81,9 +103,38 @@ const GroupChatPage = () => {
   // reasoning; `lockedChats` holds `group_<id>` entries too.
   const [lockedChatId, setLockedChatId] = useState(null);
   const [unlockAttempt, setUnlockAttempt] = useState(0);
+  /*
+   * Reactions and the media lightbox, which the group thread simply didn't have.
+   *
+   * The reaction picker, the pills, and tapping an image to open it full screen are
+   * all in the shared bubble — but the bubble needs somewhere to report to, and this
+   * page had no state for either. Group messages could be reacted to over the socket
+   * and there was no way to do it.
+   */
+  const [reactingTo, setReactingTo] = useState(null);
+  const [bigPreviewMedia, setBigPreviewMedia] = useState(null);
+
+  /*
+   * Voice recording, shared with the DM composer.
+   *
+   * The microphone button here had no handler — the recorder simply didn't exist on
+   * this page. The hook owns the hardware and its own unmount cleanup, so navigating
+   * away mid-recording releases the mic without this page having to remember to.
+   */
+  const voice = useVoiceRecorder({
+    maxMs: MAX_RECORDING_MS,
+    onError: (message) => setError(message),
+  });
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
-  const fileInputRef = useRef(null);
+  const documentInputRef = useRef(null);
+  /*
+   * The composer's height follows its content.
+   *
+   * A textarea has a fixed `rows` and won't grow, so a multi-line message would scroll a
+   * one-line box. Capped by the element's own `max-h-32`, which is where 128 comes from.
+   */
+  const composerRef = useRef(null);
   const lastMessageTime = useRef(0);
   const hasFetchedData = useRef(false);
   const topSentinelRef = useRef(null);
@@ -333,6 +384,19 @@ const GroupChatPage = () => {
   // receiverId and emits to that one user, so there is nothing to broadcast to
   // a room yet.
 
+  const resizeComposer = useCallback(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
+  }, []);
+
+  // Also on programmatic changes — an emoji, a cleared send, entering edit mode — which
+  // don't go through onChange.
+  useEffect(() => {
+    resizeComposer();
+  }, [newMessage, resizeComposer]);
+
   const handleInputChange = (e) => {
     const value = e.target.value;
     if (editingMessage) {
@@ -342,12 +406,18 @@ const GroupChatPage = () => {
     setNewMessage(value);
   };
 
-  const validateMessage = () => {
-    if (
-      !newMessage.trim() &&
-      !fileInputRef.current?.files?.length &&
-      !mediaPreview
-    ) {
+  /**
+   * @param media What is about to be sent, if anything.
+   *
+   * `media` is a parameter and not read off the tray, because by the time a send is
+   * validated the tray has already been emptied — `handleSendMedia` takes the files
+   * before it uploads them, and `sendVoiceNote` never puts its clip in the tray at all.
+   * Checking only the tray meant an attachment or a voice note sent without a caption
+   * was refused as "Message cannot be empty", which is exactly what the DM page passes
+   * `media` through to avoid.
+   */
+  const validateMessage = (media = []) => {
+    if (!newMessage.trim() && !media.length && !tray.items.length && !mediaPreview) {
       return "Message cannot be empty";
     }
     if (newMessage.length > MAX_MESSAGE_LENGTH) {
@@ -360,15 +430,24 @@ const GroupChatPage = () => {
     return null;
   };
 
+  /**
+   * @returns whether the message actually went out.
+   *
+   * The caller needs to know. `handleSendMedia` uploads to Cloudinary *before* calling
+   * this, so a send that stops at validation — an over-long caption, the rate limit —
+   * used to look identical to success from out there: the uploads were orphaned, the
+   * blob URLs were released and the optimistic bubble was cleared, so the user's photos
+   * disappeared with nothing but a small error line to explain it.
+   */
   const sendMessage = async (media = [], messageType = "text") => {
     if (editingMessage) {
       await handleEditMessage();
-      return;
+      return false;
     }
-    const validationError = validateMessage();
+    const validationError = validateMessage(media);
     if (validationError) {
       setError(validationError);
-      return;
+      return false;
     }
 
     setIsSending(true);
@@ -396,16 +475,17 @@ const GroupChatPage = () => {
     try {
       await sendGroupMessage(messageData);
       setNewMessage("");
-      setShowEmojiPicker(false);
       setReplyingTo(null);
       setError(null);
       lastMessageTime.current = Date.now();
+      return true;
     } catch (err) {
       console.error("Error sending message:", err);
       // The server's own reason — "You're muted in this group", "Slow mode is on —
       // wait 12s" — reaches here now that the send is acknowledged. A generic
       // string threw away the only part the user could act on.
       setError(err?.message || "Failed to send message");
+      return false;
     } finally {
       setIsSending(false);
     }
@@ -434,12 +514,24 @@ const GroupChatPage = () => {
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (!isSending) sendMessage();
+      // `handleSendButtonClick`, not `sendMessage`: with attachments staged, the text is
+      // their caption. Calling `sendMessage` directly sent the caption as a message of
+      // its own and left the photos sitting in the tray.
+      if (!isSending) handleSendButtonClick();
     } else if (e.key === "Escape") {
-      setEditingMessage(null);
-      setNewMessage("");
-      setReplyingTo(null);
-      setShowEmojiPicker(false);
+      /*
+       * Escape leaves the draft alone unless it *is* an edit.
+       *
+       * This cleared `newMessage` unconditionally, so pressing Escape while composing —
+       * to dismiss the keyboard, or out of habit — deleted whatever had been typed with
+       * no way back. Only an edit has something to revert to.
+       */
+      if (editingMessage) {
+        setEditingMessage(null);
+        setNewMessage("");
+      }
+      if (replyingTo) setReplyingTo(null);
+      // ChatComposer closes its own emoji and GIF pickers on Escape before this runs.
     }
   };
 
@@ -449,55 +541,185 @@ const GroupChatPage = () => {
     }
   };
 
-  const handleMediaSelect = (e) => {
-    const files = Array.from(e.target.files);
-    if (!files.length) return;
-    const file = files[0];
+  /**
+   * Send the staged photos and videos as one message, captioned by the composer text.
+   *
+   * Ported from the DM thread rather than rewritten. The group page had no equivalent:
+   * `handleMediaUploadConfirm` below sent exactly one file, with no caption, through a
+   * modal — so a group could not receive a multi-photo message at all, and anything
+   * typed alongside was posted separately afterwards.
+   */
+  const handleSendMedia = async () => {
+    if (!tray.items.length || isSending) return;
+
+    // `take` empties the tray and hands the items over *without* revoking their URLs:
+    // the optimistic bubble below renders from them while the upload is in flight.
+    const filesToUpload = tray.take();
+    const caption = newMessage.trim();
+
+    setUploadingPreview({
+      _id: `uploading-${Date.now()}`,
+      isOwn: true,
+      isUploading: true,
+      media: filesToUpload.map((f) => ({ type: f.type, url: f.url })),
+      messageType: "media",
+      createdAt: new Date().toISOString(),
+      content: caption,
+    });
+    setIsSending(true);
+
+    /*
+     * Held outside the try so the catch can see what did upload. Uploads happen one at a
+     * time before the message is sent, so a failure on file five of six leaves four in
+     * Cloudinary with nothing pointing at them — and since the selection is put back for
+     * a retry, pressing send again would upload them a second time (CF28).
+     */
+    const uploadedItems = [];
+
+    try {
+      for (const item of filesToUpload) {
+        const formData = new FormData();
+        formData.append("file", item.file);
+        // The server's descriptor verbatim, signature included: it covers
+        // {url, type, fileSize}, so a locally-rebuilt one fails verification on send.
+        uploadedItems.push(await chatAPI.uploadMedia(formData));
+      }
+
+      // Refused sends are reported, not thrown, so the result has to be checked —
+      // otherwise the cleanup below runs on a message that never left.
+      if (!(await sendMessage(uploadedItems, "media"))) {
+        throw new Error("The message was not sent");
+      }
+
+      // Only now are the local previews safe to release.
+      filesToUpload.forEach((item) => tray.release(item.url));
+      setUploadingPreview(null);
+    } catch (err) {
+      console.error("Error sending media:", err);
+      setUploadingPreview(null);
+
+      // Throw away whatever did upload, since the retry will upload it again. Best
+      // effort — the message already didn't send, and a failed cleanup must not become
+      // a second error for the user to read.
+      if (uploadedItems.length) {
+        chatAPI
+          .discardChatMedia(uploadedItems)
+          .catch((discardError) =>
+            console.error("Couldn't discard orphaned uploads:", discardError)
+          );
+      }
+
+      tray.restore(filesToUpload);
+      // `setError` only when there is something new to say: a refusal has already put
+      // the server's own reason on screen, and replacing it with a generic line would
+      // throw away the part the user can act on.
+      setError((current) =>
+        err?.response?.data?.error ||
+        current ||
+        "Couldn't send that media — your files are still attached."
+      );
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  /**
+   * What the send button does, which depends on what's in the composer.
+   *
+   * Attachments win over text, because the text is their caption rather than a message
+   * of its own — except while editing, where the text is the edit.
+   */
+  const handleSendButtonClick = () => {
+    if (isSending) return;
+    if (tray.items.length > 0 && !editingMessage) {
+      handleSendMedia();
+      return;
+    }
+    sendMessage();
+  };
+
+  /** Shape from the shared GifPicker: { url, width, height }. */
+  const handleGifSelect = (gif) => {
+    sendMessage([{ type: "gif", url: gif.url, thumbnail: gif.url }], "gif");
+  };
+
+  /*
+   * Documents keep the one-at-a-time modal.
+   *
+   * The tray previews photos and videos and captions them as a set, which a PDF has no
+   * equivalent of — and `handleMediaUploadConfirm` below already sends one correctly.
+   * Dropping it to unify the two composers would have quietly removed the only way to
+   * send a file to a group.
+   */
+  const handleDocumentSelect = (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
     if (file.size > MAX_FILE_SIZE) {
       setError(`File size too large. Max ${MAX_FILE_SIZE / 1024 / 1024}MB`);
       return;
     }
-    const previewUrl = URL.createObjectURL(file);
-    setMediaPreview({
-      file,
-      url: previewUrl,
-      type: file.type.startsWith("image/")
-        ? "image"
-        : file.type.startsWith("video/")
-          ? "video"
-          : file.type.startsWith("audio/")
-            ? "audio"
-            : "document",
-    });
+    setMediaPreview({ file, url: URL.createObjectURL(file), type: "document" });
     setIsPreviewOpen(true);
-    e.target.value = "";
   };
 
+  /**
+   * Send the recorded clip.
+   *
+   * Deliberately not routed through `handleMediaUploadConfirm`: that path takes a file
+   * off the picker and knows nothing about a duration or an envelope, and both have to
+   * reach the server or the bubble draws a synthetic waveform and claims 0:00.
+   *
+   * `takePreview` clears the composer and hands the clip over, without revoking its
+   * blob URL — nothing here needs it, but keeping the contract identical to the DM
+   * page's means the hook behaves the same either side.
+   */
+  const sendVoiceNote = async () => {
+    if (!voice.preview || isSending) return;
+    const clip = voice.takePreview();
+    if (!clip) return;
+
+    setIsSending(true);
+    try {
+      const formData = new FormData();
+      formData.append("audio", clip.file);
+      formData.append(
+        "waveform",
+        JSON.stringify(Array.isArray(clip.waveformSnapshot) ? clip.waveformSnapshot : [])
+      );
+      formData.append("duration", String(clip.duration));
+
+      const uploaded = await chatAPI.uploadVoice(formData);
+      if (!uploaded?.url) throw new Error("Upload returned no file");
+      // The result is checked for the same reason it is in `handleSendMedia`: a refusal
+      // is reported rather than thrown, and this clip has already left the recorder, so
+      // treating a refusal as success discards the recording silently.
+      if (!(await sendMessage([uploaded], "voice"))) {
+        throw new Error("The voice message was not sent");
+      }
+    } catch (err) {
+      console.error("Voice upload failed", err);
+      // The reason `sendMessage` already reported, if it had one, in preference to this.
+      setError((current) => current || "Couldn't send that voice message.");
+    } finally {
+      setIsSending(false);
+      if (clip.url) URL.revokeObjectURL(clip.url);
+    }
+  };
+
+  /** Send the confirmed document. Only documents reach here — see `handleDocumentSelect`. */
   const handleMediaUploadConfirm = async () => {
     if (!mediaPreview) return;
     const file = mediaPreview.file;
-    const messageType =
-      mediaPreview.type === "image"
-        ? "media"
-        : mediaPreview.type === "video"
-          ? "media"
-          : mediaPreview.type === "audio"
-            ? "voice"
-            : "file";
 
     /*
-     * One field, named for the endpoint it's going to.
-     *
-     * This used to append the file as `file` and then, for voice, append the
-     * same file *again* as `audio`. `/chats/upload/voice` is
-     * `chatUpload.single("audio")`, and multer's single() aborts with
-     * LIMIT_UNEXPECTED_FILE on the first file whose fieldname doesn't match —
-     * `file` arrived first, so every group voice upload 400'd.
+     * The image / video / audio branches this used to pick between are gone with the
+     * modal's other types. It classified `audio` as `voice` and posted it to
+     * `/chats/upload/voice`, which is `chatUpload.single("audio")` — the field name is
+     * why that mattered, and a document only ever goes to `/chats/upload` as `file`.
      */
-    const isVoice = messageType === "voice";
-
     const formData = new FormData();
-    formData.append(isVoice ? "audio" : "file", file);
+    formData.append("file", file);
 
     try {
       // Through chatAPI (#119): the shared client refreshes an expired token on 401,
@@ -508,18 +730,17 @@ const GroupChatPage = () => {
       // /chats/upload and { url, duration, waveform } from /upload/voice. Reading
       // `.media` off it gave undefined, so every group attachment was sent with no
       // media at all and arrived as an empty bubble.
-      const uploaded = isVoice
-        ? await chatAPI.uploadVoice(formData)
-        : await chatAPI.uploadMedia(formData);
+      const uploaded = await chatAPI.uploadMedia(formData);
       if (!uploaded?.url) throw new Error("Upload returned no file");
 
-      await sendMessage([uploaded], messageType);
+      await sendMessage([uploaded], "file");
 
+      if (mediaPreview.url?.startsWith("blob:")) URL.revokeObjectURL(mediaPreview.url);
       setMediaPreview(null);
       setIsPreviewOpen(false);
     } catch (err) {
       console.error("Upload failed", err);
-      setError("Failed to upload media");
+      setError("Failed to upload that file");
     }
   };
 
@@ -527,6 +748,66 @@ const GroupChatPage = () => {
   // send path sets one — so ownership has to be derived from the sender.
   const isOwnMessage = (msg) =>
     msg?.sender?._id === userAuth?.id || msg?.sender === userAuth?.id;
+
+  /** How many people are in the group. `getGroup` returns this as `counts.members`. */
+  const memberCount = group?.counts?.members ?? 0;
+
+  /*
+   * Stacks, dividers and `isOwn`, from the same helper the DM thread uses.
+   *
+   * The group list was a flat `messages.map` with an ad-hoc "show the avatar when the
+   * sender changes" rule, so there was no bubble grouping, no day dividers and no
+   * corner-radius continuation. `groupMessagesBySender` also breaks a stack when the
+   * *sender* changes, not just the side — which matters here and not in a DM.
+   */
+  const messageGroups = useMemo(
+    () => groupMessagesBySender(messages, currentUserId),
+    [messages, currentUserId]
+  );
+
+  /**
+   * "Ana replied to Ben" above a stack that quotes someone.
+   *
+   * Groups only. In a DM there are two people and the line would state the obvious,
+   * which is why `replyLabelFor` isn't passed there. Full names, falling back to the
+   * handle — a reply is about people, and half the point is seeing at a glance that it
+   * was aimed at *you*.
+   */
+  const replyLabelFor = useCallback(
+    (message) => {
+      if (!message?.replyTo || message.isDeleted) return null;
+      const who = (user) => user?.name || user?.username;
+      const from = who(message.sender) || "Someone";
+      const target = message.replyTo.sender;
+      const to =
+        String(target?._id || target) === String(currentUserId)
+          ? "you"
+          : who(target) || "someone";
+      return `${from} replied to ${to}`;
+    },
+    [currentUserId]
+  );
+
+  const handleAddReaction = async (messageId, emoji) => {
+    setReactingTo(null);
+    try {
+      await reactToMessage(messageId, emoji);
+    } catch (err) {
+      console.error("Failed to react:", err);
+      setError("Couldn't add that reaction.");
+    }
+  };
+
+  /** Scroll a quoted message into view and flash it, as the DM thread does. */
+  const jumpToMessage = (messageId) => {
+    const node = document.getElementById(`msg-${messageId}`);
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "center" });
+    node.classList.add("ring-2", "ring-violet-500/70", "rounded-2xl");
+    setTimeout(() => {
+      node.classList.remove("ring-2", "ring-violet-500/70", "rounded-2xl");
+    }, 1200);
+  };
 
   /*
    * Anchors the menu at the press, falling back to the bubble.
@@ -673,47 +954,66 @@ const GroupChatPage = () => {
    */
   return (
     <div className="flex flex-col flex-1 min-h-0 overflow-hidden bg-black text-white">
-      {/* Header */}
-      <div className="shrink-0 flex items-center justify-between px-4 py-3 bg-neutral-900 border-b border-neutral-800">
-        <div className="flex items-center gap-3">
+      {/*
+        Header, matching the DM page's.
+        It was `bg-neutral-900` with a 40px avatar and its own spacing while the DM
+        header is black with a 36px avatar — side by side they read as two different
+        products. Same background, same paddings, same avatar size, and the whole
+        identity block is one tap target to the group info page.
+      */}
+      <header className="shrink-0 bg-black border-b border-neutral-800 z-10 py-3 px-3 sm:py-4 sm:px-6">
+        <div className="flex items-center gap-4">
           {/*
-            Not md:hidden. The page now lives inside ChatLayout, but a group
-            opened directly still needs an exit on desktop — this was the only
-            back control and it was hidden at exactly the width where the
-            two-pane layout used to disappear.
+            Not md:hidden. The page lives inside ChatLayout, but a group opened
+            directly still needs an exit on desktop — this was the only back control
+            and it was hidden at exactly the width where the two-pane layout used to
+            disappear.
           */}
           <button
             onClick={() => navigate("/chat")}
-            aria-label="Back to chats"
-            className="mr-2"
+            className="md:hidden text-neutral-400 hover:text-white transition-colors"
+            aria-label="Go back"
           >
-            <Icons.arrowLeft className="w-6 h-6" />
+            <Icons.back className="w-5 h-5" />
           </button>
-          <div className="relative">
+
+          <button
+            type="button"
+            onClick={() => navigate(`/chat/group/${groupId}/info`)}
+            className="flex items-center gap-3 flex-1 min-w-0 text-left"
+            aria-label="Group info"
+          >
             <img
               src={group?.avatar || "/default-group-avatar.png"}
-              alt={group?.name}
-              className="w-10 h-10 rounded-full object-cover bg-neutral-800"
+              alt=""
+              className="w-9 h-9 rounded-full object-cover border border-neutral-700 shrink-0 bg-neutral-800"
             />
-          </div>
-          <div>
-            <h2 className="font-semibold text-white">{group?.name}</h2>
-            <p className="text-xs text-neutral-400">
-              {group?.memberCount || 0} members
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-4">
-          {/* Had no handler at all until the info page existed to open. */}
-          <button
-            onClick={() => navigate(`/chat/group/${groupId}/info`)}
-            aria-label="Group info"
-            className="text-neutral-400 hover:text-white"
-          >
-            <Icons.info className="w-6 h-6" />
+            <div className="flex-1 min-w-0">
+              <h2 className="font-medium text-base truncate">
+                {group?.name || "Group"}
+              </h2>
+              {/*
+                `counts.members`, which is what `getGroup` actually returns.
+                This read `group.memberCount` — a key no server response has ever
+                had — so every group header said "0 members".
+              */}
+              <p className="text-xs text-neutral-400">
+                {memberCount} {memberCount === 1 ? "member" : "members"}
+              </p>
+            </div>
           </button>
+
+          <div className="flex items-center gap-3 shrink-0">
+            <button
+              onClick={() => navigate(`/chat/group/${groupId}/info`)}
+              aria-label="Group info"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-white/10 active:scale-90 transition-all"
+            >
+              <Icons.info className="w-5 h-5" />
+            </button>
+          </div>
         </div>
-      </div>
+      </header>
 
       {/* Messages */}
       {/*
@@ -786,277 +1086,114 @@ const GroupChatPage = () => {
         ref={messagesContainerRef}
         className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
       >
-        {/* The sentinel the observer watches. There wasn't one. */}
-        <div ref={topSentinelRef} />
-        {loadingMore && (
-          <div className="text-center text-neutral-500 py-2">
-            Loading more...
-          </div>
-        )}
-
-        {messages.map((msg, index) => {
-          const isOwn = isOwnMessage(msg);
-          const showAvatar =
-            !isOwn &&
-            (index === 0 || messages[index - 1].sender._id !== msg.sender._id);
-
-          return (
-            <div
-              key={msg._id || msg.tempId}
-              // The anchor the pinned bar scrolls to. The DM page has always
-              // carried one; groups had no pinned bar to need it.
-              id={`msg-${msg._id}`}
-              className={`flex ${isOwn ? "justify-end" : "justify-start"} group relative`}
-            >
-              {!isOwn && (
-                <div
-                  className={`w-8 h-8 rounded-full overflow-hidden mr-2 flex-shrink-0 ${!showAvatar ? "opacity-0" : ""}`}
-                >
-                  <img
-                    src={msg.sender.profilePic || "/default-avatar.png"}
-                    alt={msg.sender.username}
-                    className="w-full h-full object-cover"
-                  />
-                </div>
-              )}
-              <LongPressArea
-                className={`max-w-[70%] rounded-2xl px-4 py-2 ${
-                  isOwn ? "bg-blue-600 text-white" : "bg-neutral-800 text-white"
-                } ${msg.isDeleted ? "italic opacity-70" : ""}`}
-                onTrigger={(e) => handleMessageContextMenu(msg, e)}
-              >
-                {!isOwn &&
-                  (index === 0 ||
-                    messages[index - 1].sender._id !== msg.sender._id) && (
-                    <p className="text-xs text-blue-300 mb-1 font-medium">
-                      {msg.sender.username}
-                    </p>
-                  )}
-
-                {/*
-                  `replyTo.sender`, not `replyTo.senderUsername` — no server
-                  path has ever sent the latter, so the author line here was
-                  always blank. Both transports now nested-populate the sender.
-                */}
-                {msg.replyTo && !msg.isDeleted && (
-                  <div className="mb-2 p-2 bg-black/20 rounded text-sm border-l-2 border-white/50">
-                    <p className="text-xs font-semibold">
-                      {msg.replyTo.sender?.name ||
-                        msg.replyTo.sender?.username ||
-                        "Unknown"}
-                    </p>
-                    <p className="truncate opacity-80">
-                      {msg.replyTo.isDeleted
-                        ? "This message was deleted"
-                        : msg.replyTo.content || "Media"}
-                    </p>
-                  </div>
-                )}
-
-                {/* !isDeleted: an unsent share kept its card on screen. */}
-                {msg.messageType === "post_share" &&
-                  msg.sharedContent &&
-                  !msg.isDeleted && (
-                    <div className={msg.content ? "mb-2" : ""}>
-                      <SharedPostCard sharedContent={msg.sharedContent} />
-                    </div>
-                  )}
-
-                {/*
-                  Every media type, not just images.
-
-                  This branched on `type === "image"` alone and left a placeholder
-                  comment where the rest should have been, so a group video, GIF,
-                  voice note or document rendered as an empty rounded box. Voice was
-                  the worst of it: the group composer has always been able to record
-                  and upload one, so the message was stored, delivered, counted in
-                  the unread badge, previewed in the chat list as "Sent a voice
-                  message" — and displayed as nothing at all.
-                */}
-                {msg.media && msg.media.length > 0 && !msg.isDeleted && (
-                  <div className="mb-2 flex flex-col gap-1 w-fit max-w-full">
-                    {msg.media.map((m, i) => {
-                      if (m.type === "video") {
-                        return <ChatVideoBubble key={i} item={m} cornerClass="rounded-xl" />;
-                      }
-                      // `voice` is what the upload endpoint returns and what the
-                      // Message media enum persists; `audio` is what the optimistic
-                      // preview uses. Both are voice notes.
-                      if (m.type === "audio" || m.type === "voice") {
-                        return (
-                          <VoiceNoteBubble
-                            key={i}
-                            item={m}
-                            isOwn={isOwn}
-                            bubbleRadius="rounded-xl"
-                          />
-                        );
-                      }
-                      if (m.type === "image" || m.type === "gif" || m.type === "sticker") {
-                        return (
-                          <img
-                            key={i}
-                            src={m.url}
-                            alt={m.type === "gif" ? "GIF" : "media"}
-                            width={m.dimensions?.width || undefined}
-                            height={m.dimensions?.height || undefined}
-                            className="block max-w-full h-auto rounded-xl"
-                            loading="lazy"
-                          />
-                        );
-                      }
-                      if (m.type === "document") {
-                        return (
-                          <div
-                            key={i}
-                            className="flex items-center gap-2.5 min-w-[190px] max-w-[260px] py-0.5"
-                          >
-                            <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
-                              <Icons.file className="w-5 h-5 text-white" />
-                            </div>
-                            <div className="flex-1 min-w-0">
-                              <p className="text-[13px] font-medium truncate">{m.filename}</p>
-                              {m.fileSize > 0 && (
-                                <p className="text-[11px] text-white/40">
-                                  {(m.fileSize / 1024 / 1024).toFixed(1)} MB
-                                </p>
-                              )}
-                            </div>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadMedia(m).catch((err) => {
-                                  console.error("Failed to download document:", err);
-                                  setError("Couldn't download that.");
-                                })
-                              }
-                              aria-label={`Download ${m.filename || "file"}`}
-                              className="opacity-50 hover:opacity-90 transition-opacity shrink-0"
-                            >
-                              <Icons.download className="w-4 h-4" />
-                            </button>
-                          </div>
-                        );
-                      }
-                      return null;
-                    })}
-                  </div>
-                )}
-
-                {msg.messageType === "poll" && msg.poll && !msg.isDeleted && (
-                  <div className={msg.content ? "mb-2" : ""}>
-                    <PollBubble
-                      message={msg}
-                      isOwn={isOwn}
-                      onVote={handleVote}
-                    />
-                  </div>
-                )}
-
-                {msg.content && (
-                  <p className="whitespace-pre-wrap break-words">{msg.content}</p>
-                )}
-                <div className="flex items-center justify-end gap-1 mt-1">
-                  <span className="text-[10px] opacity-70">
-                    {new Date(msg.createdAt).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    })}
-                  </span>
-                </div>
-              </LongPressArea>
+        {/*
+          The same list the DM thread renders.
+          This was ~170 lines of inline bubble markup: no day dividers, no bubble
+          stacking, no reaction pills, no hover timestamp, and a media branch that
+          handled images only. Sharing MessageList is what makes the two threads
+          actually look alike rather than approximately alike.
+        */}
+        <MessageList
+          groups={messageGroups}
+          viewerId={currentUserId}
+          reactingTo={reactingTo}
+          loadingMore={loadingMore}
+          topSentinelRef={topSentinelRef}
+          emptyState={
+            <div className="text-center py-12 text-neutral-400">
+              <Icons.chat2 className="w-12 h-12 mx-auto mb-3 opacity-50" />
+              <p>No messages yet. Say hello.</p>
             </div>
-          );
-        })}
+          }
+          /*
+            Whoever sent it — a group has many senders, so the avatar is the only
+            thing identifying them. No name label: the face plus a tap through to the
+            profile carries it, and a name over every stack is noise.
+          */
+          avatarFor={(message) => ({
+            src: message.sender?.profilePic,
+            username: message.sender?.username,
+          })}
+          onOpenProfile={(name) => navigate(`/${name}`)}
+          replyLabelFor={replyLabelFor}
+          onAddReaction={handleAddReaction}
+          onContextMenu={handleMessageContextMenu}
+          onJumpToMessage={jumpToMessage}
+          onDismissReactions={() => setReactingTo(null)}
+          onVote={handleVote}
+          onOpenMedia={setBigPreviewMedia}
+        />
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Input Area */}
+      {/* The optimistic bubble for an upload in flight, exactly as the DM thread does it.
+          Outside MessageList because it isn't in `messages` yet — it has no id from the
+          server, so it can't be part of a keyed stack. */}
+      {uploadingPreview && (
+        <div className="flex justify-end px-3 mb-3">
+          <div className="max-w-[80%] flex flex-col items-end">
+            <MessageBubble
+              message={uploadingPreview}
+              isOwn={true}
+              msgIndex={0}
+              groupLength={1}
+              isReacting={false}
+            />
+          </div>
+        </div>
+      )}
+
       {/* `shrink-0` so the composer keeps its height when the keyboard shortens the
           shell, and safe-area padding so it clears the home indicator. */}
       <div
-        className="shrink-0 p-4 bg-neutral-900 border-t border-neutral-800"
-        style={{ paddingBottom: "max(1rem, env(safe-area-inset-bottom))" }}
+        className="shrink-0 bg-black"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
       >
-        {replyingTo && (
-          <div className="mb-2 p-2 bg-neutral-800 rounded flex items-center justify-between">
-            <div>
-              <p className="text-xs text-blue-400">
-                Replying to {replyingTo.senderUsername}
-              </p>
-              <p className="text-sm truncate text-neutral-300">
-                {replyingTo.content}
-              </p>
-            </div>
-            <button
-              onClick={() => setReplyingTo(null)}
-              className="text-neutral-400 hover:text-white"
-            >
-              <Icons.close className="w-4 h-4" />
-            </button>
-          </div>
-        )}
+        {/*
+          The same composer the DM thread uses, with two extra slots.
 
-        {/* Simplified input for brevity, assuming Icons struct */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => fileInputRef.current?.click()}
-            aria-label="Attach media"
-            className="text-neutral-400 hover:text-white p-2"
-          >
-            <Icons.plus className="w-6 h-6" />
-          </button>
-          <button
-            onClick={() => setShowPollComposer(true)}
-            aria-label="Poll"
-            className="text-neutral-400 hover:text-white p-2"
-          >
-            <Icons.poll className="w-6 h-6" />
-          </button>
-          {showPollComposer && (
-            <CreatePollSheet
-              groupId={groupId}
-              onClose={() => setShowPollComposer(false)}
-            />
-          )}
-          <input
-            type="file"
-            ref={fileInputRef}
-            className="hidden"
-            multiple
-            onChange={handleMediaSelect}
+          A poll is kept here and absent there: between two people it collapses into a
+          question you could just ask. Documents are kept because the modal below is the
+          only path that sends one, and the tray has no way to preview a PDF.
+        */}
+        <ChatComposer
+          value={newMessage}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          inputRef={composerRef}
+          sending={isSending}
+          replyingTo={replyingTo}
+          onCancelReply={() => setReplyingTo(null)}
+          editingMessage={editingMessage}
+          onCancelEdit={() => {
+            setEditingMessage(null);
+            setNewMessage("");
+          }}
+          media={tray.items}
+          onFilesSelected={tray.add}
+          onRemoveMedia={tray.removeAt}
+          onPreviewMedia={setBigPreviewMedia}
+          voice={voice}
+          idleWaveform={VOICE_IDLE_WAVEFORM}
+          onSendVoice={sendVoiceNote}
+          onSend={handleSendButtonClick}
+          onEmoji={handleEmojiClick}
+          onGifSelect={handleGifSelect}
+          onPickDocument={() => documentInputRef.current?.click()}
+          onPoll={() => setShowPollComposer(true)}
+        />
+        <input
+          type="file"
+          ref={documentInputRef}
+          className="hidden"
+          onChange={handleDocumentSelect}
+        />
+        {showPollComposer && (
+          <CreatePollSheet
+            groupId={groupId}
+            onClose={() => setShowPollComposer(false)}
           />
-
-          <div className="flex-1 relative">
-            <input
-              value={newMessage}
-              onChange={handleInputChange}
-              onKeyDown={handleKeyDown}
-              placeholder="Message..."
-              className="w-full bg-neutral-950 text-white rounded-full px-4 py-2 focus:outline-none focus:ring-1 focus:ring-blue-500"
-            />
-            <button
-              onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white"
-            >
-              <Icons.smile className="w-5 h-5" />
-            </button>
-          </div>
-
-          {newMessage.trim() || mediaPreview ? (
-            <button
-              onClick={() => sendMessage()}
-              disabled={isSending}
-              className="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 disabled:opacity-50"
-            >
-              <Icons.send className="w-5 h-5" />
-            </button>
-          ) : (
-            <button className="bg-neutral-800 text-white p-2 rounded-full hover:bg-neutral-700">
-              <Icons.mic className="w-5 h-5" />
-            </button>
-          )}
-        </div>
+        )}
       </div>
 
       {/* Context Menu, Emoji Picker, etc would go here as overlays */}
@@ -1147,61 +1284,73 @@ const GroupChatPage = () => {
         />
       )}
 
-      {showEmojiPicker && (
-        <div className="absolute bottom-20 right-4 z-50">
-          <EmojiPicker theme="dark" onEmojiClick={handleEmojiClick} />
+      {/* Media Preview Modal - Simplified */}
+      {/*
+        Tapping media in the thread opens it, which it never did here.
+        Images get the lightbox, video gets the app's own player — the same pair the
+        DM thread uses, so a photo in a group behaves like a photo in a DM.
+      */}
+      {bigPreviewMedia && bigPreviewMedia.type !== "image" && (
+        <VideoPlayerOverlay
+          src={bigPreviewMedia.url}
+          onClose={() => setBigPreviewMedia(null)}
+        />
+      )}
+      {bigPreviewMedia?.type === "image" && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Image preview"
+          className="fixed inset-0 bg-black/90 flex items-center justify-center z-50"
+          onClick={() => setBigPreviewMedia(null)}
+        >
+          <div
+            className="relative max-w-[90vw] max-h-[90vh]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setBigPreviewMedia(null)}
+              aria-label="Close preview"
+              className="absolute -top-5 -right-5 w-11 h-11 bg-neutral-800 rounded-full flex items-center justify-center hover:bg-red-500 transition-colors z-10"
+            >
+              <Icons.close className="w-4 h-4 text-white" />
+            </button>
+            <img
+              src={bigPreviewMedia.url}
+              alt=""
+              className="max-w-[90vw] max-h-[90vh] object-contain rounded-xl"
+            />
+          </div>
         </div>
       )}
 
-      {/* Media Preview Modal - Simplified */}
       {isPreviewOpen && mediaPreview && (
         <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4">
           <div className="bg-neutral-900 p-4 rounded-xl max-w-lg w-full">
-            <h3 className="text-lg font-semibold mb-4">Send Media</h3>
+            <h3 className="text-lg font-semibold mb-4">Send file</h3>
             {/*
-              Every type, not just images.
-              This branched on `image` and left a `{/* Others *}` placeholder, so
-              picking a video, an audio file or a document opened a modal with an
-              empty box and a Send button — no way to tell what you were about to
-              send, or whether the right file had been picked.
+              Documents only, now that photos and videos go through the tray.
+
+              This modal used to be the single path for every attachment type, and its
+              image, video and audio branches became unreachable the moment the composer
+              grew a tray — dead branches that still looked load-bearing. `handleDocumentSelect`
+              is the only thing that opens it, and it only ever sets `type: "document"`.
             */}
             <div className="flex justify-center mb-4">
-              {mediaPreview.type === "image" && (
-                <img
-                  src={mediaPreview.url}
-                  alt={mediaPreview.file?.name || "Selected image"}
-                  className="max-h-[300px] object-contain"
-                />
-              )}
-              {mediaPreview.type === "video" && (
-                // `controls` here, unlike the message bubble: this is a confirmation
-                // step, so scrubbing to check you picked the right clip is the point.
-                <video
-                  src={mediaPreview.url}
-                  controls
-                  preload="metadata"
-                  playsInline
-                  className="max-h-[300px] max-w-full rounded-lg"
-                />
-              )}
-              {mediaPreview.type === "audio" && (
-                <audio src={mediaPreview.url} controls className="w-full" />
-              )}
-              {mediaPreview.type === "document" && (
-                <div className="flex items-center gap-3 w-full px-3 py-4 rounded-lg bg-neutral-800">
-                  <Icons.file className="w-8 h-8 text-white shrink-0" />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">
-                      {mediaPreview.file?.name || "Document"}
+              <div className="flex items-center gap-3 w-full px-3 py-4 rounded-lg bg-neutral-800">
+                <Icons.file className="w-8 h-8 text-white shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm font-medium truncate">
+                    {mediaPreview.file?.name || "Document"}
+                  </p>
+                  {mediaPreview.file?.size > 0 && (
+                    <p className="text-xs text-neutral-400">
+                      {(mediaPreview.file.size / 1024 / 1024).toFixed(1)} MB
                     </p>
-                    {mediaPreview.file?.size > 0 && (
-                      <p className="text-xs text-neutral-400">
-                        {(mediaPreview.file.size / 1024 / 1024).toFixed(1)} MB
-                      </p>
-                    )}
-                  </div>
+                  )}
                 </div>
-              )}
+              </div>
             </div>
             <div className="flex justify-end gap-2">
               <button

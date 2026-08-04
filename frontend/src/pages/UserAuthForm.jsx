@@ -1,5 +1,5 @@
 import React, { useContext, useRef, useState } from "react";
-import { useNavigate, Navigate, useSearchParams } from "react-router-dom";
+import { useNavigate, Navigate, useLocation, useSearchParams } from "react-router-dom";
 import InputBox from "../components/InputBox";
 import { Link } from "react-router-dom";
 import { UserContext } from "../contexts/UserContext";
@@ -15,7 +15,31 @@ import ReportProblemModal from "../components/ReportProblemModal";
 const UserAuthForm = ({ type }) => {
   const { userAuth: { token }, setUserAuth } = useContext(UserContext);
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams] = useSearchParams();
+
+  /*
+   * Where to go after signing in, if we were sent here from somewhere.
+   *
+   * `ProtectedRoute` has always redirected with `state={{ from: location }}` and this
+   * page has always ignored it — so signing in from any protected route landed on the
+   * feed and lost wherever you were headed. That is merely annoying for most routes and
+   * breaks the feature outright for a group invite link, whose entire job is to take a
+   * signed-out visitor to one specific place.
+   *
+   * Accepts a location object (what ProtectedRoute sends) or a plain path string, and
+   * only ever an internal path — a caller-supplied absolute URL here would be an open
+   * redirect.
+   */
+  const redirectAfterAuth = (() => {
+    const from = location.state?.from;
+    const path = typeof from === "string" ? from : from?.pathname;
+    if (!path || typeof path !== "string") return null;
+    if (!path.startsWith("/") || path.startsWith("//")) return null;
+    // Bouncing straight back to an auth page would loop.
+    if (path === "/login" || path === "/signup") return null;
+    return path;
+  })();
 
   /*
    * "Add account" mode. The guard below sends a signed-in visitor straight
@@ -75,7 +99,7 @@ const UserAuthForm = ({ type }) => {
       }
 
       toast.success(type === "signup" ? "Signed up successfully!" : "Logged in successfully!");
-      navigate(goingToSetup ? "/profile-setup" : "/", {
+      navigate(goingToSetup ? "/profile-setup" : redirectAfterAuth || "/", {
         state: {
           from: "google-auth",
           newUser: data.newUser,
@@ -170,9 +194,16 @@ const UserAuthForm = ({ type }) => {
     }
   };
 
-  // Signed in and not deliberately adding another account — nothing to do here.
+  /*
+   * Signed in and not deliberately adding another account — nothing to do here.
+   *
+   * This is also the email/password success path: `setUserAuth` sets the token, the
+   * component re-renders, and this redirect is what actually navigates. So honouring
+   * `redirectAfterAuth` here is what carries someone back to the invite link (or
+   * whatever protected route sent them) rather than dropping them on the feed.
+   */
   if (token && type === "login" && !isAddingAccount) {
-    return <Navigate to="/" />;
+    return <Navigate to={redirectAfterAuth || "/"} replace />;
   }
 
   return (

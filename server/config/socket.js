@@ -1,4 +1,5 @@
 import { Server } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import Message from "../models/Message.js";
 import User from "../models/User.js";
 import Group from "../models/Group.js";
@@ -25,6 +26,17 @@ import { resolveMessageMentions } from "../utils/mentions.js";
 import { parseHashtags } from "../utils/richText.js";
 import { scrub } from "../middleware/sanitizeMongo.js";
 import { isAllowedGif, stripMediaToken, verifyMedia } from "../utils/mediaToken.js";
+import { getRedis } from "./redis.js";
+import {
+  bindUserToCall,
+  createCall,
+  getCall,
+  getRingingCallsFor,
+  getUserCallId,
+  removeCall,
+  saveCall,
+  unbindUser,
+} from "../utils/callStore.js";
 import {
   ACTIVE_ACCOUNT,
   MAX_RECIPIENTS,
@@ -209,11 +221,19 @@ let io;
 const userSockets = new Map(); // userId -> Set<socketId>
 const typingUsers = new Map(); // conversationId -> Set of userIds
 
-// Two maps rather than one. These used to share a single map keyed by both
-// callId and userId, so a second concurrent call overwrote the per-user entry
-// and orphaned the first callId forever.
-const activeCalls = new Map(); // callId -> call data
-const callByUser = new Map(); // userId -> callId
+/*
+ * Calls in flight live in utils/callStore.js, not here.
+ *
+ * They were two module-level Maps, which works exactly as long as there is one server
+ * process — with two, a caller on instance A and a callee on instance B never see each
+ * other's call, so `answerCall` returns silently and the ring times out at 45 seconds
+ * without anything erroring. The store keeps the same shape (one entry per call, one
+ * pointer per user) and puts it in Redis when one is reachable.
+ *
+ * Timers stay in this process: a Timeout handle isn't serialisable and a timer has to
+ * fire somewhere. Whichever node armed one owns it, and the store's TTLs are the floor
+ * under a node that dies holding one.
+ */
 const callTimers = new Map(); // callId -> Timeout
 
 // Ceiling on one presence broadcast — see notifyContactsStatus.
@@ -303,6 +323,124 @@ function sweepRateBuckets() {
   }
 }
 
+/**
+ * Make rooms span server processes.
+ *
+ * Without an adapter, Socket.IO keeps its rooms in the memory of one process, so
+ * `io.to(userId).emit(...)` only ever reaches sockets attached to *this* instance. Every
+ * cross-user delivery in this file — a message, a typing indicator, an incoming call —
+ * silently stops at the process boundary the moment a second instance exists. Sharing the
+ * call state without this would fix the bookkeeping and still never ring the phone.
+ *
+ * Optional, like the cache it borrows its client from: with no Redis the adapter isn't
+ * installed and a single instance behaves exactly as before. `duplicate()` twice because
+ * a Redis connection in subscriber mode can't issue ordinary commands, so pub and sub
+ * each need their own — and neither may be the shared client the cache is using.
+ *
+ * Attached only once both connections are *ready*, and never synchronously.
+ *
+ * The first version of this called `server.adapter()` immediately. `duplicate()` copies
+ * the cache client's options, which include `lazyConnect: true` and
+ * `enableOfflineQueue: false` — so the adapter's constructor issued `psubscribe` on a
+ * socket that had not been opened, ioredis rejected it at once for having nowhere to
+ * queue it, and nothing was waiting on that promise. An unhandled rejection takes the
+ * process down in Node 15 and later, so a Redis server that merely wasn't running turned
+ * into a crash loop at boot — and the `try/catch` here could not see it, because a
+ * rejected promise is not a thrown exception.
+ */
+const attachRedisAdapter = (server) => {
+  if (!process.env.REDIS_URL) {
+    console.log("Socket.IO: no REDIS_URL — single-instance mode");
+    return;
+  }
+
+  /*
+   * `lazyConnect: false` so these connect now, and `enableOfflineQueue: true` so any
+   * command issued before that finishes waits instead of failing. `maxRetriesPerRequest:
+   * null` is what ioredis documents for a subscriber: the default gives up after a few
+   * attempts, and a pub/sub connection that has stopped retrying is a silent outage.
+   */
+  const options = {
+    lazyConnect: false,
+    enableOfflineQueue: true,
+    maxRetriesPerRequest: null,
+  };
+
+  let pub;
+  let sub;
+  try {
+    pub = getRedis().duplicate(options);
+    sub = getRedis().duplicate(options);
+  } catch (error) {
+    console.error("Socket.IO: couldn't create Redis clients — single-instance mode:", error.message);
+    return;
+  }
+
+  /*
+   * An `error` listener on each, before anything else.
+   *
+   * An ioredis client with no error listener emits an unhandled `error` event, which is
+   * also fatal. These log once per state change rather than per retry — ioredis reconnects
+   * on its own, and printing every attempt buries the log.
+   */
+  let complained = false;
+  for (const client of [pub, sub]) {
+    client.on("error", (error) => {
+      if (complained) return;
+      complained = true;
+      console.error(
+        "Socket.IO: Redis unavailable — cross-instance delivery is OFF:",
+        error.code ?? error.message
+      );
+    });
+    client.on("ready", () => {
+      complained = false;
+    });
+  }
+
+  /*
+   * Wait for both, then swap the adapter in.
+   *
+   * Until then the default in-memory adapter is in use, so a socket that connects during
+   * the first few milliseconds of boot is served correctly by this instance — it just
+   * isn't visible to the others yet. Swapping later is safe because `io.adapter()` applies
+   * to namespaces as they are created and this runs before the server accepts anything
+   * meaningful; a broadcast in that window reaches this node's clients, which is exactly
+   * what a single-instance deployment does all the time.
+   *
+   * If Redis never comes up, `ready` never fires, this promise never settles, and the
+   * process keeps running in single-instance mode. That is the intended outcome — the one
+   * thing it must not do is crash.
+   */
+  /*
+   * Deliberately not `events.once(client, "ready")`.
+   *
+   * That helper rejects as soon as the emitter emits `error` — and ioredis emits one per
+   * failed attempt while it retries. So a Redis server that was starting a second later
+   * than the app would reject this, log "adapter failed", and stay single-instance for the
+   * life of the process even after Redis became available. Waiting only for `ready`, and
+   * letting the error listeners above deal with errors, means a late Redis still works.
+   *
+   * The `status` check closes the race where a client connected before this ran.
+   */
+  const whenReady = (client) =>
+    client.status === "ready"
+      ? Promise.resolve()
+      : new Promise((resolve) => client.once("ready", resolve));
+
+  Promise.all([whenReady(pub), whenReady(sub)])
+    .then(() => {
+      server.adapter(createAdapter(pub, sub));
+      console.log("Socket.IO: Redis adapter attached — cross-instance delivery is ON");
+    })
+    .catch((error) => {
+      console.error(
+        "Socket.IO: Redis adapter failed — cross-instance delivery is OFF:",
+        error.message
+      );
+    });
+};
+
 export const initializeSocket = (server) => {
   io = new Server(server, {
     cors: {
@@ -325,6 +463,8 @@ export const initializeSocket = (server) => {
     // exhaust the heap.
     maxHttpBufferSize: 1e6,
   });
+
+  attachRedisAdapter(io);
 
   // unref'd so it never holds the process open on shutdown.
   setInterval(sweepRateBuckets, 5 * 60 * 1000).unref();
@@ -362,6 +502,17 @@ export const initializeSocket = (server) => {
       socket.userId = user._id.toString();
       socket.username = user.username;
       socket.userRole = user.role;
+      /*
+       * Also on `socket.data`, which is the part that crosses the process boundary.
+       *
+       * Properties hung directly on a socket are local to the process holding it —
+       * `fetchSockets()` returns remote sockets as plain descriptors carrying `id`,
+       * `rooms`, `handshake` and `data`, and nothing else. So `onlineAmong` can only
+       * identify a socket on another instance if the id is in `data`. The two are set
+       * together, here, rather than leaving a second place to forget.
+       */
+      socket.data.userId = socket.userId;
+      socket.data.username = user.username;
       next();
     } catch (error) {
       next(new Error("Authentication error"));
@@ -648,12 +799,20 @@ export const initializeSocket = (server) => {
          */
         const isSelfNote = receiverKey === senderId.toString();
 
-        // Emit to receiver if online
-        const receiverSockets = isSelfNote ? null : userSockets.get(receiverKey);
-        if (receiverSockets && receiverSockets.size > 0) {
-          receiverSockets.forEach(socketId => {
-            io.to(socketId).emit("receiveMessage", { ...messageObject, tempId, isOwn: false });
-          });
+        /*
+         * Delivered to the receiver's *room*, and counted through the adapter.
+         *
+         * This read `userSockets`, which only holds sockets attached to this process — so
+         * with more than one instance a message to someone connected elsewhere was never
+         * delivered live and never marked as delivered. It reappeared on their next fetch,
+         * so the failure looked like lag rather than a bug. `fetchSockets` spans nodes and
+         * every socket joins a room named after its user id on connect.
+         */
+        const receiverOnline = isSelfNote
+          ? false
+          : (await io.in(receiverKey).fetchSockets()).length > 0;
+        if (receiverOnline) {
+          io.to(receiverKey).emit("receiveMessage", { ...messageObject, tempId, isOwn: false });
 
           // Record delivery receipt
           await message.markAsDelivered();
@@ -683,11 +842,8 @@ export const initializeSocket = (server) => {
          * case and the one people forget: a background tab still holds a socket, so
          * closing the tab is not the same as closing the window.
          */
-        if (receiverSockets && receiverSockets.size > 0) {
-          console.log("Push: skipped, recipient is connected", {
-            to: receiverKey,
-            sockets: receiverSockets.size,
-          });
+        if (receiverOnline) {
+          console.log("Push: skipped, recipient is connected", { to: receiverKey });
         } else {
           const muted = await isConversationMuted(receiver._id, `user_${senderId}`);
           if (muted) {
@@ -720,10 +876,8 @@ export const initializeSocket = (server) => {
 
         // Same reasoning as the echo above: every tab this sender has open.
         io.to(senderId.toString()).emit("chatUpdated", chatUpdateForSender);
-        if (receiverSockets) {
-          receiverSockets.forEach(socketId => {
-            io.to(socketId).emit("chatUpdated", chatUpdateForReceiver);
-          });
+        if (receiverOnline) {
+          io.to(receiverKey).emit("chatUpdated", chatUpdateForReceiver);
         }
 
         // The definite answer. A client can now settle its optimistic bubble on
@@ -873,7 +1027,7 @@ export const initializeSocket = (server) => {
           return;
         }
 
-        const online = userSockets.has(userId);
+        const online = await isUserOnline(userId);
         let lastSeen = null;
         if (maySeeLastSeen) {
           if (online) lastSeen = new Date();
@@ -1247,22 +1401,20 @@ export const initializeSocket = (server) => {
 
         if (!caller || !receiver) return refuse("User not found");
 
-        // Canonical id from the database, not the client's string — userSockets
-        // and callByUser are both keyed that way, so a differently-cased id
+        // Canonical id from the database, not the client's string — the user's room
+        // name and the call store's keys are both that id, so a differently-cased one
         // would silently miss every lookup below.
         const receiverKey = receiver._id.toString();
 
         if (receiverKey === socket.userId) {
           return refuse("You can't call yourself");
         }
-        if (callByUser.has(socket.userId)) {
-          return refuse("You're already in a call");
-        }
+
         // Only an *answered* call makes the callee unavailable. Reserving them
         // while their phone is merely ringing would let one caller hold someone
         // in a rolling 45-second lockout, and would break the ordinary case of
         // two people dialling each other at the same moment.
-        const theirCall = activeCalls.get(callByUser.get(receiverKey));
+        const theirCall = await getCall(await getUserCallId(receiverKey));
         if (theirCall?.status === "active") {
           return refuse("They're on another call");
         }
@@ -1283,8 +1435,16 @@ export const initializeSocket = (server) => {
           createdAt: new Date()
         };
 
-        activeCalls.set(callData.callId, callData);
-        callByUser.set(callData.caller, callData.callId);
+        /*
+         * The "you're already in a call" check *is* the reservation.
+         *
+         * It used to be a separate `callByUser.has` read further up, which two tabs
+         * dialling at the same moment could both pass before either wrote — leaving one
+         * call recorded and the other orphaned with the caller's pointer stolen.
+         */
+        if (!(await createCall(callData))) {
+          return refuse("You're already in a call");
+        }
 
         // Both parties join now rather than on answer. Cancelling a ringing
         // call emits to the room, so a callee who isn't in it yet would keep
@@ -1294,17 +1454,23 @@ export const initializeSocket = (server) => {
 
         armCallTimer(callData.callId, RING_TIMEOUT_MS, "no_answer");
 
-        const receiverSockets = userSockets.get(callData.receiver);
-        if (receiverSockets) {
-          receiverSockets.forEach(socketId => {
-            io.to(socketId).emit("incomingCall", {
-              ...callData,
-              callerInfo: {
-                username: caller.username,
-                name: caller.name,
-                profilePic: caller.profilePic
-              }
-            });
+        /*
+         * The user's own room, and the adapter's count — not `userSockets`.
+         *
+         * That map only holds sockets attached to *this* process, so with more than one
+         * instance a callee connected elsewhere looked offline: the ring went nowhere and
+         * a push notification was sent to someone who had the app open. Every socket joins
+         * a room named after its user id, and `fetchSockets` spans nodes.
+         */
+        const receiverSockets = await io.in(callData.receiver).fetchSockets();
+        if (receiverSockets.length) {
+          io.to(callData.receiver).emit("incomingCall", {
+            ...callData,
+            callerInfo: {
+              username: caller.username,
+              name: caller.name,
+              profilePic: caller.profilePic
+            }
           });
         }
 
@@ -1319,7 +1485,7 @@ export const initializeSocket = (server) => {
          * Not awaited: the ring has already gone out to any live socket and the
          * caller is waiting on the ack. A slow FCM round trip must not delay either.
          */
-        if (!receiverSockets?.size) {
+        if (!receiverSockets.length) {
           sendPushNotification(callData.receiver, {
             title: caller.name || caller.username,
             body: callType === "video" ? "Incoming video call" : "Incoming voice call",
@@ -1355,9 +1521,8 @@ export const initializeSocket = (server) => {
      * arbitrary calls. Each one now checks the authenticated identity against
      * the call's own two parties.
      */
-    const callParty = (callId) => {
-      if (typeof callId !== "string") return null;
-      const callData = activeCalls.get(callId);
+    const callParty = async (callId) => {
+      const callData = await getCall(callId);
       if (!callData) return null;
       if (callData.caller !== socket.userId && callData.receiver !== socket.userId) {
         return null;
@@ -1365,8 +1530,8 @@ export const initializeSocket = (server) => {
       return callData;
     };
 
-    socket.on("answerCall", ({ callId, answer }) => {
-      const callData = activeCalls.get(callId);
+    socket.on("answerCall", async ({ callId, answer }) => {
+      const callData = await getCall(callId);
       if (!callData) return;
       // Only the person being called, and only while it's still ringing.
       if (callData.receiver !== socket.userId) return;
@@ -1379,7 +1544,9 @@ export const initializeSocket = (server) => {
         callData.participants.push(socket.userId);
       }
       // Reserved only now that they've picked up.
-      callByUser.set(callData.receiver, callId);
+      await bindUserToCall(callData.receiver, callId);
+      // Persisted, because the store may not be holding the same object this mutated.
+      await saveCall(callData);
       // Swap the ring timeout for a long backstop. Without one, a party who
       // refreshes mid-call reconnects inside the 5s disconnect grace, so the
       // teardown never runs — and both users stay "already in a call" forever.
@@ -1392,8 +1559,8 @@ export const initializeSocket = (server) => {
       joinUserToRoom(callData.receiver, callId);
     });
 
-    socket.on("rejectCall", ({ callId }) => {
-      const callData = activeCalls.get(callId);
+    socket.on("rejectCall", async ({ callId }) => {
+      const callData = await getCall(callId);
       if (!callData) return;
       if (callData.receiver !== socket.userId) return;
       if (callData.status !== "ringing") return;
@@ -1407,11 +1574,11 @@ export const initializeSocket = (server) => {
       // branch and nothing ever reached it, so a declined call left no trace in
       // the thread at all.
       saveCallLog(callData);
-      cleanupCall(callId);
+      await cleanupCall(callData);
     });
 
-    socket.on("endCall", ({ callId }) => {
-      const callData = callParty(callId);
+    socket.on("endCall", async ({ callId }) => {
+      const callData = await callParty(callId);
       if (!callData) return;
 
       callData.status = "ended";
@@ -1425,7 +1592,7 @@ export const initializeSocket = (server) => {
       });
 
       saveCallLog(callData);
-      cleanupCall(callId);
+      await cleanupCall(callData);
     });
 
     // WebRTC signaling.
@@ -1436,18 +1603,18 @@ export const initializeSocket = (server) => {
     // deliver a forged rtcOffer into any user's or any group's room, stamped
     // with a legitimate `from`. The relay now only works between the two
     // parties of a call that actually exists.
-    socket.on("iceCandidate", ({ callId, candidate }) => {
-      if (!callParty(callId)) return;
+    socket.on("iceCandidate", async ({ callId, candidate }) => {
+      if (!(await callParty(callId))) return;
       socket.to(callId).emit("iceCandidate", { candidate, from: socket.userId });
     });
 
-    socket.on("rtcOffer", ({ callId, offer }) => {
-      if (!callParty(callId)) return;
+    socket.on("rtcOffer", async ({ callId, offer }) => {
+      if (!(await callParty(callId))) return;
       socket.to(callId).emit("rtcOffer", { offer, from: socket.userId });
     });
 
-    socket.on("rtcAnswer", ({ callId, answer }) => {
-      if (!callParty(callId)) return;
+    socket.on("rtcAnswer", async ({ callId, answer }) => {
+      if (!(await callParty(callId))) return;
       socket.to(callId).emit("rtcAnswer", { answer, from: socket.userId });
     });
 
@@ -1568,7 +1735,7 @@ export const initializeSocket = (server) => {
      * The announced value used to come from the payload: `updatePresence({
      * isOnline: false })` told everyone this account was offline while its
      * socket stayed connected and kept receiving normally. Presence is a
-     * property of the connection, so it is read from `userSockets` and the
+     * property of the connection, so it is read from the adapter and the
      * client's claim is ignored. A user who wants to be invisible has
      * `privacy.whoCanSeeOnlineStatus`, which is honoured in one place for
      * everybody rather than being a flag any client can assert about itself.
@@ -1576,7 +1743,7 @@ export const initializeSocket = (server) => {
     socket.on("updatePresence", async () => {
       try {
         await User.findByIdAndUpdate(socket.userId, { lastActiveAt: new Date() });
-        notifyContactsStatus(socket.userId, userSockets.has(socket.userId));
+        notifyContactsStatus(socket.userId, await isUserOnline(socket.userId));
       } catch (error) {
         console.error("Error updating presence:", error);
       }
@@ -1659,46 +1826,57 @@ export const initializeSocket = (server) => {
 
           // Delay status update to handle quick reconnects
           setTimeout(async () => {
-            const stillConnected = userSockets.has(socket.userId);
+            /*
+             * Asked of the adapter, not of this process's socket map.
+             *
+             * `userSockets` only knows about sockets attached to *this* instance, so
+             * closing a tab on one instance while a tab stayed open on another read as
+             * "gone": the user was marked offline, their contacts were told, and any call
+             * they were on was torn down underneath them.
+             */
+            const stillConnected =
+              (await io.in(socket.userId).fetchSockets()).length > 0;
             if (!stillConnected) {
               // Record last seen
               await updateUserStatus(socket.userId);
               await notifyContactsStatus(socket.userId, false);
 
               // End any active call.
-              const callId = callByUser.get(socket.userId);
+              const callId = await getUserCallId(socket.userId);
               if (callId) {
-                if (activeCalls.has(callId)) {
+                const callData = await getCall(callId);
+                if (callData) {
                   io.to(callId).emit("callEnded", {
                     callId,
                     endedBy: socket.userId,
                     reason: "user_disconnected"
                   });
-                  cleanupCall(callId);
+                  await cleanupCall(callData);
                 } else {
-                  callByUser.delete(socket.userId);
+                  // A pointer to a call that no longer exists.
+                  await unbindUser(socket.userId);
                 }
               }
 
               /*
                * And any call still ringing *at* this user.
                *
-               * `callByUser` deliberately doesn't reserve the callee until they
+               * The store deliberately doesn't reserve the callee until they
                * answer — reserving them while merely ringing would let one caller
                * hold someone in a rolling 45-second lockout. The cost was that a
                * callee who closed the tab mid-ring was invisible to this teardown,
                * so the caller kept ringing until the 45-second timeout instead of
                * finding out immediately that nobody was there.
                *
-               * Scanned rather than tracked in a third map: `activeCalls` holds only
-               * calls in flight right now, and a second index of the same facts is
-               * one more thing to keep in sync.
+               * The store keeps a per-callee index of ringing calls, which is what this
+               * reads. The single-process version scanned every live call instead and
+               * called a second index "one more thing to keep in sync" — fair when the
+               * calls were a local Map, but Redis cannot be scanned, and the index lives
+               * inside the store so no caller has to maintain it.
                */
-              for (const [ringingId, callData] of activeCalls) {
-                if (callData.status !== "ringing") continue;
-                if (callData.receiver !== socket.userId) continue;
-                io.to(ringingId).emit("callEnded", {
-                  callId: ringingId,
+              for (const callData of await getRingingCallsFor(socket.userId)) {
+                io.to(callData.callId).emit("callEnded", {
+                  callId: callData.callId,
                   endedBy: socket.userId,
                   reason: "callee_unavailable",
                 });
@@ -1707,7 +1885,7 @@ export const initializeSocket = (server) => {
                 callData.status = "missed";
                 callData.endedAt = new Date();
                 saveCallLog(callData);
-                cleanupCall(ringingId);
+                await cleanupCall(callData);
               }
             }
           }, 5000);
@@ -1728,7 +1906,7 @@ export const initializeSocket = (server) => {
        * Typing state is per user, like presence, so it is torn down when the last
        * connection goes — which is what the presence teardown above already does.
        */
-      if (!userSockets.has(socket.userId)) {
+      if (!(await isUserOnline(socket.userId))) {
         clearAllTyping(socket.userId, io);
       }
     });
@@ -1838,17 +2016,20 @@ async function notifyContactsStatus(userId, isOnline) {
     // narrower one through the wider one.
     const shareLastSeen = privacy.whoCanSeeLastSeen !== "none";
 
-    contactIds.forEach(contactId => {
-      const contactSockets = userSockets.get(contactId);
-      if (contactSockets) {
-        contactSockets.forEach(socketId => {
-          io.to(socketId).emit("userStatus", {
-            userId,
-            isOnline,
-            lastSeen: shareLastSeen ? new Date() : null
-          });
-        });
-      }
+    /*
+     * One emit per contact's *room*, not per socket in this process.
+     *
+     * The old form skipped any contact who happened to be served by another instance, so
+     * a presence change reached only the fraction of someone's contacts that shared their
+     * node. Emitting to a room nobody is in is free, so the "are they online" check this
+     * replaces isn't needed either.
+     */
+    contactIds.forEach((contactId) => {
+      io.to(contactId).emit("userStatus", {
+        userId,
+        isOnline,
+        lastSeen: shareLastSeen ? new Date() : null
+      });
     });
   } catch (error) {
     console.error("Error notifying contacts:", error);
@@ -1905,13 +2086,18 @@ async function sendPresenceSnapshot(socket) {
     .select("sender receiver")
     .lean();
 
-  const peers = [
+  const peerIds = [
     ...new Set(
       conversations
         .flatMap((m) => [m.sender?.toString(), m.receiver?.toString()])
         .filter((id) => id && id !== me)
     ),
-  ].filter((id) => userSockets.has(id));
+  ];
+
+  // Cluster-wide, in one round trip. `userSockets.has` only saw this process, so a
+  // presence snapshot showed a peer offline purely because they were served elsewhere.
+  const onlinePeers = await onlineAmong(peerIds);
+  const peers = peerIds.filter((id) => onlinePeers.has(id));
 
   if (!peers.length) {
     socket.emit("presenceSnapshot", { online: [] });
@@ -2012,11 +2198,14 @@ function clearAllTyping(userId, io) {
 export const removeUserFromRoom = (userId, room) => {
   const key = userId?.toString();
   if (!io || !key || !room) return;
-  const sockets = userSockets.get(key);
-  if (!sockets) return;
-  sockets.forEach((socketId) =>
-    io.sockets.sockets.get(socketId)?.leave(room.toString())
-  );
+  /*
+   * `socketsLeave` through the adapter, for the same reason `joinUserToRoom` uses
+   * `socketsJoin`: `io.sockets.sockets` only holds this process's sockets, so removing or
+   * banning someone connected to another instance left them in the room. That is exactly
+   * the "advisory removal" this function exists to fix, reintroduced by the process
+   * boundary — and it's the ban path, so it matters more here than anywhere else.
+   */
+  io.in(key).socketsLeave(room.toString());
 };
 
 /** The inverse — used when someone is added to a group while already online. */
@@ -2035,10 +2224,21 @@ function generateCallId() {
 }
 
 /** Pull every socket a user has open into a room (a call, or a group). */
+/**
+ * Put every one of a user's sockets into a room.
+ *
+ * Through the adapter, not through `io.sockets.sockets`. That table holds only the
+ * sockets attached to *this* process, so with more than one instance the remote party
+ * never joined the call room — and since every call event after the ring goes to
+ * `io.to(callId)`, the answer, the ICE candidates and the hang-up all went nowhere. The
+ * state was shared by then; the room was not, which is a subtler version of the same
+ * bug.
+ *
+ * `socketsJoin` on the user's own room reaches their sockets wherever they are, and each
+ * socket joins a room named after its user id on connect.
+ */
 function joinUserToRoom(userId, room) {
-  const sockets = userSockets.get(userId);
-  if (!sockets) return;
-  sockets.forEach((socketId) => io.sockets.sockets.get(socketId)?.join(room));
+  io.in(userId).socketsJoin(room);
 }
 
 function clearCallTimer(callId) {
@@ -2058,8 +2258,8 @@ function armCallTimer(callId, ms, reason) {
   clearCallTimer(callId);
   callTimers.set(
     callId,
-    setTimeout(() => {
-      const callData = activeCalls.get(callId);
+    setTimeout(async () => {
+      const callData = await getCall(callId);
       if (!callData) return;
       io.to(callId).emit("callEnded", { callId, reason });
       // A call that rang out is a missed call, and it belongs in the thread.
@@ -2069,23 +2269,26 @@ function armCallTimer(callId, ms, reason) {
         callData.endedAt = new Date();
         saveCallLog(callData);
       }
-      cleanupCall(callId);
+      await cleanupCall(callData);
     }, ms).unref()
   );
 }
 
-function cleanupCall(callId) {
-  const callData = activeCalls.get(callId);
-  if (!callData) return;
+/**
+ * @param callData the call itself, not its id.
+ *
+ * It used to take an id and look the call up, which meant every caller had already done
+ * that lookup — free against a local Map, a second network round trip against Redis. The
+ * "only clear a user's pointer if it still points at *this* call" rule, which stops
+ * ending an old call from detaching someone from a newer one, lives in the store now.
+ */
+async function cleanupCall(callData) {
+  if (!callData?.callId) return;
 
-  clearCallTimer(callId);
-  activeCalls.delete(callId);
-  // Only clear a user's pointer if it still points at *this* call, or ending an
-  // old call would detach them from a newer one.
-  if (callByUser.get(callData.caller) === callId) callByUser.delete(callData.caller);
-  if (callByUser.get(callData.receiver) === callId) callByUser.delete(callData.receiver);
+  clearCallTimer(callData.callId);
+  await removeCall(callData);
 
-  io.in(callId).socketsLeave(callId);
+  io.in(callData.callId).socketsLeave(callData.callId);
 }
 
 /**
@@ -2200,7 +2403,10 @@ async function notifyGroupMembers(groupId, senderId, notification) {
       return;
     }
 
-    const offline = recipients.filter((id) => !userSockets.has(id));
+    // Cluster-wide: members served by another instance used to count as offline, so
+    // everyone in a busy group got a push for a window they already had open.
+    const onlineMembers = await onlineAmong(recipients);
+    const offline = recipients.filter((id) => !onlineMembers.has(id));
     if (!offline.length) {
       // The case people forget: a background tab still holds a socket, so closing the tab
       // is not the same as closing the window.
@@ -2273,9 +2479,52 @@ export const getIO = () => {
   return io;
 };
 
-export const getUserSocket = (userId) => userSockets.get(userId);
+/*
+ * `getUserSocket` is gone.
+ *
+ * It handed out this process's socket ids so callers could loop and emit to each one,
+ * which is only ever correct with a single instance. Every caller now emits to the
+ * user's room instead, and a room emit goes through the adapter. `userSockets` is left
+ * with the one job it is actually right for: this process's own connect/disconnect
+ * bookkeeping.
+ */
 
-export const isUserOnline = (userId) => userSockets.has(userId);
+/**
+ * Is this user connected to *any* instance?
+ *
+ * `userSockets.has()`, which this was, answers "…to *this* one" — the same thing until it
+ * isn't. Every presence read went through that map, so with two instances a user with a
+ * tab open on A appeared offline to everyone served by B: their contacts saw them
+ * offline, their messages weren't marked delivered, and they were sent push
+ * notifications for a window they were looking at.
+ *
+ * Async, because the adapter has to ask the other nodes. `userSockets` stays for what it
+ * is genuinely good at — this process's own bookkeeping on connect and disconnect.
+ */
+export const isUserOnline = async (userId) => {
+  if (!io || !userId) return false;
+  return (await io.in(userId.toString()).fetchSockets()).length > 0;
+};
+
+/**
+ * Which of these users are connected, as a Set.
+ *
+ * One `fetchSockets` for the whole list rather than one per user: a presence snapshot can
+ * ask about 200 peers and a group fan-out about every member, and with the adapter each
+ * call is a round trip to every node. `io.sockets` — no room filter — is every connected
+ * socket across the cluster, and each carries the `userId` the handshake authenticated.
+ */
+export const onlineAmong = async (userIds) => {
+  const wanted = new Set((userIds || []).map(String));
+  if (!io || !wanted.size) return new Set();
+  const sockets = await io.fetchSockets();
+  const online = new Set();
+  for (const s of sockets) {
+    const id = s.data?.userId;
+    if (id && wanted.has(String(id))) online.add(String(id));
+  }
+  return online;
+};
 
 /**
  * Drop every live socket a user has open.

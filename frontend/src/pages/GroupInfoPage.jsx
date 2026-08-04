@@ -2,15 +2,17 @@ import React, {
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
+import { Camera, ChevronRight, Link2, Pencil, Users } from "lucide-react";
+import { describeMembers } from "../lib/groupMembers";
+import GroupInviteSheet from "../components/Chat/GroupInviteSheet";
 import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "react-hot-toast";
 import { UserContext } from "../contexts/UserContext";
 import { Icons } from "../components/icons";
-import api, { groupAPI } from "../services/api";
+import { groupAPI } from "../services/api";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import {
   DropdownMenu,
@@ -33,22 +35,14 @@ const MEMBERS_PAGE_SIZE = 30;
 
 const errorMessage = (err, fallback) => err?.response?.data?.error || fallback;
 
-const isCurrentlyMuted = (mutedUntil) =>
-  !!mutedUntil && new Date(mutedUntil) > new Date();
-
-const MEMBER_ACTION_PATCH = {
-  make_admin: { role: "admin" },
-  remove_admin: { role: "member" },
-  restrict: { role: "restricted" },
-  unrestrict: { role: "member" },
-  unmute: { mutedUntil: null },
-};
-
-/**
- * Same on/off pill used for the admin settings page. Kept local rather than
- * imported from components/admin/ui — that file is scoped to /admin pages,
- * and this one is a two-state control, not worth a shared dependency for.
+/*
+ * `isCurrentlyMuted`, `MEMBER_ACTION_PATCH`, `RoleBadge` and `MemberRow` were all
+ * defined here and are now shared — lib/groupMembers.js and Chat/GroupRoleBadge.jsx —
+ * because GroupPeoplePage needs the same rules and the same badges. Two screens
+ * listing the same members with their own copies is how they drift.
  */
+
+/** The settings switches below. Stays here: nothing else uses it. */
 const Toggle = ({ checked, onChange, disabled }) => (
   <button
     type="button"
@@ -68,145 +62,6 @@ const Toggle = ({ checked, onChange, disabled }) => (
   </button>
 );
 
-const RoleBadge = ({ role }) => {
-  if (role === "restricted") {
-    // Restricted is a state with real consequences — they can't send anything —
-    // and it was visible only by opening the menu and reading whether it
-    // offered "Restrict" or "Un-restrict".
-    return (
-      <span className="px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 text-[11px] font-medium shrink-0">
-        Restricted
-      </span>
-    );
-  }
-  if (role === "super_admin") {
-    return (
-      <span className="px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-400 text-[11px] font-medium shrink-0">
-        Owner
-      </span>
-    );
-  }
-  if (role === "admin") {
-    return (
-      <span className="px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-400 text-[11px] font-medium shrink-0">
-        Admin
-      </span>
-    );
-  }
-  return null;
-};
-
-/**
- * One member row. Network calls and optimistic state live on the page; this
- * only renders and reports the intent, so the row stays a plain function
- * declared once at module scope instead of a closure recreated every render.
- */
-const MemberRow = ({ member, isSelf, permissions, onAction }) => {
-  const { user, role, mutedUntil } = member;
-  const muted = isCurrentlyMuted(mutedUntil);
-  /*
-   * Rank matters, not just the permission bit.
-   *
-   * The server refuses everything against a super_admin whoever asks, and
-   * refuses anything touching an *admin* unless the caller is the owner —
-   * `removeMembers` is true for every admin, so gating on it alone offered
-   * three menu items that would come back 403 whenever one admin acted on
-   * another.
-   */
-  const outranked = role !== "super_admin" && (role !== "admin" || !!permissions?.manageAdmins);
-  const canManageAdmins = !!permissions?.manageAdmins && role !== "super_admin";
-  const canModerate = !!permissions?.removeMembers && outranked;
-  const showMenu = !isSelf && (canManageAdmins || canModerate);
-
-  return (
-    <div className="flex items-center gap-3 px-3 sm:px-4 py-2.5">
-      <img
-        src={user?.profilePic || "/default-avatar.png"}
-        alt=""
-        className="w-11 h-11 rounded-full object-cover border border-neutral-800 shrink-0"
-      />
-      <div className="flex-1 min-w-0">
-        <div className="flex items-center gap-1.5 flex-wrap">
-          <span className="text-sm font-medium text-white truncate">
-            {user?.name || user?.username}
-          </span>
-          {user?.isVerified && <Icons.verified />}
-          <RoleBadge role={role} />
-          {muted && (
-            <span className="px-2 py-0.5 rounded-full bg-neutral-800 text-neutral-400 text-[11px] shrink-0">
-              Muted
-            </span>
-          )}
-        </div>
-        <p className="text-xs text-neutral-500 truncate">@{user?.username}</p>
-      </div>
-
-      {showMenu && (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <button
-              type="button"
-              className="p-2 text-neutral-400 hover:text-white transition-colors shrink-0"
-              aria-label="Member options"
-            >
-              <Icons.more className="w-5 h-5" />
-            </button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            sheetTitle={user?.name || user?.username}
-            align="end"
-            className="bg-neutral-900 border-neutral-700 rounded-2xl w-52 p-2"
-          >
-            {canManageAdmins && (
-              <DropdownMenuItem
-                onClick={() => onAction(role === "admin" ? "remove_admin" : "make_admin")}
-                className="p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
-              >
-                {role === "admin" ? "Remove admin" : "Make admin"}
-              </DropdownMenuItem>
-            )}
-            {canModerate && (
-              <>
-                <DropdownMenuItem
-                  onClick={() => onAction(role === "restricted" ? "unrestrict" : "restrict")}
-                  className="p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
-                >
-                  {role === "restricted" ? "Un-restrict" : "Restrict"}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => onAction(muted ? "unmute" : "mute")}
-                  className="p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
-                >
-                  {muted ? "Unmute" : "Mute for 24 hours"}
-                </DropdownMenuItem>
-                <DropdownMenuSeparator className="bg-neutral-700 my-1" />
-                <DropdownMenuItem
-                  onClick={() => onAction("remove")}
-                  className="p-3 hover:bg-neutral-800 rounded-xl cursor-pointer text-red-500"
-                >
-                  Remove from group
-                </DropdownMenuItem>
-                {/*
-                  * Ban, next to Remove because the difference is easy to miss:
-                  * removing lets anyone with "Add people" bring them back, banning
-                  * doesn't. Banned members are listed separately below, which is
-                  * the only way back from here.
-                  */}
-                <DropdownMenuItem
-                  onClick={() => onAction("ban")}
-                  className="p-3 hover:bg-neutral-800 rounded-xl cursor-pointer text-red-500"
-                >
-                  Ban from group
-                </DropdownMenuItem>
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      )}
-    </div>
-  );
-};
-
 const GroupInfoPage = () => {
   const { groupId } = useParams();
   const navigate = useNavigate();
@@ -220,9 +75,6 @@ const GroupInfoPage = () => {
 
   const [members, setMembers] = useState([]);
   const [membersTotal, setMembersTotal] = useState(0);
-  const [nextSkip, setNextSkip] = useState(0);
-  const [hasMoreMembers, setHasMoreMembers] = useState(false);
-  const [loadingMoreMembers, setLoadingMoreMembers] = useState(false);
 
   const [editingInfo, setEditingInfo] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
@@ -246,13 +98,10 @@ const GroupInfoPage = () => {
   const [banTarget, setBanTarget] = useState(null);
   const [banning, setBanning] = useState(false);
 
-  const [addQuery, setAddQuery] = useState("");
-  const [addResults, setAddResults] = useState([]);
-  const [addSearching, setAddSearching] = useState(false);
-  const [selectedUsers, setSelectedUsers] = useState([]);
-  const [addingMembers, setAddingMembers] = useState(false);
-  const addSearchTimeout = useRef(null);
 
+  const [inviteOpen, setInviteOpen] = useState(false);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const avatarInputRef = useRef(null);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
 
@@ -272,17 +121,37 @@ const GroupInfoPage = () => {
     };
   }, []);
 
-  const fetchMembers = useCallback(
-    async (skip) => {
-      const res = await groupAPI.getMembers(groupId, { skip, limit: MEMBERS_PAGE_SIZE });
-      if (!alive.current) return;
-      setMembers((prev) => (skip === 0 ? res.members || [] : [...prev, ...(res.members || [])]));
-      setMembersTotal(res.total ?? 0);
-      setHasMoreMembers(!!res.hasMore);
-      setNextSkip(res.nextSkip ?? skip + (res.members?.length || 0));
-    },
-    [groupId]
-  );
+  /*
+   * One page, for the People row's preview only.
+   *
+   * The full paginated list moved to GroupPeoplePage; this page needs enough rows to
+   * name two people and the `total` to count the rest, so it no longer tracks a cursor.
+   */
+  const fetchMembers = useCallback(async () => {
+    const res = await groupAPI.getMembers(groupId, { skip: 0, limit: MEMBERS_PAGE_SIZE });
+    if (!alive.current) return;
+    setMembers(res.members || []);
+    setMembersTotal(res.total ?? 0);
+  }, [groupId]);
+
+  /*
+   * Declared above the mount effect, which is the whole bug.
+   *
+   * This was a `const` a hundred lines further down, and the effect below both calls it
+   * and lists it in its dependency array — and a dependency array is evaluated *during
+   * render*, top to bottom. So every mount of this page threw
+   * `ReferenceError: Cannot access 'fetchBannedMembers' before initialization` before
+   * the effect ever ran: the group info screen did not render at all.
+   */
+  const fetchBannedMembers = useCallback(async () => {
+    try {
+      const res = await groupAPI.getMembers(groupId, { banned: true, limit: 100 });
+      if (alive.current) setBannedMembers(res.members || []);
+    } catch {
+      // A 403 here just means this caller can't ban, so there is nothing to show.
+      if (alive.current) setBannedMembers([]);
+    }
+  }, [groupId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -290,7 +159,7 @@ const GroupInfoPage = () => {
       setLoading(true);
       setLoadError(null);
       try {
-        const [groupRes] = await Promise.all([groupAPI.getGroup(groupId), fetchMembers(0)]);
+        const [groupRes] = await Promise.all([groupAPI.getGroup(groupId), fetchMembers()]);
         if (cancelled) return;
         setGroup(groupRes.group);
         setMembership(groupRes.membership);
@@ -308,24 +177,50 @@ const GroupInfoPage = () => {
     };
   }, [groupId, fetchMembers, fetchBannedMembers]);
 
-  // The debounce timer outlives the page otherwise, and fires setState on an
-  // unmounted component if you navigate away mid-keystroke.
-  useEffect(
-    () => () => {
-      if (addSearchTimeout.current) clearTimeout(addSearchTimeout.current);
-    },
-    []
-  );
 
-  const handleLoadMoreMembers = async () => {
-    if (loadingMoreMembers || !hasMoreMembers) return;
-    setLoadingMoreMembers(true);
+  /*
+   * Name and photo are open to any member who can post, matching every other messenger
+   * — a typo in a group's name shouldn't need an admin. `sendMessages` rather than an
+   * unconditional yes, so someone with the `restricted` role (silenced in this group)
+   * can't rename it instead. The server applies the same rule, and every change writes a
+   * system notice naming who made it.
+   *
+   * Governance — slow mode, media sharing, history visibility — stays admin-only.
+   *
+   * Read off `membership` rather than the `permissions` const further down: that one is
+   * declared *after* the loading and error early-returns, so referencing it up here would
+   * be a temporal-dead-zone crash on every render — the same trap `fetchBannedMembers`
+   * fell into in this very file.
+   */
+  const canEditIdentity = !!membership?.permissions?.sendMessages;
+
+  const handleAvatarChange = async (event) => {
+    const file = event.target.files?.[0];
+    // Reset immediately: without this, picking the same file twice in a row fires no
+    // change event the second time.
+    event.target.value = "";
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      toast.error("Pick an image");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error("That image is too large (10MB max)");
+      return;
+    }
+
+    setUploadingAvatar(true);
     try {
-      await fetchMembers(nextSkip);
+      const res = await groupAPI.updateAvatar(groupId, file);
+      // The server's URL, not a local preview: the preview would be a blob URL that
+      // dies on reload, and the difference wouldn't show up until then.
+      setGroup((g) => ({ ...g, avatar: res.avatar }));
+      toast.success("Group photo updated");
     } catch (err) {
-      toast.error(errorMessage(err, "Could not load more members"));
+      toast.error(errorMessage(err, "Could not update the photo"));
     } finally {
-      setLoadingMoreMembers(false);
+      if (alive.current) setUploadingAvatar(false);
     }
   };
 
@@ -394,47 +289,6 @@ const GroupInfoPage = () => {
     await updateSetting({ messageHistory });
   };
 
-  const applyMemberPatch = (userId, patch) => {
-    setMembers((prev) => prev.map((m) => (m.user?._id === userId ? { ...m, ...patch } : m)));
-  };
-
-  const fetchBannedMembers = useCallback(async () => {
-    try {
-      const res = await groupAPI.getMembers(groupId, { banned: true, limit: 100 });
-      if (alive.current) setBannedMembers(res.members || []);
-    } catch {
-      // A 403 here just means this caller can't ban, so there is nothing to show.
-      if (alive.current) setBannedMembers([]);
-    }
-  }, [groupId]);
-
-  const handleMemberAction = async (member, action) => {
-    if (action === "remove") {
-      setRemoveTarget(member);
-      return;
-    }
-    if (action === "ban") {
-      setBanTarget(member);
-      return;
-    }
-    // "mute" needs a timestamp computed at click time, not at module load, so
-    // it isn't in the static MEMBER_ACTION_PATCH map above.
-    const patch =
-      action === "mute"
-        ? { mutedUntil: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() }
-        : MEMBER_ACTION_PATCH[action];
-    if (!patch) return;
-
-    const userId = member.user._id;
-    const prevPatch = { role: member.role, mutedUntil: member.mutedUntil };
-    applyMemberPatch(userId, patch);
-    try {
-      await groupAPI.updateMember(groupId, userId, patch);
-    } catch (err) {
-      applyMemberPatch(userId, prevPatch);
-      toast.error(errorMessage(err, "Could not update member"));
-    }
-  };
 
   const confirmRemoveMember = async () => {
     if (!removeTarget) return;
@@ -497,75 +351,17 @@ const GroupInfoPage = () => {
        * by skip — inserting locally would put them in the wrong place and throw
        * the paging offsets out by one.
        */
-      await fetchMembers(0);
+      await fetchMembers();
       toast.success("Ban lifted");
     } catch (err) {
       toast.error(errorMessage(err, "Could not lift the ban"));
     }
   };
 
-  const existingMemberIds = useMemo(() => new Set(members.map((m) => m.user?._id).filter(Boolean)), [members]);
-  const addableResults = useMemo(
-    () => addResults.filter((u) => !existingMemberIds.has(u._id)),
-    [addResults, existingMemberIds]
-  );
 
-  const searchAddUsers = useCallback(async (query) => {
-    if (!query.trim()) {
-      setAddResults([]);
-      return;
-    }
-    setAddSearching(true);
-    try {
-      // No groupAPI method exists for this — it's the same endpoint ChatPage
-      // uses to search users, called uncached for the same reason its own
-      // search results are: the query changes every keystroke.
-      const res = await api.get("/user/search", {
-        params: { q: query },
-        skipRequestCacheInterceptor: true,
-      });
-      setAddResults(res.data?.users || []);
-    } catch {
-      setAddResults([]);
-    } finally {
-      setAddSearching(false);
-    }
-  }, []);
 
-  const handleAddQueryChange = (e) => {
-    const query = e.target.value;
-    setAddQuery(query);
-    if (addSearchTimeout.current) clearTimeout(addSearchTimeout.current);
-    addSearchTimeout.current = setTimeout(() => searchAddUsers(query), 300);
-  };
 
-  const toggleSelectedUser = (user) => {
-    setSelectedUsers((prev) =>
-      prev.some((u) => u._id === user._id)
-        ? prev.filter((u) => u._id !== user._id)
-        : [...prev, user]
-    );
-  };
 
-  const handleAddMembers = async () => {
-    if (selectedUsers.length === 0) return;
-    setAddingMembers(true);
-    try {
-      await groupAPI.addMembers(
-        groupId,
-        selectedUsers.map((u) => u._id)
-      );
-      setSelectedUsers([]);
-      setAddQuery("");
-      setAddResults([]);
-      await fetchMembers(0);
-      toast.success("Members added");
-    } catch (err) {
-      toast.error(errorMessage(err, "Nobody you picked can be added"));
-    } finally {
-      setAddingMembers(false);
-    }
-  };
 
   const handleLeaveGroup = async () => {
     setLeaving(true);
@@ -644,12 +440,64 @@ const GroupInfoPage = () => {
 
       <div className="flex-1 overflow-y-auto scrollbar-hide">
         <div className="flex flex-col items-center pt-8 pb-6 px-4 border-b border-neutral-900">
-          <img
-            src={group.avatar || "/default-avatar.png"}
-            alt=""
-            className="w-24 h-24 rounded-full object-cover border border-neutral-700 shadow-lg mb-3"
-          />
-          <h2 className="text-lg font-semibold text-white text-center">{group.name}</h2>
+          {/*
+            The photo, now changeable. `Group.avatar` existed from the start with no
+            write path anywhere — no endpoint, no upload, no UI — so every group has
+            shown the default image since the feature was written.
+          */}
+          <div className="relative">
+            <img
+              // `/default-group-avatar.png`, which is what the server defaults to. This
+              // read `/default-avatar.png` — the *person* placeholder — so a group with
+              // no photo showed a generic human silhouette.
+              src={group.avatar || "/default-group-avatar.png"}
+              alt=""
+              className="w-24 h-24 rounded-full object-cover border border-neutral-700 shadow-lg bg-neutral-900"
+            />
+            {canEditIdentity && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => avatarInputRef.current?.click()}
+                  disabled={uploadingAvatar}
+                  aria-label="Change group photo"
+                  className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-white text-black flex items-center justify-center shadow-lg border-2 border-black active:scale-90 transition-transform disabled:opacity-60"
+                >
+                  {uploadingAvatar ? (
+                    <Icons.spinner className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Camera className="w-4 h-4" strokeWidth={2.2} />
+                  )}
+                </button>
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept="image/jpeg,image/png,image/webp,image/heic,image/heif"
+                  className="hidden"
+                  onChange={handleAvatarChange}
+                />
+              </>
+            )}
+          </div>
+
+          {/* Tap the name to rename, for anyone who can post in the group. */}
+          {canEditIdentity ? (
+            <button
+              type="button"
+              onClick={startEditingInfo}
+              className="mt-3 flex items-center gap-1.5 group/name"
+            >
+              <h2 className="text-lg font-semibold text-white text-center">
+                {group.name}
+              </h2>
+              <Pencil className="w-3.5 h-3.5 text-neutral-500 group-hover/name:text-white transition-colors" />
+            </button>
+          ) : (
+            <h2 className="mt-3 text-lg font-semibold text-white text-center">
+              {group.name}
+            </h2>
+          )}
+
           <p className="text-sm text-neutral-500 mt-1">
             {membersTotal} members ·{" "}
             {group.type === "public" ? "Public" : "Private"} group
@@ -791,34 +639,52 @@ const GroupInfoPage = () => {
           </section>
         )}
 
-        <section className="py-5 border-b border-neutral-900">
-          <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-1 px-3 sm:px-4">
-            Members ({membersTotal})
-          </h2>
-          <div className="divide-y divide-neutral-900">
-            {members.map((m) => (
-              <MemberRow
-                key={m._id}
-                member={m}
-                isSelf={m.user?._id === currentUserId}
-                permissions={permissions}
-                onAction={(action) => handleMemberAction(m, action)}
-              />
-            ))}
-          </div>
-          {hasMoreMembers && (
-            <div className="flex justify-center pt-3">
-              <button
-                type="button"
-                onClick={handleLoadMoreMembers}
-                disabled={loadingMoreMembers}
-                className="text-sm text-neutral-400 hover:text-white transition-colors disabled:opacity-50"
-              >
-                {loadingMoreMembers ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </section>
+        {/*
+          People, as one row into its own page.
+          The full list used to render here — every member, with pagination, wedged
+          between the settings and the banned list. On a group of any size that meant
+          scrolling past everything to reach "Leave group", and there was nowhere to put
+          per-person actions that wasn't already crowded. The row names two people the
+          viewer is likely to recognise and counts the rest.
+        */}
+        {/*
+          Invite link, above People — it's how you get people in, so it belongs next to
+          the list of who's already there.
+        */}
+        <button
+          type="button"
+          onClick={() => setInviteOpen(true)}
+          className="w-full py-4 px-3 sm:px-4 border-b border-neutral-900 flex items-center gap-3 text-left hover:bg-neutral-950 transition-colors"
+        >
+          <span className="w-9 h-9 rounded-full bg-neutral-900 flex items-center justify-center shrink-0">
+            <Link2 className="w-[18px] h-[18px] text-neutral-300" strokeWidth={2.1} />
+          </span>
+          <span className="flex-1 min-w-0">
+            <span className="block text-[15px] font-medium">Invite link</span>
+            <span className="block text-xs text-neutral-500">
+              Anyone can join with this link
+            </span>
+          </span>
+          <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" strokeWidth={2.1} />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => navigate(`/chat/group/${groupId}/people`)}
+          className="w-full py-4 px-3 sm:px-4 border-b border-neutral-900 flex items-center gap-3 text-left hover:bg-neutral-950 transition-colors"
+        >
+          <span className="w-9 h-9 rounded-full bg-neutral-900 flex items-center justify-center shrink-0">
+            <Users className="w-[18px] h-[18px] text-neutral-300" strokeWidth={2.1} />
+          </span>
+          <span className="flex-1 min-w-0">
+            <span className="block text-[15px] font-medium">People</span>
+            <span className="block text-xs text-neutral-500 truncate">
+              {describeMembers(members, currentUserId, membersTotal)}
+            </span>
+          </span>
+          <span className="text-sm text-neutral-500 shrink-0">{membersTotal}</span>
+          <ChevronRight className="w-4 h-4 text-neutral-500 shrink-0" strokeWidth={2.1} />
+        </button>
 
         {/*
           * Banned members. The only place a ban can be lifted from — they're
@@ -860,101 +726,6 @@ const GroupInfoPage = () => {
           </section>
         )}
 
-        {permissions.addMembers && (
-          <section className="px-3 sm:px-4 py-5 border-b border-neutral-900">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">
-              Add members
-            </h2>
-            <div className="relative mb-3">
-              <Icons.search
-                strokeColor="#737373"
-                className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none"
-              />
-              <input
-                value={addQuery}
-                onChange={handleAddQueryChange}
-                placeholder="Search people to add"
-                className="w-full rounded-lg bg-neutral-900 border border-neutral-700 pl-9 pr-3 py-2 text-sm text-white focus:outline-none focus:border-neutral-500"
-              />
-            </div>
-
-            {selectedUsers.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-3">
-                {selectedUsers.map((u) => (
-                  <span
-                    key={u._id}
-                    className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full bg-neutral-800 text-xs text-white"
-                  >
-                    <img
-                      src={u.profilePic || "/default-avatar.png"}
-                      alt=""
-                      className="w-5 h-5 rounded-full object-cover"
-                    />
-                    {u.username}
-                    <button
-                      type="button"
-                      onClick={() => toggleSelectedUser(u)}
-                      aria-label={`Remove ${u.username}`}
-                    >
-                      <Icons.close className="w-3 h-3" />
-                    </button>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {addSearching ? (
-              <div className="flex justify-center py-4">
-                <Icons.spinner className="w-6 h-6 animate-spin text-neutral-500" />
-              </div>
-            ) : (
-              addQuery.trim() &&
-              (addableResults.length === 0 ? (
-                <p className="text-sm text-neutral-500 py-2">No matching users</p>
-              ) : (
-                <div className="max-h-64 overflow-y-auto divide-y divide-neutral-900 rounded-lg border border-neutral-800 mb-3">
-                  {addableResults.map((u) => {
-                    const selected = selectedUsers.some((s) => s._id === u._id);
-                    return (
-                      <button
-                        key={u._id}
-                        type="button"
-                        onClick={() => toggleSelectedUser(u)}
-                        className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-neutral-900 transition-colors text-left"
-                      >
-                        <img
-                          src={u.profilePic || "/default-avatar.png"}
-                          alt=""
-                          className="w-9 h-9 rounded-full object-cover shrink-0"
-                        />
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm text-white truncate">{u.name || u.username}</p>
-                          <p className="text-xs text-neutral-500 truncate">@{u.username}</p>
-                        </div>
-                        <span className="w-5 h-5 shrink-0 flex items-center justify-center">
-                          {selected ? (
-                            <Icons.checkCircle className="w-5 h-5" />
-                          ) : (
-                            <span className="w-4 h-4 rounded-full border border-neutral-600" />
-                          )}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              ))
-            )}
-
-            <button
-              type="button"
-              onClick={handleAddMembers}
-              disabled={selectedUsers.length === 0 || addingMembers}
-              className="w-full rounded-lg bg-white text-black text-sm font-medium py-2.5 disabled:opacity-40"
-            >
-              {addingMembers ? "Adding…" : `Add${selectedUsers.length ? ` (${selectedUsers.length})` : ""}`}
-            </button>
-          </section>
-        )}
 
         <section className="px-3 sm:px-4 py-6">
           <button
@@ -967,6 +738,15 @@ const GroupInfoPage = () => {
           </button>
         </section>
       </div>
+
+      {inviteOpen && (
+        <GroupInviteSheet
+          groupId={groupId}
+          group={group}
+          memberCount={membersTotal}
+          onClose={() => setInviteOpen(false)}
+        />
+      )}
 
       {leaveConfirmOpen && (
         <ConfirmDialog

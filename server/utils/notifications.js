@@ -1,5 +1,5 @@
 import Notification from "../models/Notification.js";
-import { getIO, getUserSocket } from "../config/socket.js";
+import { getIO, isUserOnline } from "../config/socket.js";
 
 /**
  * Create, save, and socket-emit a notification.
@@ -21,12 +21,19 @@ export async function sendNotification(recipientId, senderId, type, extra = {}) 
   await notification.save();
 
   const io = getIO();
-  const socketIds = getUserSocket(recipientId.toString());
-  if (socketIds && socketIds.size > 0) {
+  /*
+   * The recipient's room, not this process's socket list.
+   *
+   * `getUserSocket` only knew about sockets attached to the instance handling the
+   * request, so with more than one a notification reached the user only when they
+   * happened to be on the same node. The `isUserOnline` check is kept purely to avoid the
+   * populate below when nobody is listening — the emit itself is safe either way.
+   */
+  if (await isUserOnline(recipientId)) {
     const populated = await Notification.findById(notification._id)
       .populate("sender", "username profilePic")
       .populate("entity");
-    socketIds.forEach((id) => io.to(id).emit("newNotification", populated));
+    io.to(recipientId.toString()).emit("newNotification", populated);
   }
 
   return notification;

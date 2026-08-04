@@ -95,6 +95,21 @@ const groupSchema = new Schema(
     isActive:  { type: Boolean, default: true },
     isDeleted: { type: Boolean, default: false },
 
+    /*
+     * ── Invite link ───────────────────────────────────────────────────────────
+     *
+     * The share token, not the whole URL. Storing a URL would bake the current
+     * origin into every group row, so a domain change would orphan every link
+     * ever sent; the client composes the URL from this.
+     *
+     * Absent until someone asks for a link — a group nobody has shared has no
+     * token to leak, and the field's absence is what the partial index below
+     * relies on. `rotatedAt` is for the UI to say when a link was last replaced,
+     * since rotating is the only way to revoke one.
+     */
+    inviteToken:    { type: String },
+    inviteRotatedAt: Date,
+
     createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
   },
   { timestamps: true }
@@ -110,5 +125,23 @@ const groupSchema = new Schema(
  * would need and it's the only compound here.
  */
 groupSchema.index({ type: 1, isActive: 1, isDeleted: 1 });
+
+/*
+ * One group per invite token — and **partial**, not sparse.
+ *
+ * This exact field has bitten this codebase before: Message.js documents
+ * `Group.inviteLink` as a latent E11000 because a sparse unique index skips a
+ * *missing* value but happily indexes `null`, so the second group written without
+ * a link collided with the first. A partial filter on `$type: "string"` means only
+ * rows that actually carry a token participate, and a group with no invite link is
+ * simply not in the index.
+ *
+ * Unique because the token is the whole of the authorisation to join: two groups
+ * sharing one would put a joiner in whichever the query happened to find.
+ */
+groupSchema.index(
+  { inviteToken: 1 },
+  { unique: true, partialFilterExpression: { inviteToken: { $type: "string" } } }
+);
 
 export default model("Group", groupSchema);

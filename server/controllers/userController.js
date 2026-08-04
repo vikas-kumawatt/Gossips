@@ -9,7 +9,7 @@ import User from "../models/User.js";
 import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
 import UserSettings from "../models/UserSettings.js";
-import { io, getUserSocket } from "../server.js";
+import { io } from "../server.js";
 import {
   buildCursorPageInfo,
   buildCursorQuery,
@@ -206,18 +206,20 @@ export const setupProfile = async (req, res) => {
 
           // Notify each requester that their request was auto-accepted
           followerIds.forEach((followerId) => {
-            const sockets = getUserSocket(followerId.toString());
-            if (sockets) {
-              sockets.forEach((id) => {
-                io.to(id).emit("followStatusUpdate", {
-                  username: user.username,
-                  action: "follow",
-                  isPending: false,
-                  isPrivate: false,
-                  autoAccepted: true,
-                });
-              });
-            }
+            /*
+             * The follower's room, not this process's socket list.
+             *
+             * `getUserSocket` is a Map in one instance, so with more than one this update
+             * reached the user only when they happened to be served by the node handling
+             * the request. Every socket joins a room named after its user id on connect.
+             */
+            io.to(followerId.toString()).emit("followStatusUpdate", {
+              username: user.username,
+              action: "follow",
+              isPending: false,
+              isPrivate: false,
+              autoAccepted: true,
+            });
           });
         }
       }
@@ -703,15 +705,14 @@ export const followUser = async (req, res) => {
        */
       await sendNotification(userToFollow._id, req.user._id, "follow_request");
 
-      const sockets = getUserSocket(req.user._id.toString());
-      sockets?.forEach((id) =>
-        io.to(id).emit("followStatusUpdate", {
-          username: userToFollow.username,
-          action: "follow",
-          isPending: true,
-          isPrivate: true,
-        })
-      );
+      // This user's own room, so every tab they have open is told — on any instance.
+      // `getUserSocket` only ever listed the sockets attached to this one.
+      io.to(req.user._id.toString()).emit("followStatusUpdate", {
+        username: userToFollow.username,
+        action: "follow",
+        isPending: true,
+        isPrivate: true,
+      });
 
       await invalidateFollowRelatedCaches(req.user.username, req.params.username);
       return res.status(200).json({ message: "Follow request sent successfully" });
@@ -731,15 +732,14 @@ export const followUser = async (req, res) => {
 
     await sendNotification(userToFollow._id, req.user._id, "follow");
 
-    const sockets = getUserSocket(req.user._id.toString());
-    sockets?.forEach((id) =>
-      io.to(id).emit("followStatusUpdate", {
-        username: userToFollow.username,
-        action: "follow",
-        isPending: false,
-        isPrivate: false,
-      })
-    );
+    // This user's own room, so every tab they have open is told — on any instance.
+    // `getUserSocket` only ever listed the sockets attached to this one.
+    io.to(req.user._id.toString()).emit("followStatusUpdate", {
+      username: userToFollow.username,
+      action: "follow",
+      isPending: false,
+      isPrivate: false,
+    });
 
     await invalidateFollowRelatedCaches(req.user.username, req.params.username);
     res.status(200).json({ message: "User followed successfully" });
@@ -777,13 +777,12 @@ export const unfollowUser = async (req, res) => {
       ]);
     }
 
-    const sockets = getUserSocket(req.user._id.toString());
-    sockets?.forEach((id) =>
-      io.to(id).emit("followStatusUpdate", {
-        username: userToUnfollow.username,
-        action: edge.status === "pending" ? "cancel-request" : "unfollow",
-      })
-    );
+    // This user's own room, so every tab they have open is told — on any instance.
+    // `getUserSocket` only ever listed the sockets attached to this one.
+    io.to(req.user._id.toString()).emit("followStatusUpdate", {
+      username: userToUnfollow.username,
+      action: edge.status === "pending" ? "cancel-request" : "unfollow",
+    });
 
     await invalidateFollowRelatedCaches(req.user.username, req.params.username);
     res.status(200).json({
@@ -890,14 +889,13 @@ export const cancelFollowRequest = async (req, res) => {
     // Withdrawn — the recipient shouldn't still be asked to decide.
     await clearFollowRequestNotification(userToFollow._id, req.user._id);
 
-    const sockets = getUserSocket(req.user._id.toString());
-    sockets?.forEach((id) =>
-      io.to(id).emit("followStatusUpdate", {
-        username: userToFollow.username,
-        action: "cancel-request",
-        isPending: false,
-      })
-    );
+    // This user's own room, so every tab they have open is told — on any instance.
+    // `getUserSocket` only ever listed the sockets attached to this one.
+    io.to(req.user._id.toString()).emit("followStatusUpdate", {
+      username: userToFollow.username,
+      action: "cancel-request",
+      isPending: false,
+    });
 
     await invalidateFollowRelatedCaches(req.user.username, req.params.username);
     res.status(200).json({ message: "Follow request canceled" });

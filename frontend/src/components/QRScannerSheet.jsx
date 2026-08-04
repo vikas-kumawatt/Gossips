@@ -2,19 +2,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Camera, ImageUp, Loader2 } from "lucide-react";
 import jsQR from "jsqr";
 import ResponsiveSheet from "./ui/responsive-sheet";
-import { parseProfileUrl } from "../lib/profileLink";
+import { parseScannedCode } from "../lib/scannedCode";
 
 /**
- * Scan a Gossips profile QR with the camera.
+ * Scan a Gossips profile or group invite QR with the camera.
  *
  * Two decoders: the browser's own BarcodeDetector where it exists (hardware
  * accelerated, no frame copying), and jsQR over canvas frames everywhere else —
  * Safari and Firefox have no BarcodeDetector, which is most iPhones.
  *
  * A scanned code is untrusted text, so nothing is navigated to directly. It goes
- * through `parseProfileUrl`, which only yields a username for a profile URL on
- * this origin; anything else is reported as "not a profile code" and scanning
- * continues. Without that, a printed QR could bounce people to any site it liked.
+ * through `parseScannedCode`, which only yields a username or an invite token for a URL
+ * on this origin; anything else is reported and scanning continues. Without that, a
+ * printed QR could bounce people to any site it liked.
+ *
+ * `onFound` receives that parsed result rather than a bare username — the sheet used to
+ * understand only profiles, so a group's own invite code, which this app generates and
+ * offers to save and share, was rejected as "not a Gossips profile".
  */
 
 // Frequent enough to feel instant, far enough apart that jsQR isn't decoding
@@ -68,14 +72,14 @@ const QRScannerSheet = ({ onFound, onClose }) => {
 
   const handleDecoded = useCallback(
     (text) => {
-      const username = parseProfileUrl(text);
-      if (!username) {
-        setHint("That code isn't a Gossips profile.");
+      const result = parseScannedCode(text);
+      if (!result) {
+        setHint("That isn't a Gossips profile or group code.");
         return false;
       }
       doneRef.current = true;
       stopCamera();
-      onFound(username);
+      onFound(result);
       return true;
     },
     [onFound, stopCamera]
@@ -217,7 +221,7 @@ const QRScannerSheet = ({ onFound, onClose }) => {
         inversionAttempts: "attemptBoth",
       });
       if (!result?.data || !handleDecoded(result.data)) {
-        setHint("No Gossips profile code found in that image.");
+        setHint("No Gossips code found in that image.");
       }
     } catch {
       setHint("Couldn't read that image.");

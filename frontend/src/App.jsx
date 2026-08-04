@@ -26,6 +26,9 @@ import UserConversationPage from "./pages/UserConversationPage.jsx";
 import ConversationDetailsPage from "./pages/ConversationDetailsPage.jsx";
 import GroupChatPage from "./pages/GroupChatPage.jsx";
 import GroupInfoPage from "./pages/GroupInfoPage.jsx";
+import GroupPeoplePage from "./pages/GroupPeoplePage.jsx";
+import GroupAddPeoplePage from "./pages/GroupAddPeoplePage.jsx";
+import GroupJoinPage from "./pages/GroupJoinPage.jsx";
 import ChatLayout from "./pages/ChatLayout.jsx";
 import TermsPage from "./pages/TermsPage.jsx";
 import PrivacyPage from "./pages/PrivacyPage.jsx";
@@ -295,9 +298,21 @@ function App() {
                   </ProtectedRoute>
                 }
               >
+                {/* Most specific first: `:groupId/people/add` would otherwise be
+                    swallowed by a looser pattern above it. */}
+                <Route path=":groupId/people/add" element={<GroupAddPeoplePage />} />
+                <Route path=":groupId/people" element={<GroupPeoplePage />} />
                 <Route path=":groupId/info" element={<GroupInfoPage />} />
                 <Route path=":groupId" element={<GroupChatPage />} />
               </Route>
+              {/*
+                Invite links. Outside ChatLayout and outside ProtectedRoute — the page
+                handles being signed out itself, by redirecting to login with the
+                destination attached. Wrapping it in ProtectedRoute would work too, but
+                the chat shell around a spinner is a two-pane flash for someone who has
+                never opened the app.
+              */}
+              <Route path="/join/g/:token" element={<GroupJoinPage />} />
               {/* The old path, kept so existing links and anything already open
                   keep working rather than landing on NotFoundPage. */}
               <Route path="/group/:groupId" element={<LegacyGroupRedirect />} />

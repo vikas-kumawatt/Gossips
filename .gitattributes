@@ -1,0 +1,39 @@
+# Line endings, decided here rather than by whichever machine last saved a file.
+#
+# Without this, git stores whatever bytes it is given. Thirty-five files that nobody had
+# edited were showing a full-file diff — every line "changed" — because an editor had
+# rewritten them from LF to CRLF. That is four thousand lines of noise in a review, and it
+# hides the changes that are real.
+#
+# `text=auto` means: decide per file whether it is text, and if it is, store it with LF in
+# the repository while leaving the working copy alone. Nobody has to configure
+# core.autocrlf, and a checkout on Windows still gets whatever that platform wants.
+* text=auto
+
+# Checked out with the endings the tool that reads them expects, regardless of platform.
+# A .sh with CRLF fails with "bad interpreter"; a .bat with LF can misparse.
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary: never converted, never diffed as text. Left implicit, `text=auto` would sniff
+# each one, and a false positive corrupts the file by "fixing" its newlines.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.svg text
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.mp4 binary
+*.webm binary
+*.mp3 binary
+*.wav binary
+*.pdf binary
+*.zip binary
+*.node binary

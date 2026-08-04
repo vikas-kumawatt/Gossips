@@ -1645,6 +1645,19 @@ export const unsendMessage = async (req, res) => {
       return res.status(404).json({ error: "Message not found" });
     }
 
+    /*
+     * A group notice is not yours to unsend, even though you are its `sender`.
+     *
+     * `writeGroupEvent` stores the actor as `sender`, so the ownership check above
+     * passes for exactly the person the notice is about: rename the group, or remove
+     * a member, then delete the line that says you did — inside the hour, with no
+     * trace. The whole reason these rows exist is so the group can see who changed
+     * what, which only holds if the subject can't erase them.
+     */
+    if (message.messageType === "system") {
+      return res.status(403).json({ error: "Group updates cannot be deleted" });
+    }
+
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
     if (message.createdAt < oneHourAgo) return res.status(403).json({ error: "Cannot unsend messages older than 1 hour" });
 
