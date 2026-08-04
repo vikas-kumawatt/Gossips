@@ -63,6 +63,21 @@ if (FIREBASE_CONFIG.messagingSenderId && FIREBASE_CONFIG.appId) {
     const title = payload?.data?.title || "New message";
     const body = payload?.data?.body || "";
     const conversation = payload?.data?.conversation || "";
+    const isCall = payload?.data?.kind === "call";
+
+    /*
+     * A ringing call is not a message.
+     *
+     * It is time-critical and it expires — the server gives the ring 45 seconds — so it
+     * gets its own tag (never collapsed into a conversation's message thread),
+     * `requireInteraction` so it stays on screen rather than auto-dismissing after a
+     * few seconds, and a vibration pattern that reads as a ring rather than a ping.
+     * Tapping it opens the caller's conversation, where the in-app ring UI takes over
+     * if the call is still live.
+     */
+    const url = isCall
+      ? `/chat/${payload?.data?.callerUsername || ""}`
+      : payload?.data?.url || "/chat";
 
     self.registration.showNotification(title, {
       body,
@@ -73,9 +88,14 @@ if (FIREBASE_CONFIG.messagingSenderId && FIREBASE_CONFIG.appId) {
        * other rather than stacking twenty banners. `renotify` still buzzes for each,
        * so nothing is silently swallowed.
        */
-      tag: conversation || "gossips-message",
+      tag: isCall
+        ? `gossips-call-${payload?.data?.callId || ""}`
+        : conversation || "gossips-message",
       renotify: true,
-      data: { conversation, url: payload?.data?.url || "/chat" },
+      ...(isCall
+        ? { requireInteraction: true, vibrate: [400, 200, 400, 200, 400] }
+        : {}),
+      data: { conversation, url },
     });
   });
 }

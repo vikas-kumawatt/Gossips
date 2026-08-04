@@ -43,6 +43,8 @@ import AdminAuditLog from "./pages/admin/AdminAuditLog.jsx";
 
 import { SocketProvider } from "./contexts/SocketContext";
 import { ChatProvider } from "./contexts/ChatProvider";
+import { CallProvider } from "./contexts/CallProvider";
+import CallOverlay from "./components/Chat/CallOverlay";
 import {
   AUTH_EVENT,
   attachAuthInterceptors,
@@ -152,11 +154,20 @@ function App() {
         {/* Renders nothing; owns the unread count in one place. */}
         <UnreadNotificationsSync />
         <ChatProvider>
+          {/*
+            Calls live above the router, on purpose.
+            A ring has to reach you wherever you are in the app, and an answered call
+            must survive navigation — mounting this inside the chat pages would end a
+            call the moment someone tapped back. CallOverlay is a sibling of Routes
+            rather than a child of any route for the same reason.
+          */}
+          <CallProvider>
           <PostInteractionProvider>
             <FollowProvider>
             <MuteProvider>
             <BlockProvider>
             <ReportProvider>
+            <CallOverlay />
             <Routes>
               <Route
                 path="/"
@@ -325,6 +336,7 @@ function App() {
             </MuteProvider>
             </FollowProvider>
           </PostInteractionProvider>
+          </CallProvider>
         </ChatProvider>
       </SocketProvider>
     </UserContext.Provider>

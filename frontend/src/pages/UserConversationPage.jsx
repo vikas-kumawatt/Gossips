@@ -18,6 +18,7 @@ import SharedPostCard from "../components/Chat/SharedPostCard";
 import PollBubble from "../components/Chat/PollBubble";
 import ChatLockPrompt from "../components/Chat/ChatLockPrompt";
 import VoiceNoteBubble from "../components/Chat/VoiceNoteBubble";
+import CallLogBubble from "../components/Chat/CallLogBubble";
 import ChatVideoBubble from "../components/Chat/ChatVideoBubble";
 import VideoPlayerOverlay from "../components/Chat/VideoPlayerOverlay";
 import { downloadMedia } from "../lib/downloadMedia";
@@ -25,6 +26,7 @@ import { lockedChatIdFromError } from "../services/chatUnlock";
 import { canEditMessage } from "../utils/messageEditing";
 import { useDebounce } from "../hooks/useDebounce";
 import { useSocket } from "../contexts/useSocket";
+import { useCall } from "../contexts/CallContext";
 import { useLongPress } from "../hooks/useLongPress";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import ReconnectBanner from "../components/Chat/ReconnectBanner";
@@ -218,6 +220,13 @@ const messagePreviewLabel = (message) => {
       return caption || "📎 File";
     case "post_share":
       return caption || "📷 Shared a post";
+    /*
+     * There was no `call` case, so a reply quoting a call log — and the pinned bar —
+     * fell through to `caption || ""`, which for a call log is always the empty
+     * string: a preview with nothing in it.
+     */
+    case "call":
+      return message.call?.type === "video" ? "📹 Video call" : "📞 Voice call";
     default:
       return caption || "";
   }
@@ -300,10 +309,13 @@ const MessageBubble = React.memo(function MessageBubble({
   const isShare = message.messageType === "post_share" && message.sharedContent;
   const isPoll = message.messageType === "poll" && message.poll;
   const isShareOnly = isShare && !hasContent && !isDeleted;
+  // A call log draws its own card, and it is a record rather than something said —
+  // so it gets no gradient and no tail.
+  const isCall = message.messageType === "call" && message.call && !isDeleted;
 
   // No bubble background: emoji-only or standalone media/gif (no text, no reply)
   const isMediaOnly = hasMedia && !hasContent && !message.replyTo && !isDeleted;
-  const noBg = isEmojiOnly || isMediaOnly || isShareOnly;
+  const noBg = isEmojiOnly || isMediaOnly || isShareOnly || isCall;
 
   const isFirst = msgIndex === 0;
   const isLast = msgIndex === groupLength - 1;
@@ -514,6 +526,9 @@ const MessageBubble = React.memo(function MessageBubble({
             <SharedPostCard sharedContent={message.sharedContent} />
           </div>
         )}
+
+        {/* A finished call. Written by the server, never by a client. */}
+        {isCall && <CallLogBubble call={message.call} isOwn={isOwn} />}
 
         {/* Poll. Voting goes over the socket; the bubble reports the intent. */}
         {isPoll && !isDeleted && (
@@ -833,6 +848,7 @@ const UserConversationPage = () => {
     syncBlocked,
   } = useBlock();
   const { openReport } = useReport();
+  const { startCall } = useCall();
   /*
    * The peer as BlockContext prefers to see them: the account id plus the handle,
    * falling back to the handle alone before the peer has loaded.
@@ -3361,20 +3377,25 @@ const UserConversationPage = () => {
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
+            {/*
+              Both of these were empty handlers holding a placeholder comment.
+
+              Disabled rather than hidden while the peer is unknown or the conversation
+              is blocked: the buttons are part of the header's shape, and removing them
+              would shift the layout as the profile loads.
+            */}
             <button
-              onClick={() => {
-                /* Implement call functionality */
-              }}
-              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5"
+              onClick={() => startCall(headerUser, "voice")}
+              disabled={!headerUser?._id || blocked}
+              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Voice Call"
             >
               <Icons.phone className="w-5 h-5 shrink-0" />
             </button>
             <button
-              onClick={() => {
-                /* Implement video call functionality */
-              }}
-              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5"
+              onClick={() => startCall(headerUser, "video")}
+              disabled={!headerUser?._id || blocked}
+              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
               aria-label="Video Call"
             >
               <Icons.video className="w-5 h-5 shrink-0" />

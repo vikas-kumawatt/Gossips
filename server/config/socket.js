@@ -30,6 +30,7 @@ import {
   MAX_RECIPIENTS,
   audienceAllows,
   blockedIdSet,
+  canCall,
   canReadConversation,
   cleanIds,
   conversationRoom,
@@ -1209,14 +1210,42 @@ export const initializeSocket = (server) => {
     });
 
     // Voice/video call handlers
-    socket.on("initiateCall", async ({ receiverId, callType, offer }) => {
+    socket.on("initiateCall", async ({ receiverId, callType, offer }, ack) => {
+      /*
+       * Refusals reach the caller.
+       *
+       * Every specific `throw` below used to land in one catch that emitted
+       * "Failed to initiate call", so "they're on another call", "you've blocked each
+       * other" and "they don't accept calls" were indistinguishable — and the client
+       * could only ever say something went wrong. `refuse` reports the actual reason
+       * over both channels, matching `fail`'s contract for the send handlers.
+       */
+      const refuse = (error) => {
+        socket.emit("callError", { error });
+        if (typeof ack === "function") ack({ ok: false, error });
+      };
+
       try {
+        if (callType !== "voice" && callType !== "video") {
+          return refuse("Unsupported call type");
+        }
+        if (!offer || typeof offer !== "object" || typeof offer.sdp !== "string") {
+          return refuse("Call setup failed — try again");
+        }
+        if (!mongoose.isValidObjectId(receiverId)) {
+          return refuse("User not found");
+        }
+
         const [caller, receiver] = await Promise.all([
           User.findById(socket.userId).select("username name profilePic"),
-          User.findById(receiverId).select("username name profilePic"),
+          // `ACTIVE_ACCOUNT`, like every other path that reaches a user: this was a
+          // bare findById, so a suspended or deactivated account could still be rung.
+          User.findOne({ _id: receiverId, ...ACTIVE_ACCOUNT }).select(
+            "username name profilePic"
+          ),
         ]);
 
-        if (!caller || !receiver) throw new Error("User not found");
+        if (!caller || !receiver) return refuse("User not found");
 
         // Canonical id from the database, not the client's string — userSockets
         // and callByUser are both keyed that way, so a differently-cased id
@@ -1224,10 +1253,10 @@ export const initializeSocket = (server) => {
         const receiverKey = receiver._id.toString();
 
         if (receiverKey === socket.userId) {
-          return socket.emit("callError", { error: "You can't call yourself" });
+          return refuse("You can't call yourself");
         }
         if (callByUser.has(socket.userId)) {
-          return socket.emit("callError", { error: "You're already in a call" });
+          return refuse("You're already in a call");
         }
         // Only an *answered* call makes the callee unavailable. Reserving them
         // while their phone is merely ringing would let one caller hold someone
@@ -1235,28 +1264,13 @@ export const initializeSocket = (server) => {
         // two people dialling each other at the same moment.
         const theirCall = activeCalls.get(callByUser.get(receiverKey));
         if (theirCall?.status === "active") {
-          throw new Error("They're on another call");
+          return refuse("They're on another call");
         }
 
-        // Block check
-        const blocked = await UserRelation.eitherBlocks(socket.userId, receiverId);
-        if (blocked) throw new Error("Cannot call a blocked user");
-
-        // Call privacy check
-        const receiverSettings = await UserSettings.findOne({ user: receiverId }).lean();
-        const whoCanCall = receiverSettings?.privacy?.whoCanCall ?? "everyone";
-        if (whoCanCall === "none") {
-          throw new Error("User does not accept calls");
-        } else if (whoCanCall === "followers") {
-          const follows = await Follow.isFollowing(receiverId, socket.userId);
-          if (!follows) throw new Error("User only accepts calls from people they follow");
-        } else if (whoCanCall === "followers_following") {
-          const [isFollowing, isFollower] = await Promise.all([
-            Follow.isFollowing(socket.userId, receiverId),
-            Follow.isFollowing(receiverId, socket.userId),
-          ]);
-          if (!isFollowing && !isFollower) throw new Error("User does not accept calls from you");
-        }
+        // Blocks and `privacy.whoCanCall`, in one place shared with anything else
+        // that needs the answer — see chatAccess.canCall.
+        const allowed = await canCall(socket.userId, receiverKey);
+        if (!allowed.ok) return refuse(allowed.reason);
 
         const callData = {
           callId: generateCallId(),
@@ -1294,11 +1308,41 @@ export const initializeSocket = (server) => {
           });
         }
 
+        /*
+         * Nothing reached a callee who wasn't already looking at the app.
+         *
+         * `incomingCall` above only goes to live sockets, so a ring was invisible to
+         * anyone with the tab closed or backgrounded — the call simply timed out at 45
+         * seconds and logged as missed. A high-priority data push at least surfaces it
+         * while it is still ringing.
+         *
+         * Not awaited: the ring has already gone out to any live socket and the
+         * caller is waiting on the ack. A slow FCM round trip must not delay either.
+         */
+        if (!receiverSockets?.size) {
+          sendPushNotification(callData.receiver, {
+            title: caller.name || caller.username,
+            body: callType === "video" ? "Incoming video call" : "Incoming voice call",
+            data: {
+              kind: "call",
+              callId: callData.callId,
+              callType,
+              callerId: callData.caller,
+              callerUsername: caller.username,
+            },
+            // Time-critical: it is worthless once the ring has timed out, so it
+            // should be dropped rather than delivered late.
+            urgent: true,
+            ttlSeconds: Math.floor(RING_TIMEOUT_MS / 1000),
+          }).catch((error) => console.error("Call push failed:", error));
+        }
+
         socket.emit("callInitiated", callData);
+        succeed(ack, { callId: callData.callId });
 
       } catch (error) {
         console.error("Error initiating call:", error);
-        socket.emit("callError", { error: "Failed to initiate call" });
+        refuse("Couldn't start the call — try again");
       }
     });
 
@@ -2045,8 +2089,16 @@ function cleanupCall(callId) {
 }
 
 /**
- * Persist a call log as a Message document.
- * Includes the conversation key required by the new schema.
+ * Persist a call log as a Message document, and deliver it like any other message.
+ *
+ * It used to save and stop there. `ConversationRead` was still updated (the
+ * `post("save")` hook on Message covers every writer), so the conversation moved to
+ * the top of the list — but with no `receiveMessage` the open thread never showed the
+ * call, and with no `chatUpdated` the list row's preview still read whatever came
+ * before it. A call you had just finished left no visible trace until a refetch.
+ *
+ * `messageType: "call"` is deliberately absent from `CLIENT_MESSAGE_TYPES`, so this is
+ * the only thing that can create one — a client can't forge a call log.
  */
 async function saveCallLog(callData) {
   try {
@@ -2069,6 +2121,38 @@ async function saveCallLog(callData) {
     });
 
     await message.save();
+
+    /*
+     * Populated the same way `sendMessage` populates: the client's `handleNewMessage`
+     * reads `message.sender._id` to decide which conversation row this belongs to, so
+     * an unpopulated ObjectId would land it under the wrong key or none at all.
+     */
+    await message.populate([
+      { path: "sender", select: "username name profilePic isVerified" },
+      { path: "receiver", select: "username name profilePic isVerified" },
+    ]);
+    const messageObject = message.toObject();
+
+    /*
+     * `isOwn` per side, from each party's point of view — the caller placed it, the
+     * receiver didn't. The chat list uses it to decide whether to bump an unread
+     * badge, so one shared payload would give the caller a badge for their own call.
+     */
+    const callerRoom = callData.caller.toString();
+    const receiverRoom = callData.receiver.toString();
+
+    io.to(callerRoom).emit("receiveMessage", { ...messageObject, isOwn: true });
+    io.to(receiverRoom).emit("receiveMessage", { ...messageObject, isOwn: false });
+
+    io.to(callerRoom).emit("chatUpdated", {
+      user: messageObject.receiver,
+      latestMessage: messageObject,
+      unreadCount: 0,
+    });
+    io.to(receiverRoom).emit("chatUpdated", {
+      user: messageObject.sender,
+      latestMessage: messageObject,
+    });
   } catch (error) {
     console.error("Error saving call log:", error);
   }

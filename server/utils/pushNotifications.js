@@ -204,14 +204,62 @@ export const sendPushNotification = async (recipient, notification) => {
       }).map(([k, v]) => [k, String(v)])
     );
 
+    /*
+     * Urgency, which nothing here previously expressed.
+     *
+     * Every push went out at default priority, and a *data-only* message at default
+     * priority is explicitly deferrable — Android holds it for Doze and App Standby,
+     * and browsers batch it. That is fine for a chat message and useless for a ringing
+     * call, which is worthless the moment it stops ringing.
+     *
+     * So `urgent` raises the priority on all three transports and `ttlSeconds` tells
+     * the network to *drop* rather than deliver late: a call notification arriving
+     * after the caller has given up is worse than no notification at all.
+     */
+    const { urgent = false, ttlSeconds } = notification;
+    const ttlMs = Number.isFinite(ttlSeconds) ? Math.max(0, ttlSeconds) * 1000 : undefined;
+
+    const priority = urgent
+      ? {
+          android: {
+            priority: "high",
+            ...(ttlMs !== undefined ? { ttl: ttlMs } : {}),
+          },
+          apns: {
+            headers: {
+              "apns-priority": "10",
+              ...(Number.isFinite(ttlSeconds)
+                ? { "apns-expiration": String(Math.floor(Date.now() / 1000) + ttlSeconds) }
+                : {}),
+            },
+          },
+          webpush: {
+            headers: {
+              Urgency: "high",
+              ...(Number.isFinite(ttlSeconds) ? { TTL: String(ttlSeconds) } : {}),
+            },
+          },
+        }
+      : {};
+
     const sends = [];
-    if (web.length) sends.push(client.sendEachForMulticast({ tokens: web, data }));
+    if (web.length) {
+      sends.push(
+        client.sendEachForMulticast({
+          tokens: web,
+          data,
+          ...(priority.webpush ? { webpush: priority.webpush } : {}),
+        })
+      );
+    }
     if (native.length) {
       sends.push(
         client.sendEachForMulticast({
           tokens: native,
           notification: { title: notification.title, body: notification.body },
           data,
+          ...(priority.android ? { android: priority.android } : {}),
+          ...(priority.apns ? { apns: priority.apns } : {}),
         })
       );
     }

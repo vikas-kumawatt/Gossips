@@ -34,6 +34,7 @@ import {
   getPinnedMessages,
   getGroupPinnedMessages,
   getConversationMedia,
+  getCallIceServers,
   createPoll
 } from "../controllers/chatController.js";
 // The chat instance, not the shared one: chat is the only surface that takes
@@ -176,6 +177,15 @@ const searchRateLimit = rateLimit({
 
 // Chat list and management
 router.get("/", protect, readRateLimit, getChats);
+
+/*
+ * ICE servers for a call, fetched just before dialling or answering.
+ *
+ * Not baked into the client bundle: a TURN credential is a bandwidth bill, so it is
+ * only handed to an authenticated caller. A literal two-segment path, above every
+ * `/:param` route below.
+ */
+router.get("/call/ice-servers", protect, readRateLimit, getCallIceServers);
 
 // ── Sharing a post/comment into chats ──────────────────────────────────────
 // Literal single-segment paths; nothing above matches them.

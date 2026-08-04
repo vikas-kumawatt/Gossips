@@ -9,6 +9,7 @@ import MessageReaction from "../models/MessageReaction.js";
 import ConversationRead from "../models/ConversationRead.js";
 import Follow from "../models/Follow.js";
 import { deleteFromCloudinary, uploadToCloudinary, videoStillUrl } from "../config/cloudinary.js";
+import { buildIceConfig, hasTurn } from "../config/iceServers.js";
 import { CHAT_UPLOAD_TYPES } from "../config/multerConfig.js";
 import { getIO } from "../config/socket.js";
 import { v4 as uuidv4 } from "uuid";
@@ -2656,6 +2657,33 @@ export const getConversationMedia = async (req, res) => {
   } catch (error) {
     console.error("getConversationMedia error:", error);
     res.status(500).json({ error: "Failed to fetch media" });
+  }
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Calls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The ICE servers a client should build its peer connection with.
+ *
+ * An endpoint rather than a build-time constant for two reasons: TURN credentials
+ * must not sit in a public bundle, and short-lived credentials (which most managed
+ * TURN providers issue) have to be minted per request. `Cache-Control: no-store` for
+ * the same reason — a credential in a shared cache is a credential leak.
+ *
+ * Answers with STUN alone when no relay is configured, which is a working call on
+ * most networks and a failed one behind symmetric NAT. `hasTurn` is reported so the
+ * client can log which of those it is when a connection fails, rather than leaving
+ * "it didn't connect" as the only diagnostic.
+ */
+export const getCallIceServers = async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    res.status(200).json({ ...buildIceConfig(), hasTurn: hasTurn() });
+  } catch (error) {
+    console.error("getCallIceServers error:", error);
+    res.status(500).json({ error: "Failed to load call configuration" });
   }
 };
 

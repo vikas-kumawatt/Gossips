@@ -297,6 +297,57 @@ export const messageableIdSet = async (senderId, recipientIds) => {
 };
 
 /**
+ * May `callerId` place a call to `calleeId`?
+ *
+ * Lives here rather than inline in the call handler for the reason stated at the top
+ * of this file: a permission check that exists twice is one that will eventually only
+ * be right once. It was inline in `initiateCall`, hand-rolling the same three
+ * `audienceEnum` branches `audienceAllows` already implements.
+ *
+ * Returns a *reason*, not a boolean, because the caller has to be told which rule
+ * stopped them — "they don't accept calls" and "you've blocked each other" need
+ * different words on screen, and the handler previously collapsed both into
+ * "Failed to initiate call".
+ *
+ * @returns {Promise<{ok: true} | {ok: false, reason: string}>}
+ */
+export const canCall = async (callerId, calleeId) => {
+  const caller = idOf(callerId);
+  const callee = idOf(calleeId);
+  if (!caller || !callee) return { ok: false, reason: "User not found" };
+  if (caller === callee) return { ok: false, reason: "You can't call yourself" };
+
+  if (await UserRelation.eitherBlocks(caller, callee)) {
+    return { ok: false, reason: "You can't call this account" };
+  }
+
+  const settings = await UserSettings.findOne({ user: callee })
+    .select("privacy.whoCanCall")
+    .lean();
+  const policy = settings?.privacy?.whoCanCall || "everyone";
+
+  if (policy === "none") {
+    return { ok: false, reason: "This account doesn't accept calls" };
+  }
+  /*
+   * `audienceAllows` implements `followers` as "the owner is followed by the viewer"
+   * — the same direction the inline version used — and `followers_following` as
+   * either direction. One implementation, already covered by the privacy tests.
+   */
+  if (!(await audienceAllows(caller, callee, policy))) {
+    return {
+      ok: false,
+      reason:
+        policy === "followers"
+          ? "This account only accepts calls from people it follows"
+          : "This account doesn't accept calls from you",
+    };
+  }
+
+  return { ok: true };
+};
+
+/**
  * The caller's membership row, or null.
  *
  * `isBanned: { $ne: true }` rather than `false` — the flag was added after the

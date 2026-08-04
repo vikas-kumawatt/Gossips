@@ -917,6 +917,19 @@ export const chatAPI = {
   globalSearch: (query) =>
     cachedGet("/chats/search/global", { params: { query } }),
 
+  /**
+   * ICE servers for a call, fetched per call rather than cached.
+   *
+   * TURN credentials are short-lived with most providers, and a cached entry would
+   * hand a peer connection an expired one — which fails as "the call didn't connect"
+   * with nothing to point at. The server also sends `Cache-Control: no-store`, so the
+   * interceptor is skipped on both sides of the wire.
+   */
+  getCallIceServers: () =>
+    api
+      .get("/chats/call/ice-servers", { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
+
   // Media
   getConversationMedia: (username, params, chatId) =>
     api
