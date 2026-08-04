@@ -20,8 +20,11 @@ const DB_NAME = "gossips-chat-cache";
 /*
  * Bump this whenever the shape of a cached conversation row or message changes.
  * The store is dropped on upgrade, so a snapshot can't outlive its shape.
+ *
+ * Version 2 adds `peer` to a thread snapshot, so the conversation header can render
+ * from cache instead of waiting on two serial network round trips.
  */
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = "chatSnapshots";
 
 /*
@@ -121,7 +124,8 @@ export const setCachedChatList = async (userId, filter, value) => {
 // ── Threads ────────────────────────────────────────────────────────────────
 
 /**
- * @returns {Promise<{messages: object[], hasMore: boolean, updatedAt: number}|null>}
+ * @returns {Promise<{messages: object[], hasMore: boolean, peerId: string|null,
+ *   peer: object|null, updatedAt: number}|null>}
  */
 export const getCachedThread = async (userId, conversationId) => {
   if (!userId || !conversationId) return null;
@@ -135,15 +139,23 @@ export const getCachedThread = async (userId, conversationId) => {
  * when the tail was truncated — otherwise a thread whose full history had been
  * paged in would come back from cache claiming there was nothing older, and
  * upward scroll would stop working until reload.
+ *
+ * `peer` and `peerId` are *merged*, not replaced. The provider's debounced write
+ * fires on every message-list change and knows nothing about the peer, so a plain
+ * overwrite would null out the identity a moment after the loader saved it — and
+ * the header would be back to waiting on the network.
  */
 export const setCachedThread = async (userId, conversationId, value) => {
   if (!userId || !conversationId || !value) return;
 
+  const key = threadKey(userId, conversationId);
   const all = Array.isArray(value.messages) ? value.messages : [];
   const messages = all.slice(-MAX_MESSAGES_PER_THREAD);
   const truncated = messages.length < all.length;
 
-  await writeRecord(threadKey(userId, conversationId), {
+  const existing = await readRecord(key).catch(() => null);
+
+  await writeRecord(key, {
     messages,
     hasMore: truncated ? true : Boolean(value.hasMore),
     /*
@@ -153,7 +165,13 @@ export const setCachedThread = async (userId, conversationId, value) => {
      * bare id and the thread is keyed by username — and a live message arriving
      * during the warm window would be dropped as belonging to nothing.
      */
-    peerId: value.peerId ?? null,
+    peerId: value.peerId ?? existing?.peerId ?? null,
+    /*
+     * Enough of the other party to draw the header: `{_id, username, name,
+     * profilePic, isVerified}`. The thread endpoint already returns exactly this as
+     * `peer`, so nothing extra is fetched to fill it.
+     */
+    peer: value.peer ?? existing?.peer ?? null,
     updatedAt: Date.now(),
   });
 

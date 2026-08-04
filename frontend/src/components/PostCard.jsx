@@ -1054,11 +1054,19 @@ const PostCard = ({
         handleUnmuteAuthor();
         break;
       case "block":
+        // `_id` goes along so the block is keyed to the account, not to a handle the
+        // account can change.
         if (author?.username)
-          requestBlock({ username: author.username, name: author.name });
+          requestBlock({
+            _id: author._id,
+            username: author.username,
+            name: author.name,
+          });
         break;
       case "unblock-user":
-        if (author?.username) unblockAccount(author.username);
+        // Caught: `unblock` rethrows for callers that care, and an uncaught one here
+        // was an unhandled rejection. BlockContext has already toasted the failure.
+        if (author?.username) unblockAccount(author).catch(() => {});
         break;
       case "edit":
         setIsEditOpen(true);
@@ -1088,7 +1096,8 @@ const PostCard = ({
   }
 
   // Reactively hide posts from accounts the viewer has blocked (feed surfaces only).
-  if (!hideActions && !isPostAuthor && isBlocked(author?.username)) {
+  // The author object, not just the handle, so a renamed blocked account stays hidden.
+  if (!hideActions && !isPostAuthor && isBlocked(author)) {
     return null;
   }
 

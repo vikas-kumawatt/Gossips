@@ -89,6 +89,25 @@ const conversationReadSchema = new Schema(
      * change kind.
      */
     isGroup: { type: Boolean, default: false },
+
+    /*
+     * When this user last deleted the conversation, or absent if they never have.
+     *
+     * The chat list is built from these rows, while `deleteChat` marks messages
+     * `deletedFor` on `Message` — so a delete emptied the thread but did nothing to
+     * the row, and the conversation came back on the next fetch with no preview. The
+     * old `Message` `$group` aggregation hid it as a side effect of every message
+     * being deleted; moving the list onto this collection lost that without
+     * replacing it.
+     *
+     * A watermark rather than a flag, so the row is hidden only while nothing newer
+     * than the delete exists. A conversation you deleted *should* return when the
+     * other person writes again — the alternative is silently dropping their message.
+     * `getChats` compares it against `lastMessageAt`.
+     *
+     * No default: absent means never deleted, and `$ifNull` treats it as epoch.
+     */
+    clearedAt: { type: Date },
   },
   { timestamps: true }
 );

@@ -13,7 +13,7 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [pendingUser, setPendingUser] = useState(null);
-  const { unblock, block, isBlocked } = useBlock();
+  const { unblock, requestBlock, isBlocked } = useBlock();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -25,7 +25,7 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
       .then((data) => {
         if (active) setAccounts(Array.isArray(data?.blocked) ? data.blocked : []);
       })
-      .catch(() => {})
+      .catch((error) => console.error("Failed to load blocked accounts:", error))
       .finally(() => active && setLoading(false));
     return () => {
       active = false;
@@ -34,11 +34,31 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
 
   if (!isOpen) return null;
 
-  const handleToggle = async (username, stillBlocked) => {
-    setPendingUser(username);
+  /*
+   * Unblocking removes the row.
+   *
+   * It used to only flip the button to "Block" and leave the account sitting in a
+   * list titled "Blocked profiles" — which is a list of people you have blocked, so
+   * an unblocked account has no business being in it. It also made the "You haven't
+   * blocked anyone" empty state unreachable: unblock everyone and you were left
+   * looking at a full list of people you hadn't blocked.
+   *
+   * Re-blocking goes through `requestBlock` so it gets the same confirmation dialog
+   * as every other entry point; this was the one place that blocked without asking.
+   */
+  const handleUnblock = async (account) => {
+    setPendingUser(account.username);
     try {
-      if (stillBlocked) await unblock(username);
-      else await block(username);
+      await unblock(account);
+      setAccounts((prev) =>
+        prev.filter(
+          (entry) =>
+            entry.username?.toLowerCase() !== account.username?.toLowerCase()
+        )
+      );
+    } catch {
+      // BlockContext has rolled its optimistic update back and toasted; the row
+      // stays, which is the correct outcome.
     } finally {
       setPendingUser(null);
     }
@@ -73,7 +93,8 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
             </p>
           ) : (
             accounts.map((u) => {
-              const stillBlocked = isBlocked(u.username);
+              // The whole entry: it carries `_id`, which is the rename-proof key.
+              const stillBlocked = isBlocked(u);
               return (
                 <div
                   key={u._id || u.username}
@@ -104,7 +125,11 @@ const BlockedAccountsModal = ({ isOpen, onClose }) => {
                     )}
                   </div>
                   <button
-                    onClick={() => handleToggle(u.username, stillBlocked)}
+                    onClick={() =>
+                      stillBlocked
+                        ? handleUnblock(u)
+                        : requestBlock({ _id: u._id, username: u.username, name: u.name })
+                    }
                     disabled={pendingUser === u.username}
                     className={`px-4 py-1.5 rounded-lg text-sm font-semibold cursor-pointer disabled:opacity-60 ${
                       stillBlocked

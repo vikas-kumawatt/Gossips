@@ -46,7 +46,7 @@ const ConversationDetailsPage = () => {
   const { userAuth } = useContext(UserContext);
   const {
     preferences,
-    actions: { loadPreferences, applyPreferences, setChatState },
+    actions: { loadPreferences, applyPreferences, setChatState, deleteChat },
   } = useChat();
 
   const [peer, setPeer] = useState(null);
@@ -54,7 +54,10 @@ const ConversationDetailsPage = () => {
   const [, setBlockedByThem] = useState(false);
   const { isBlocked: isUserBlocked, requestBlock, unblock: unblockUser } = useBlock();
   const { openReport } = useReport();
-  const youBlocked = isUserBlocked(username);
+  // The peer object where we have it: the block index is keyed by id as well as
+  // handle, and the id is what survives the peer changing their handle.
+  const blockIdentity = peer?._id ? { _id: peer._id, username } : username;
+  const youBlocked = isUserBlocked(blockIdentity);
   const [youRestricted, setYouRestricted] = useState(false);
   const [loadingUser, setLoadingUser] = useState(true);
   const [media, setMedia] = useState([]);
@@ -284,12 +287,12 @@ const ConversationDetailsPage = () => {
 
   const handleBlock = () => {
     // Shared confirmation dialog + app-wide block state.
-    requestBlock({ username, name: peer?.name });
+    requestBlock({ _id: peer?._id, username, name: peer?.name });
   };
 
   const handleUnblock = async () => {
     try {
-      await unblockUser(username);
+      await unblockUser(blockIdentity);
     } catch {
       // toast handled in context
     }
@@ -303,6 +306,12 @@ const ConversationDetailsPage = () => {
     });
   };
 
+  /*
+   * The third delete-chat call site, now going through the provider like the other
+   * two — it hit `chatAPI` directly and navigated away, so the row it deleted stayed
+   * on the list it navigated to. `deleteChat` removes the row, restores it if the
+   * request fails, and reports its own errors.
+   */
   const handleDeleteChat = async () => {
     if (
       !window.confirm(
@@ -310,13 +319,8 @@ const ConversationDetailsPage = () => {
       )
     )
       return;
-    try {
-      await chatAPI.deleteChat(username);
-      navigate("/chat");
-    } catch (e) {
-      console.error(e);
-      showToast("Failed to delete chat");
-    }
+    const ok = await deleteChat(username, peer?._id ? `user_${peer._id}` : undefined);
+    if (ok) navigate("/chat");
   };
 
   const actionBtn =

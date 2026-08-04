@@ -949,15 +949,36 @@ export const isFollowingMe = async (req, res) => {
 
 export const blockUser = async (req, res) => {
   try {
-    const userToBlock = await User.findOne({ username: req.params.username }).select("_id");
+    const userToBlock = await User.findOne({ username: req.params.username })
+      .select("_id username");
     if (!userToBlock) return res.status(404).json({ message: "User not found" });
+
+    /*
+     * You cannot block yourself. `muteUser` below has always guarded this and this
+     * did not, so the endpoint happily wrote a self edge — which then landed in the
+     * client's blocked set and hid your own posts and profile from you.
+     */
+    if (userToBlock._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({ error: "You can't block yourself" });
+    }
 
     const existing = await UserRelation.findOne({
       from: req.user._id,
       to: userToBlock._id,
       kind: "block",
     });
-    if (existing) return res.status(400).json({ message: "User already blocked" });
+    /*
+     * Idempotent, like `muteUser`. This answered 400 "User already blocked", and the
+     * client treats a rejected block as a failed one — so it rolled back its
+     * optimistic update and the button went straight back to saying "Block". Any UI
+     * holding slightly stale state was therefore permanently stuck: every click
+     * failed, and every failure restored the state that caused the next click.
+     *
+     * Already blocked is the state the caller asked for, so it is a success.
+     */
+    if (existing) {
+      return res.status(200).json({ message: "User already blocked", blocked: true });
+    }
 
     await UserRelation.create({ from: req.user._id, to: userToBlock._id, kind: "block" });
 
@@ -990,7 +1011,21 @@ export const blockUser = async (req, res) => {
     }
     await Promise.all(countUpdates);
 
-    res.status(200).json({ message: "User blocked successfully" });
+    /*
+     * The cached profiles, because this just changed them.
+     *
+     * `getUserProfile` caches its payload for 60s under `CacheKeys.profile(username)`,
+     * and the counter `$inc`s above are exactly the numbers in it. Every follow path
+     * calls this helper for the same reason; block mutated the same fields and never
+     * did, so follower/following counts stayed wrong on both profiles for up to a
+     * minute after a block. `relationship.youBlocked` is per-viewer and not part of
+     * the cached payload, but the counts are.
+     */
+    await invalidateFollowRelatedCaches(req.user.username, userToBlock.username);
+
+    // `blocked: true` so the client can reconcile from the response instead of
+    // guessing that no error meant success.
+    res.status(200).json({ message: "User blocked successfully", blocked: true });
   } catch (error) {
     console.error("blockUser error:", error);
     res.status(500).json({ error: "Server error" });
@@ -999,11 +1034,16 @@ export const blockUser = async (req, res) => {
 
 export const unblockUser = async (req, res) => {
   try {
-    const userToUnblock = await User.findOne({ username: req.params.username }).select("_id");
+    const userToUnblock = await User.findOne({ username: req.params.username })
+      .select("_id username");
     if (!userToUnblock) return res.status(404).json({ message: "User not found" });
 
     await UserRelation.deleteOne({ from: req.user._id, to: userToUnblock._id, kind: "block" });
-    res.status(200).json({ message: "User unblocked successfully" });
+    // Blocking removed follow edges and adjusted counts; unblocking doesn't restore
+    // them, but the cached profiles are dropped anyway so the viewer's relationship
+    // block is rebuilt rather than served from before the change.
+    await invalidateFollowRelatedCaches(req.user.username, userToUnblock.username);
+    res.status(200).json({ message: "User unblocked successfully", blocked: false });
   } catch (error) {
     console.error("unblockUser error:", error);
     res.status(500).json({ error: "Server error" });

@@ -303,7 +303,21 @@ export const userAPI = {
   unblock: (username) =>
     api.post(`/user/unblock/${username}`).then((r) => r.data),
 
-  getBlocked: () => api.get(`/user/blocked`).then((r) => r.data),
+  /**
+   * The blocked list, uncached.
+   *
+   * This went through the global GET cache interceptor, so it was served from
+   * IndexedDB for 60 seconds and nothing invalidated it after a block or an unblock.
+   * BlockContext hydrates from this on mount — so blocking someone and reloading
+   * inside that minute rehydrated the *pre-block* list, and every Block/Unblock
+   * label in the app silently reverted. That is the whole of the "block state is not
+   * persistent" bug. It is a small list read once per session; there is nothing to
+   * gain by caching it and a correctness bug to lose.
+   */
+  getBlocked: () =>
+    api
+      .get(`/user/blocked`, { skipRequestCacheInterceptor: true })
+      .then((r) => r.data),
 
   /*
    * Push registration (CF30b).

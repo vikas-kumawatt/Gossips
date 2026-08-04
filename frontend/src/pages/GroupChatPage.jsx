@@ -138,8 +138,8 @@ const GroupChatPage = () => {
        * is released as soon as something is painted so the spinner stops hiding it.
        */
       hydrateThreadFromCache("group", groupId)
-        .then((painted) => {
-          if (painted) setLoading(false);
+        .then((cached) => {
+          if (cached?.painted) setLoading(false);
         })
         .catch(() => {});
 

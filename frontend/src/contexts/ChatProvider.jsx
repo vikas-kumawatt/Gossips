@@ -10,6 +10,7 @@ import {
   setCachedChatList,
   getCachedThread,
   setCachedThread,
+  deleteCachedThread,
 } from "../utils/chatCache";
 
 /*
@@ -225,6 +226,43 @@ function chatReducer(state, action) {
         listIsUnfiltered: action.isUnfiltered !== false,
         listPageInfo: action.pageInfo ?? initialState.listPageInfo,
       };
+    }
+
+    /*
+     * Drop one row from the list.
+     *
+     * Deleting a conversation had no reducer case at all, so the only way the row
+     * could leave the screen was a full `loadConversations` refetch — which ChatPage
+     * fired and UserConversationPage didn't, meaning deleting from inside a thread
+     * navigated back to a list that still showed it. With a warm-start cache in front
+     * of that list the stale row could also be re-rendered from IndexedDB after the
+     * refetch, so "delete" appeared to do nothing at all.
+     *
+     * `unreadCounts` is cleared alongside it, or the badge would keep counting for a
+     * conversation with no row to sit on.
+     */
+    case "REMOVE_CONVERSATION": {
+      const id = action.payload;
+      if (!id) return state;
+      const { [id]: _dropped, ...unreadCounts } = state.unreadCounts;
+      return {
+        ...state,
+        conversations: state.conversations.filter((c) => c.id !== id),
+        unreadCounts,
+      };
+    }
+
+    /*
+     * Put a removed row back, at its original position, when the delete failed.
+     * Appending would silently reorder the list, and the list is sorted by recency.
+     */
+    case "RESTORE_CONVERSATION": {
+      const { conversation, index } = action.payload || {};
+      if (!conversation?.id) return state;
+      if (state.conversations.some((c) => c.id === conversation.id)) return state;
+      const next = [...state.conversations];
+      next.splice(Math.max(0, Math.min(index ?? next.length, next.length)), 0, conversation);
+      return { ...state, conversations: next };
     }
 
     case "SET_LIST_LOADING_MORE":
@@ -1229,6 +1267,30 @@ export function ChatProvider({ children }) {
        *   whether it stuck (to revert an optimistic star) should check.
        */
       toggleFavoriteChat: async (chatId) => {
+        /*
+         * Optimistic, because the star is a one-tap toggle and a round trip is long
+         * enough to read as "the tap didn't register" — the previous version left the
+         * icon and the menu label on the old value until the response landed, then
+         * flipped both, which is why it looked like a stale cache.
+         *
+         * The list is recomputed from `preferences.favoriteChats`, so writing the
+         * predicted array is enough to move every surface at once; the response then
+         * replaces it with the server's own, which is authoritative and may differ if
+         * another device toggled the same chat.
+         */
+        const previous = Array.isArray(stateRef.current.preferences.favoriteChats)
+          ? stateRef.current.preferences.favoriteChats
+          : [];
+        const optimistic = previous.includes(chatId)
+          ? previous.filter((id) => id !== chatId)
+          : [...previous, chatId];
+
+        dispatch({ type: "SET_PREFERENCES", payload: { favoriteChats: optimistic } });
+        // Patched now rather than only on success: a page mounting in the next 60s
+        // reads the cached preferences, and an unpatched entry would undo the toggle
+        // on screen before the request had even answered.
+        chatAPI.patchCachedPreferencesFavorites(optimistic).catch(() => {});
+
         try {
           const data = await chatAPI.toggleFavoriteChat(encodeURIComponent(chatId));
           dispatch({ type: "SET_PREFERENCES", payload: data });
@@ -1238,7 +1300,57 @@ export function ChatProvider({ children }) {
           return data;
         } catch (error) {
           console.error("Failed to toggle favorite chat:", error);
+          dispatch({ type: "SET_PREFERENCES", payload: { favoriteChats: previous } });
+          chatAPI.patchCachedPreferencesFavorites(previous).catch(() => {});
+          toast.error(readableError(error, "Couldn't update favorites."));
           return null;
+        }
+      },
+
+      /**
+       * Delete a DM for this account only, and take its row with it.
+       *
+       * Owned here rather than called straight off `chatAPI` by two pages, because the
+       * row lives in this reducer and only this reducer can remove it. Both callers
+       * previously hit the endpoint directly: ChatPage then refetched the whole list,
+       * and UserConversationPage did nothing at all and navigated back to a list that
+       * still listed the deleted chat.
+       *
+       * Optimistic, with the row and its index captured so a failure can put it back
+       * exactly where it was. The cached snapshot is dropped too — leaving it would
+       * let the next warm start paint the thread we just deleted.
+       *
+       * @param username The peer's handle; the endpoint is keyed by handle.
+       * @param chatId   The list row id (`user_<peerId>`), when the caller knows it.
+       */
+      deleteChat: async (username, chatId = undefined) => {
+        if (!username) return false;
+
+        const id = chatId || null;
+        const conversations = stateRef.current.conversations;
+        const index = id ? conversations.findIndex((c) => c.id === id) : -1;
+        const removed = index >= 0 ? conversations[index] : null;
+
+        if (id) dispatch({ type: "REMOVE_CONVERSATION", payload: id });
+
+        try {
+          await chatAPI.deleteChat(username);
+          if (viewerIdRef.current) {
+            deleteCachedThread(viewerIdRef.current, dmThreadCacheKey(username)).catch(
+              () => {}
+            );
+          }
+          return true;
+        } catch (error) {
+          console.error("Failed to delete chat:", error);
+          if (removed) {
+            dispatch({
+              type: "RESTORE_CONVERSATION",
+              payload: { conversation: removed, index },
+            });
+          }
+          toast.error(readableError(error, "Couldn't delete that conversation."));
+          return false;
         }
       },
 
@@ -1288,6 +1400,13 @@ export function ChatProvider({ children }) {
               // conversation before calling this, and `response.conversation` is a
               // conversation key, not the peer's user id.
               peerId: stateRef.current.currentConversation,
+              /*
+               * The thread response already carries everything the conversation
+               * header draws — id, username, name, avatar, verified — and it was
+               * being thrown away. Storing it is what lets the header render on the
+               * next open without waiting for `getProfile`.
+               */
+              peer: response.peer || undefined,
             }).catch((error) => {
               console.error("Failed to cache thread:", error);
             });
@@ -1353,25 +1472,32 @@ export function ChatProvider({ children }) {
        * until a full round trip completes, which is the "opens on a spinner every
        * time" the cache is here to remove.
        *
-       * Declines to do anything if the thread already has messages: the network may
+       * Declines to *paint messages* if the thread already has some: the network may
        * have won the race, and painting a snapshot over a fresh thread would be a
-       * visible step backwards.
+       * visible step backwards. The cached record is still returned in that case, so
+       * the caller can seed its header regardless.
        *
        * @param {"dm"|"group"} kind
        * @param {string} identifier Username for a DM, group id for a group.
-       * @returns {Promise<boolean>} Whether anything was painted.
+       * @returns {Promise<{messages: object[], peer: object|null, painted: boolean}|null>}
+       *   The snapshot, or null when there wasn't one. `painted` says whether the
+       *   message list was actually replaced.
        */
       hydrateThreadFromCache: async (kind, identifier) => {
         const viewerId = viewerIdRef.current;
-        if (!viewerId || !identifier) return false;
+        if (!viewerId || !identifier) return null;
 
         const threadKey =
           kind === "group" ? groupThreadCacheKey(identifier) : dmThreadCacheKey(identifier);
 
         try {
           const cached = await getCachedThread(viewerId, threadKey);
-          if (!cached?.messages?.length) return false;
-          if (stateRef.current.messages.length > 0) return false;
+          if (!cached) return null;
+          // Nothing to paint, but a cached peer is still worth handing back — the
+          // header can use it even when the message tail is empty.
+          if (!cached.messages?.length || stateRef.current.messages.length > 0) {
+            return { ...cached, painted: false };
+          }
 
           activeThreadCacheKeyRef.current = threadKey;
 
@@ -1394,10 +1520,10 @@ export function ChatProvider({ children }) {
               isPagination: false,
             },
           });
-          return true;
+          return { ...cached, painted: true };
         } catch (error) {
           console.error("Failed to hydrate cached thread:", error);
-          return false;
+          return null;
         }
       },
 

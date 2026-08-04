@@ -59,7 +59,6 @@ const ProfilePage = () => {
   const { isBlocked, requestBlock, unblock: unblockAccount } = useBlock();
   const { openReport } = useReport();
   const profileMuted = isMuted(profileId);
-  const profileBlocked = isBlocked(profileId);
 
   const handleToggleMuteProfile = async () => {
     try {
@@ -77,9 +76,11 @@ const ProfilePage = () => {
 
   const handleToggleBlockProfile = () => {
     if (profileBlocked) {
-      unblockAccount(profileId);
+      // `unblock` rethrows so callers can react; unhandled, that was an unhandled
+      // promise rejection on every failed unblock. It has already toasted by then.
+      unblockAccount(blockIdentity).catch(() => {});
     } else {
-      requestBlock({ username: profileId, name: profile?.name });
+      requestBlock({ _id: profile?._id, username: profileId, name: profile?.name });
     }
   };
 
@@ -101,6 +102,19 @@ const ProfilePage = () => {
   };
 
   const [profile, setProfile] = useState(profileDataStructure);
+
+  /*
+   * Declared after `profile`, because it reads it during render.
+   *
+   * The block index is keyed by account id as well as handle, and the id is the half
+   * that survives the account renaming itself — so pass the id whenever the profile
+   * has loaded, and fall back to the route's handle before that.
+   */
+  const blockIdentity = profile?._id
+    ? { _id: profile._id, username: profileId }
+    : profileId;
+  const profileBlocked = isBlocked(blockIdentity);
+
   const [isShareProfileOpen, setIsShareProfileOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
   const [posts, setPosts] = useState([]);

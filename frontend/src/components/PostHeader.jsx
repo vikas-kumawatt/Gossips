@@ -73,7 +73,8 @@ const PostHeader = ({
   const { isMuted } = useMute();
   const { isBlocked } = useBlock();
   const authorMuted = isMuted(author?.username);
-  const authorBlocked = isBlocked(author?.username);
+  // The whole author, so the lookup uses the id and survives a handle change.
+  const authorBlocked = isBlocked(author);
 
   return (
     <div className="flex flex-row justify-start items-center relative">

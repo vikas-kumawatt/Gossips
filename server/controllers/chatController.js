@@ -565,6 +565,48 @@ export const getChats = async (req, res) => {
     // so a page of 30 is 30 visible rows instead of however many survive a filter.
     const excludedKeys = archived === "false" ? keysFor([...archivedSet]) : [];
 
+    /*
+     * `$expr` predicates, collected before the filter is built.
+     *
+     * A single `$expr` key can only hold one expression, and there are now two —
+     * "not cleared" and, for the unread views, "unread". Spreading a second one into
+     * the object literal would silently overwrite the first.
+     */
+    const exprConditions = [
+      /*
+       * A conversation deleted for this user stays deleted (CF-delete).
+       *
+       * `deleteChat` marks every message `deletedFor` the caller, and this list is
+       * built from `ConversationRead`, not from `Message` — so nothing here honoured
+       * the delete and the row came back on the next fetch with `latestMessage: null`.
+       * The old `Message` `$group` aggregation used to hide it as a side effect of
+       * every message being deleted; the CF23/CF24 move off that aggregation lost the
+       * behaviour without replacing it.
+       *
+       * `clearedAt` is a watermark, not a tombstone: the row reappears if — and only
+       * if — something newer than the delete arrives, which is what should happen
+       * when the other side writes again.
+       */
+      { $gt: ["$lastMessageAt", { $ifNull: ["$clearedAt", EPOCH] }] },
+    ];
+
+    /*
+     * Unread, as a query rather than a filter over a truncated page.
+     *
+     * `$expr` can't use an index, but it is a residual predicate on a range scan that
+     * is already restricted to one user's rows, so it costs a comparison per row of
+     * that user's own conversations — not a collection scan.
+     *
+     * It is a slight over-match: `lastMessageAt > lastReadAt` is also true when the
+     * newest message is one the caller sent after reading, which is not unread. Those
+     * rows are dropped below once the real counts are known, so a page can come back
+     * shorter than the limit. That costs a page size, not a row — the cursor still
+     * walks every conversation, which is the thing the old 500-cap could not do.
+     */
+    if (unreadOnly === "true" || view === "unread") {
+      exprConditions.push({ $gt: ["$lastMessageAt", { $ifNull: ["$lastReadAt", EPOCH] }] });
+    }
+
     const baseFilter = {
       user: userId,
       // Absent means the row predates the activity fields, or the conversation has no
@@ -575,22 +617,8 @@ export const getChats = async (req, res) => {
       // set — which is what made a member of more than 500 conversations unable to see
       // their own groups.
       ...(view === "groups" ? { isGroup: true } : {}),
-      /*
-       * Unread, as a query rather than a filter over a truncated page.
-       *
-       * `$expr` can't use an index, but it is a residual predicate on a range scan that
-       * is already restricted to one user's rows, so it costs a comparison per row of
-       * that user's own conversations — not a collection scan.
-       *
-       * It is a slight over-match: `lastMessageAt > lastReadAt` is also true when the
-       * newest message is one the caller sent after reading, which is not unread. Those
-       * rows are dropped below once the real counts are known, so a page can come back
-       * shorter than the limit. That costs a page size, not a row — the cursor still
-       * walks every conversation, which is the thing the old 500-cap could not do.
-       */
-      ...(unreadOnly === "true" || view === "unread"
-        ? { $expr: { $gt: ["$lastMessageAt", { $ifNull: ["$lastReadAt", EPOCH] }] } }
-        : {}),
+      $expr:
+        exprConditions.length === 1 ? exprConditions[0] : { $and: exprConditions },
     };
 
     /*
@@ -1533,6 +1561,24 @@ export const deleteChat = async (req, res) => {
     await Message.updateMany(
       { conversation: conversationKey },
       { $addToSet: { deletedFor: userId } }
+    );
+
+    /*
+     * And hide the row itself, which is the part that was missing.
+     *
+     * The chat list is built from `ConversationRead`, not from `Message`, so marking
+     * every message `deletedFor` above emptied the thread and left the conversation
+     * in the list — it came back on the next fetch with `latestMessage: null`. Under
+     * the old `Message` aggregation the row disappeared as a side effect of its
+     * messages disappearing; the list no longer reads `Message` for row existence.
+     *
+     * `$max` rather than `$set`: concurrent deletes and a replayed request must never
+     * move the watermark backwards. `getChats` hides the row while
+     * `lastMessageAt <= clearedAt`, so it returns if the peer writes again.
+     */
+    await ConversationRead.updateOne(
+      { user: userId, conversation: conversationKey },
+      { $max: { clearedAt: new Date() } }
     );
 
     /*

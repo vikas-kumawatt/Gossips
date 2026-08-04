@@ -707,6 +707,8 @@ const UserConversationPage = () => {
 
   const {
     messages,
+    // The chat list, for the header's stand-in peer before the profile loads.
+    conversations,
     threadLoading: messagesLoading,
     hasMoreMessages,
     onlineUsers,
@@ -728,6 +730,7 @@ const UserConversationPage = () => {
       setCurrentConversation,
       loadPreferences,
       hydrateThreadFromCache,
+      deleteChat,
     },
   } = useChat();
 
@@ -773,10 +776,27 @@ const UserConversationPage = () => {
   const [isBlocked, setIsBlocked] = useState(false);
   const [isRestricted, setIsRestricted] = useState(false);
   const [blockedByThem, setBlockedByThem] = useState(false);
-  const { isBlocked: isUserBlocked, requestBlock, unblock: unblockUser } = useBlock();
+  const {
+    isBlocked: isUserBlocked,
+    requestBlock,
+    unblock: unblockUser,
+    syncBlocked,
+  } = useBlock();
   const { openReport } = useReport();
+  /*
+   * The peer as BlockContext prefers to see them: the account id plus the handle,
+   * falling back to the handle alone before the peer has loaded.
+   *
+   * The block index is keyed by id as well as handle, and the id is the half that
+   * survives the peer renaming themselves — so every lookup and mutation on this page
+   * goes through this rather than through the bare route param.
+   */
+  const peerIdentity = useMemo(
+    () => (selectedUser?._id ? { _id: selectedUser._id, username } : username),
+    [selectedUser?._id, username]
+  );
   // Combined: you blocked them (context/server) OR they blocked you.
-  const blocked = isUserBlocked(username) || isBlocked || blockedByThem;
+  const blocked = isUserBlocked(peerIdentity) || isBlocked || blockedByThem;
   const [pinnedMessages, setPinnedMessages] = useState([]);
   /*
    * Two separate things, which used to be one inverted flag called
@@ -941,7 +961,7 @@ const UserConversationPage = () => {
       setLockedChatId(null);
 
       /*
-       * The thread from its last snapshot, painted before anything is awaited.
+       * The thread and the header from the last snapshot, before anything is awaited.
        *
        * Everything below waits on `userAPI.getProfile`, which is deliberately
        * `bypassCache: true` — so a conversation could not show a single message
@@ -950,10 +970,41 @@ const UserConversationPage = () => {
        * before it: nothing here is awaited, the provider declines if the network
        * has already filled the thread, and `loading` is released as soon as
        * something is on screen so the spinner stops hiding it.
+       *
+       * `peer` covers the header. `setSelectedUser` has exactly one other caller,
+       * below, and it sits behind *two* serial round trips (`getProfile` then
+       * `loadMessages`) — so the avatar and name arrived long after the messages did.
+       * The cached peer carries the id, handle, name, avatar and verified flag, which
+       * is everything the header draws.
        */
       hydrateThreadFromCache("dm", username)
-        .then((painted) => {
-          if (painted) setLoading(false);
+        .then((cached) => {
+          if (!cached) return;
+          if (cached.painted) setLoading(false);
+          /*
+           * Seeded only when the cached peer *is* this route's peer, and only when we
+           * don't already hold that same peer.
+           *
+           * This was `setSelectedUser((prev) => prev || cached.peer)`, and nothing
+           * clears `selectedUser` when the `username` param changes — the page stays
+           * mounted moving from one chat to the next. So `prev` was the *previous*
+           * conversation's peer, the guard treated that as "already have one", and the
+           * seed never ran on a switch: messages repainted from cache instantly while
+           * the header kept the last person's name and avatar until `getProfile` and
+           * `loadMessages` had both come back.
+           *
+           * Comparing ids rather than using `||` also keeps the richer profile when it
+           * has already landed for this same peer — the cached peer carries no
+           * `relationship` or `followerCount`, so overwriting would be a downgrade.
+           */
+          if (
+            cached.peer?._id &&
+            cached.peer.username?.toLowerCase() === username.toLowerCase()
+          ) {
+            setSelectedUser((prev) =>
+              prev?._id === cached.peer._id ? prev : cached.peer
+            );
+          }
         })
         .catch(() => {});
 
@@ -1020,9 +1071,20 @@ const UserConversationPage = () => {
 
         setBlockedByThem(Boolean(thread?.blockState?.blockedByThem));
         setSelectedUser(userData);
-        setIsBlocked(
-          Boolean(thread?.blockState?.youBlocked ?? userData.relationship?.youBlocked)
+        const youBlocked = Boolean(
+          thread?.blockState?.youBlocked ?? userData.relationship?.youBlocked
         );
+        setIsBlocked(youBlocked);
+        /*
+         * Tell BlockContext what the server just said.
+         *
+         * This is the one place the app learns `youBlocked` authoritatively for this
+         * peer, and it used to land only in local state — so the banner here could
+         * read "You blocked @x" from the server while the header menu two taps away
+         * read "Block" from a stale context, and taking that offer failed. Pushing it
+         * in reconciles every other surface from one fetch.
+         */
+        syncBlocked({ _id: userData._id, username }, youBlocked);
         /*
          * `relationship.youRestricted`, not `userData.restricted`.
          *
@@ -1092,6 +1154,7 @@ const UserConversationPage = () => {
     loadMessages,
     setCurrentConversation,
     hydrateThreadFromCache,
+    syncBlocked,
     // Bumped by the PIN prompt once a grant exists, so the load retries.
     unlockAttempt,
   ]);
@@ -2474,12 +2537,12 @@ const UserConversationPage = () => {
 
   const handleBlock = () => {
     // Shared confirmation dialog + app-wide block state.
-    requestBlock({ username, name: selectedUser?.name });
+    requestBlock({ _id: selectedUser?._id, username, name: selectedUser?.name });
   };
 
   const handleUnblock = async () => {
     try {
-      await unblockUser(username);
+      await unblockUser(peerIdentity);
       setIsBlocked(false);
     } catch {
       // toast handled in context
@@ -2506,14 +2569,20 @@ const UserConversationPage = () => {
 
   const handleDeleteChat = () => setDeleteChatOpen(true);
 
+  /*
+   * Through the provider, not `chatAPI` directly.
+   *
+   * This used to delete and navigate straight to `/chat`, which left the row on the
+   * list it navigated to: nothing removed it from `conversations`, and ChatPage only
+   * refetches on mount — and it never unmounts, since it sits outside the router
+   * outlet. So deleting from inside a thread looked like it had done nothing. The
+   * action removes the row and reports its own failures.
+   */
   const confirmDeleteChat = async () => {
     setDeletingChat(true);
     try {
-      await chatAPI.deleteChat(username);
-      navigate("/chat");
-    } catch (error) {
-      console.error("Error deleting chat:", error);
-      toast.error(error?.response?.data?.error || "Failed to delete chat");
+      const ok = await deleteChat(username, selectedUser?._id ? `user_${selectedUser._id}` : undefined);
+      if (ok) navigate("/chat");
     } finally {
       setDeletingChat(false);
       setDeleteChatOpen(false);
@@ -2666,6 +2735,32 @@ const UserConversationPage = () => {
     return message.isUploading ? null : "Delivered";
   };
 
+
+  /*
+   * The peer the header draws, which is not necessarily the one we've loaded.
+   *
+   * `selectedUser` can only be set after `getProfile` and `loadMessages` have both
+   * answered, and the cached thread snapshot only exists for a conversation that has
+   * been opened before. So on a first-ever open the header sat on "User" and a
+   * default avatar for two round trips while the messages were already on screen.
+   *
+   * The chat list row is the third source, and the cheapest: it is already in memory
+   * (warm-started from IndexedDB by the provider) and carries `name`, `profilePic`,
+   * `username` and `isVerified` — everything drawn here. Matched by username because
+   * that is what the route gives us; rows are keyed by peer id.
+   */
+  const listPeer = useMemo(() => {
+    if (selectedUser || !username) return null;
+    const row = conversations.find(
+      (entry) =>
+        !entry.isGroup &&
+        entry.user?.username?.toLowerCase() === username.toLowerCase()
+    );
+    return row?.user || null;
+  }, [selectedUser, conversations, username]);
+
+  // The loaded profile wins; the list row is only a stand-in until it arrives.
+  const headerUser = selectedUser || listPeer;
 
   /*
    * Memoised. This walks every message and spreads `{...message, isOwn}` for
@@ -3086,14 +3181,13 @@ const UserConversationPage = () => {
               type="button"
               className="relative shrink-0 rounded-full focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-600"
               onClick={() =>
-                selectedUser?.username &&
-                navigate(`/${selectedUser.username}`)
+                headerUser?.username && navigate(`/${headerUser.username}`)
               }
               aria-label="View profile"
             >
               <img
-                src={selectedUser?.profilePic || "/default-avatar.png"}
-                alt={selectedUser?.username}
+                src={headerUser?.profilePic || "/default-avatar.png"}
+                alt={headerUser?.username}
                 className="w-9 h-9 rounded-full object-cover border border-neutral-700"
               />
               {isOnline && (
@@ -3109,7 +3203,7 @@ const UserConversationPage = () => {
               aria-label="Conversation details"
             >
               <h2 className="font-medium text-base truncate">
-                {selectedUser?.name || "User"}
+                {headerUser?.name || headerUser?.username || "User"}
               </h2>{renderUserStatusIndicator()}</button>
           </div>
 
@@ -3156,10 +3250,10 @@ const UserConversationPage = () => {
                   <Icons.restrict className="w-5 h-5" />
                 </DropdownMenuItem>
                 <DropdownMenuItem
-                  onClick={isUserBlocked(username) ? handleUnblock : handleBlock}
+                  onClick={isUserBlocked(peerIdentity) ? handleUnblock : handleBlock}
                   className="flex justify-between items-center p-3 hover:bg-neutral-800 rounded-xl cursor-pointer"
                 >
-                  <span>{isUserBlocked(username) ? "Unblock" : "Block"}</span>
+                  <span>{isUserBlocked(peerIdentity) ? "Unblock" : "Block"}</span>
                   <Icons.block className="w-5 h-5" />
                 </DropdownMenuItem>
                 <DropdownMenuItem
@@ -3486,7 +3580,7 @@ const UserConversationPage = () => {
         {editingMessage && renderEditingPreview()}
 
         {blocked ? (
-          isUserBlocked(username) || isBlocked ? (
+          isUserBlocked(peerIdentity) || isBlocked ? (
             // You blocked them — Instagram-style bar with Unblock / Delete.
             <div className="bg-black border-t border-neutral-800 px-4 pt-3 pb-4">
               <p className="text-center font-semibold text-[15px]">

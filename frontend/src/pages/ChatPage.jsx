@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import { UserContext } from "../contexts/UserContext";
 import { useChat } from "../contexts/ChatContext";
+import { useBlock } from "../contexts/BlockContext";
 import { userAPI } from "../services/api";
 import { useNavigate } from "react-router-dom";
 import SiteHeader from "../components/layouts/site-header";
@@ -173,8 +174,22 @@ const ChatPage = ({ embedded = false }) => {
       applyPreferences,
       setChatState,
       toggleFavoriteChat,
+      deleteChat,
     },
   } = useChat();
+
+  /*
+   * Block state from the one place that owns it.
+   *
+   * This page used to call `userAPI.block/unblock` itself and read `isBlocked` off
+   * the fetched row, which is a third representation of the same fact — so the list,
+   * the feed and the profile could all disagree about whether an account was blocked.
+   */
+  const {
+    isBlocked: isUserBlocked,
+    unblock: unblockUser,
+    requestBlock,
+  } = useBlock();
 
   /*
    * Preferences come from the provider, not from local state (#96).
@@ -185,6 +200,7 @@ const ChatPage = ({ embedded = false }) => {
    * derived here so the rest of the file reads unchanged.
    */
   const {
+    loaded: prefsLoaded,
     categories: customCategories,
     categoryAssignments,
     favoriteChats,
@@ -213,7 +229,18 @@ const ChatPage = ({ embedded = false }) => {
   const [draggingCategoryId, setDraggingCategoryId] = useState(null);
   const [dragOverCategoryId, setDragOverCategoryId] = useState(null);
   const [chatMenu, setChatMenu] = useState(null);
-  const [showListSubmenu, setShowListSubmenu] = useState(false);
+  /*
+   * The chat whose "Add to list" sheet is open, and the chat a newly created list
+   * should be assigned to.
+   *
+   * The list picker used to render inline inside the options menu, which meant a
+   * scrolling nested panel inside an already-scrolling floating menu, and on a phone
+   * the whole thing overflowed the sheet. It is its own sheet now.
+   * `pendingListChatId` survives the hop from that sheet to the "New list" sheet,
+   * which is what lets a created list actually contain the chat you started from.
+   */
+  const [listSheetItem, setListSheetItem] = useState(null);
+  const [pendingListChatId, setPendingListChatId] = useState(null);
   const [lockPinInput, setLockPinInput] = useState("");
   // The existing PIN when changing, or the account password when resetting.
   const [lockPinCurrent, setLockPinCurrent] = useState("");
@@ -574,20 +601,40 @@ const ChatPage = ({ embedded = false }) => {
         // socket bumps and clears land there, and the fetched `chat.unreadCount`
         // goes stale the moment a message arrives.
         unreadCount: unreadCounts[chat.id] ?? chat.unreadCount ?? 0,
-        isFavorite: Boolean(chat.isFavorite) || favoriteChats.includes(chat.id),
-        isMuted: Boolean(chat.isMuted) || mutedChats.includes(chat.id),
-        isPinned: Boolean(chat.isPinned) || pinnedChats.includes(chat.id),
-        isLocked: Boolean(chat.isLocked) || lockedChats.includes(chat.id),
+        /*
+         * Preferences win once loaded — they are not OR'd with the fetched flag.
+         *
+         * These read `Boolean(chat.isFavorite) || favoriteChats.includes(chat.id)`,
+         * and an OR can only ever turn a flag *on*. Both sides derive from the same
+         * server state so they agreed most of the time, but the moment preferences
+         * moved ahead — which is exactly what an optimistic toggle does — the stale
+         * fetched flag held the value up. So un-favouriting, unmuting, unpinning and
+         * unlocking could not update until the list itself was refetched, which is
+         * the "stays stale until refresh" behaviour.
+         *
+         * Preferences are the thing every mutation writes to, so they are the
+         * authority. The fetched flag is only a seed for the window before
+         * `/chats/preferences` has answered.
+         */
+        isFavorite: prefsLoaded
+          ? favoriteChats.includes(chat.id)
+          : Boolean(chat.isFavorite),
+        isMuted: prefsLoaded ? mutedChats.includes(chat.id) : Boolean(chat.isMuted),
+        isPinned: prefsLoaded ? pinnedChats.includes(chat.id) : Boolean(chat.isPinned),
+        isLocked: prefsLoaded ? lockedChats.includes(chat.id) : Boolean(chat.isLocked),
         // Unread is now one fact — the watermark — rather than a real count
         // crossed with two flag arrays that could contradict each other.
         isMarkedUnread: (unreadCounts[chat.id] ?? chat.unreadCount ?? 0) > 0,
         seen: Boolean(chat.seen),
-        categoryId: chat.categoryId || categoryAssignments[chat.id] || null,
+        categoryId: prefsLoaded
+          ? categoryAssignments[chat.id] ?? null
+          : chat.categoryId || null,
         data: chat,
       })),
     [
       chats,
       unreadCounts,
+      prefsLoaded,
       favoriteChats,
       mutedChats,
       pinnedChats,
@@ -618,6 +665,44 @@ const ChatPage = ({ embedded = false }) => {
       }),
     [allItems]
   );
+
+  /*
+   * The open menu's row, re-read from live state each render.
+   *
+   * `chatMenu.item` is a snapshot taken when the menu opened, and every label in the
+   * menu was reading it — so toggling Favorite left the item saying "Add to
+   * Favorites" even after the star had flipped on the row underneath, which is what
+   * made an optimistic update look like it hadn't happened. Falling back to the
+   * snapshot matters for the archive case, where the row legitimately leaves the
+   * filtered list.
+   */
+  const activeMenuItem = useMemo(() => {
+    if (!chatMenu?.item) return null;
+    return allItems.find((entry) => entry.id === chatMenu.item.id) || chatMenu.item;
+  }, [chatMenu, allItems]);
+
+  /**
+   * The name of the list the open menu's chat is filed under, or null.
+   *
+   * Resolved from `customCategories` rather than stored on the row, so renaming a
+   * list is reflected without a refetch. Null also covers a `categoryId` pointing at
+   * a list that has since been deleted — in which case the menu correctly offers to
+   * add rather than to remove from something that no longer exists.
+   */
+  const activeMenuItemListName = useMemo(() => {
+    if (!activeMenuItem?.categoryId) return null;
+    return (
+      customCategories.find((category) => category.id === activeMenuItem.categoryId)
+        ?.name || null
+    );
+  }, [activeMenuItem, customCategories]);
+
+  /** Whose chat the "New list" sheet will file, for the hint inside it. */
+  const pendingListChatName = useMemo(() => {
+    if (!pendingListChatId) return null;
+    const entry = allItems.find((item) => item.id === pendingListChatId);
+    return entry?.data?.user?.name || entry?.data?.user?.username || null;
+  }, [pendingListChatId, allItems]);
 
   const filteredItems = useMemo(() => {
     let items = sortedItems;
@@ -754,14 +839,68 @@ const ChatPage = ({ embedded = false }) => {
       const createdCategory = (data?.categories || []).find(
         (category) => category.name.toLowerCase() === name.toLowerCase()
       );
+
+      /*
+       * If the list was created from a chat's "Add to list", put that chat in it.
+       *
+       * Creating a list from there used to drop the chat entirely — the menu was
+       * closed and its item discarded before the naming sheet even opened — so you
+       * named a list, were switched to it, and found it empty, with no indication
+       * that the chat you started from had anything to do with it. `pendingListChatId`
+       * is the chat, remembered across the two sheets.
+       */
+      if (createdCategory?.id && pendingListChatId) {
+        await chatAPI.assignCategory(pendingListChatId, createdCategory.id);
+      }
+
       await loadChatPreferences();
       if (createdCategory?.id) {
         setActiveFilter(`category:${createdCategory.id}`);
+        // The row has to exist under the new filter, and the filter is server-side.
+        loadConversations(getConversationParamsForFilter(`category:${createdCategory.id}`));
       }
       setNewCategoryName("");
+      setPendingListChatId(null);
       setIsCategoryModalOpen(false);
     } catch (createError) {
       console.error("Error creating category:", createError);
+      toast.error(
+        createError?.response?.data?.error || "Couldn't create that list."
+      );
+    }
+  };
+
+  /*
+   * One dismiss path for the naming sheet.
+   *
+   * `pendingListChatId` has to be cleared on cancel as well as on create, or it
+   * outlives the flow — the next list created from anywhere would silently file a
+   * chat the user never mentioned into it.
+   */
+  const closeCategorySheet = () => {
+    setIsCategoryModalOpen(false);
+    setNewCategoryName("");
+    setPendingListChatId(null);
+  };
+
+  /**
+   * Assign or clear a chat's list, then close the sheet.
+   *
+   * Shared by the sheet's rows and its "Remove from current list" action, which
+   * previously duplicated this and disagreed — the remove path skipped
+   * `loadConversations`, so removing a chat from a list left it visible in that
+   * list's tab until something else refetched.
+   */
+  const assignChatToList = async (chatId, categoryId) => {
+    try {
+      await chatAPI.assignCategory(chatId, categoryId);
+      await loadChatPreferences();
+      loadConversations(getConversationParamsForFilter(activeFilter));
+    } catch (error) {
+      console.error("Error assigning list:", error);
+      toast.error(error?.response?.data?.error || "Couldn't update that list.");
+    } finally {
+      setListSheetItem(null);
     }
   };
 
@@ -803,30 +942,53 @@ const ChatPage = ({ embedded = false }) => {
   };
 
   const handleArchiveToggle = async (item) => {
+    /*
+     * Closed first, and unconditionally.
+     *
+     * The menu used to stay open on top of a row that was about to leave the list —
+     * every filter except Archived excludes archived chats — leaving a floating menu
+     * anchored to nothing, still labelled with the pre-toggle state because its `item`
+     * is a snapshot taken when it opened. Nothing about the archived state is worth
+     * keeping the menu open for.
+     */
+    setChatMenu(null);
     try {
-      const chatId = item.id;
-      await chatAPI.archiveChat(chatId, !item.data?.isArchived);
+      await chatAPI.archiveChat(item.id, !item.data?.isArchived);
       loadConversations(getConversationParamsForFilter(activeFilter));
     } catch (error) {
       console.error("Error toggling archive:", error);
+      toast.error(error?.response?.data?.error || "Couldn't update that chat.");
     }
   };
 
+  /*
+   * Block from the list, through BlockContext.
+   *
+   * This called `userAPI.block/unblock` directly, which meant the app's blocked set
+   * never heard about it: block someone here and their posts kept rendering in the
+   * feed, their profile still offered "Block", and this row only corrected itself
+   * because it refetched. It also skipped the confirmation dialog every other entry
+   * point uses. Going through the context makes one mutation update every surface,
+   * and `requestBlock` restores the confirm step.
+   */
   const handleBlockToggle = async (item) => {
     if (item.type !== "chat") return;
-    const username = item.data?.user?.username;
-    if (!username) return;
-    // Top level, not on `user` — that's where getChats puts it. Reading
-    // `user.isBlocked` was always undefined, so this row always said "Block
-    // user" and unblocking from the list was impossible.
-    const isBlocked = Boolean(item.data?.isBlocked);
-    try {
-      await (isBlocked ? userAPI.unblock(username) : userAPI.block(username));
+    // The row's peer object, so both the lookup and the mutation carry the id.
+    const peer = item.data?.user;
+    if (!peer?.username) return;
+
+    setChatMenu(null);
+    if (isUserBlocked(peer)) {
+      try {
+        await unblockUser(peer);
+      } catch {
+        // BlockContext has already rolled back and toasted.
+        return;
+      }
       loadConversations(getConversationParamsForFilter(activeFilter));
-      setChatMenu(null);
-    } catch (error) {
-      console.error("Error toggling block:", error);
+      return;
     }
+    requestBlock({ _id: peer._id, username: peer.username, name: peer.name });
   };
 
   /*
@@ -849,16 +1011,21 @@ const ChatPage = ({ embedded = false }) => {
     setChatMenu(null);
   };
 
+  /*
+   * Through the provider, which removes the row itself.
+   *
+   * The delete used to depend entirely on the refetch that followed it to make the
+   * row disappear — and with a warm-start cache now painting the list from
+   * IndexedDB, the deleted row could be drawn again before that refetch landed, so
+   * deleting looked like it had failed. `deleteChat` drops the row optimistically,
+   * puts it back if the request fails, and clears the thread's cached snapshot.
+   */
   const confirmDeleteItem = async () => {
     if (!deleteTarget) return;
     setDeletingChat(true);
     try {
-      await chatAPI.deleteChat(deleteTarget.data?.user?.username);
-      loadConversations(getConversationParamsForFilter(activeFilter));
-      setDeleteTarget(null);
-    } catch (error) {
-      console.error("Error deleting item:", error);
-      toast.error(error?.response?.data?.error || "Couldn't delete that chat.");
+      const ok = await deleteChat(deleteTarget.data?.user?.username, deleteTarget.id);
+      if (ok) setDeleteTarget(null);
     } finally {
       setDeletingChat(false);
     }
@@ -877,7 +1044,6 @@ const ChatPage = ({ embedded = false }) => {
       x: rect ? Math.max(12, rect.right - menuWidth) : event.clientX || 24,
       y: Math.min(preferredY, maxY),
     });
-    setShowListSubmenu(false);
   };
 
   /*
@@ -1990,14 +2156,15 @@ const ChatPage = ({ embedded = false }) => {
 
       <CreatePost isOpen={isCreateModalOpen} onClose={closeCreateModal} />
       {isCategoryModalOpen && (
-        <ResponsiveSheet
-          title="New list"
-          onClose={() => {
-            setIsCategoryModalOpen(false);
-            setNewCategoryName("");
-          }}
-        >
+        <ResponsiveSheet title="New list" onClose={closeCategorySheet}>
           <div className="p-5">
+        {/* Says what will happen, because it isn't obvious that naming a list here
+            also files the chat you came from into it. */}
+        {pendingListChatName && (
+          <p className="mb-3 text-sm text-neutral-400">
+            {pendingListChatName} will be added to this list.
+          </p>
+        )}
         <input
           autoFocus
           type="text"
@@ -2012,10 +2179,7 @@ const ChatPage = ({ embedded = false }) => {
         <div className="flex items-center gap-2 mt-4">
           <button
             type="button"
-            onClick={() => {
-              setIsCategoryModalOpen(false);
-              setNewCategoryName("");
-            }}
+            onClick={closeCategorySheet}
             className="w-full rounded-xl border border-neutral-800 bg-neutral-900 text-white py-2.5 hover:bg-neutral-800"
           >
             Cancel
@@ -2082,9 +2246,9 @@ const ChatPage = ({ embedded = false }) => {
         </div>
       </ResponsiveMenu>
       )}
-      {chatMenu?.item && (
+      {activeMenuItem && (
       <ResponsiveMenu
-        open={Boolean(chatMenu?.item)}
+        open={Boolean(activeMenuItem)}
         onClose={() => setChatMenu(null)}
         title="Chat options"
         className="fixed z-[80] w-[260px] max-h-[78vh] overflow-y-auto scrollbar-hide rounded-2xl border border-neutral-700 bg-[#181818] shadow-xl p-0"
@@ -2094,22 +2258,22 @@ const ChatPage = ({ embedded = false }) => {
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 mt-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => runToggleAction(chatMenu.item, "unread")}
+            onClick={() => runToggleAction(activeMenuItem, "unread")}
           >
             <span className="font-semibold text-[15px] text-white">
-              Mark as {chatMenu.item.isMarkedUnread ? "read" : "unread"}
+              Mark as {activeMenuItem.isMarkedUnread ? "read" : "unread"}
             </span>
             <CircleDot className="w-5 h-5 text-white" />
           </button>
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => runToggleAction(chatMenu.item, "mute")}
+            onClick={() => runToggleAction(activeMenuItem, "mute")}
           >
             <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isMuted ? "Unmute" : "Mute"}
+              {activeMenuItem.isMuted ? "Unmute" : "Mute"}
             </span>
-            {chatMenu.item.isMuted ? (
+            {activeMenuItem.isMuted ? (
               <Bell className="w-5 h-5 text-white" />
             ) : (
               <BellOff className="w-5 h-5 text-white" />
@@ -2118,95 +2282,78 @@ const ChatPage = ({ embedded = false }) => {
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => runToggleAction(chatMenu.item, "pin")}
+            onClick={() => runToggleAction(activeMenuItem, "pin")}
           >
             <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isPinned ? "Unpin" : "Pin"}
+              {activeMenuItem.isPinned ? "Unpin" : "Pin"}
             </span>
-            {chatMenu.item.isPinned ? (
+            {activeMenuItem.isPinned ? (
               <PinOff className="w-5 h-5 text-white" />
             ) : (
               <Pin className="w-5 h-5 text-white" />
             )}
           </button>
+          {/*
+            Closes on tap, like every other action here. The toggle is optimistic now,
+            so the star on the row underneath has already flipped by the time the menu
+            is gone — which is the confirmation, and it doesn't need the menu to stay
+            up to deliver it.
+          */}
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={async () => {
-              await toggleFavorite(chatMenu.item);
+            onClick={() => {
+              toggleFavorite(activeMenuItem);
               setChatMenu(null);
             }}
           >
             <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isFavorite ? "Remove from Favorites" : "Add to Favorites"}
+              {activeMenuItem.isFavorite ? "Remove from Favorites" : "Add to Favorites"}
             </span>
-            <Star className="w-5 h-5 text-white" />
+            <Star
+              className={`w-5 h-5 ${
+                activeMenuItem.isFavorite
+                  ? "text-yellow-400 fill-yellow-400"
+                  : "text-white"
+              }`}
+            />
+          </button>
+          {/*
+            Names the list it will remove the chat from.
+            "Change list" said nothing about which list the chat was already in, so
+            there was no way to tell from the menu whether it was filed at all, or
+            where. When it is filed, this is a direct removal — the picker is for
+            choosing, and choosing is already done.
+          */}
+          <button
+            type="button"
+            className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
+            onClick={() => {
+              if (activeMenuItemListName) {
+                setChatMenu(null);
+                assignChatToList(activeMenuItem.id, null);
+                return;
+              }
+              setListSheetItem(activeMenuItem);
+              setChatMenu(null);
+            }}
+          >
+            <span className="font-semibold text-[15px] text-white text-left">
+              {activeMenuItemListName
+                ? `Remove from "${activeMenuItemListName}"`
+                : "Add to List"}
+            </span>
+            <FolderOpen className="w-5 h-5 text-white shrink-0" />
           </button>
           <button
             type="button"
             className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => setShowListSubmenu((prev) => !prev)}
+            onClick={() => handleArchiveToggle(activeMenuItem)}
           >
             <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.categoryId ? "Remove from List" : "Add to List"}
+              {activeMenuItem.data?.isArchived ? "Unarchive" : "Archive"}
             </span>
-            <FolderOpen className="w-5 h-5 text-white" />
-          </button>
-          {showListSubmenu && (
-            <div className="w-[calc(100%-1rem)] mx-2 mb-1 rounded-xl border border-neutral-700 p-2">
-              {sortedCustomCategories.map((category) => (
-                <button
-                  key={category.id}
-                  type="button"
-                  className="w-full text-left p-2 rounded-lg hover:bg-neutral-800 text-sm text-white"
-                  onClick={async () => {
-                    await chatAPI.assignCategory(chatMenu.item.id, category.id);
-                    await loadChatPreferences();
-                    setShowListSubmenu(false);
-                    setChatMenu(null);
-                    loadConversations(getConversationParamsForFilter(activeFilter));
-                  }}
-                >
-                  {category.name}
-                </button>
-              ))}
-              <button
-                type="button"
-                className="w-full text-left p-2 rounded-lg hover:bg-neutral-800 text-sm text-white inline-flex items-center gap-2"
-                onClick={() => {
-                  setIsCategoryModalOpen(true);
-                  setShowListSubmenu(false);
-                  setChatMenu(null);
-                }}
-              >
-                <Plus className="w-4 h-4" />
-                Create new list
-              </button>
-              {chatMenu.item.categoryId && (
-                <button
-                  type="button"
-                  className="w-full text-left p-2 rounded-lg hover:bg-neutral-800 text-sm text-neutral-300"
-                  onClick={async () => {
-                    await chatAPI.assignCategory(chatMenu.item.id, null);
-                    await loadChatPreferences();
-                    setShowListSubmenu(false);
-                    setChatMenu(null);
-                  }}
-                >
-                  Remove from current list
-                </button>
-              )}
-            </div>
-          )}
-          <button
-            type="button"
-            className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-            onClick={() => handleArchiveToggle(chatMenu.item)}
-          >
-            <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.data?.isArchived ? "Unarchive" : "Archive"}
-            </span>
-            {chatMenu.item.data?.isArchived ? (
+            {activeMenuItem.data?.isArchived ? (
               <ArchiveRestore className="w-5 h-5 text-white" />
             ) : (
               <Archive className="w-5 h-5 text-white" />
@@ -2224,28 +2371,36 @@ const ChatPage = ({ embedded = false }) => {
                 openPinSetup("set");
                 return;
               }
-              handleLockToggle(chatMenu.item);
+              handleLockToggle(activeMenuItem);
             }}
           >
             <span className="font-semibold text-[15px] text-white">
-              {chatMenu.item.isLocked ? "Unlock" : "Lock"}
+              {activeMenuItem.isLocked ? "Unlock" : "Lock"}
             </span>
-            {chatMenu.item.isLocked ? (
+            {activeMenuItem.isLocked ? (
               <LockOpen className="w-5 h-5 text-white" />
             ) : (
               <Lock className="w-5 h-5 text-white" />
             )}
           </button>
-          {chatMenu.item.type === "chat" && (
+          {activeMenuItem.type === "chat" && (
             <button
               type="button"
               className="w-[calc(100%-1rem)] mx-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800"
-              onClick={() => handleBlockToggle(chatMenu.item)}
+              onClick={() => handleBlockToggle(activeMenuItem)}
             >
+              {/*
+                From BlockContext, not the fetched row. The row's `isBlocked` is a
+                snapshot from the last list fetch, so blocking the same account
+                anywhere else in the app left this saying "Block user" — and acting
+                on that offer used to fail.
+              */}
               <span className="font-semibold text-[15px] text-white">
-                {chatMenu.item.data?.isBlocked ? "Unblock user" : "Block user"}
+                {isUserBlocked(activeMenuItem.data?.user)
+                  ? "Unblock user"
+                  : "Block user"}
               </span>
-              {chatMenu.item.data?.isBlocked ? (
+              {isUserBlocked(activeMenuItem.data?.user) ? (
                 <UserMinus className="w-5 h-5 text-white" />
               ) : (
                 <UserX className="w-5 h-5 text-white" />
@@ -2267,13 +2422,13 @@ const ChatPage = ({ embedded = false }) => {
             * quietly called hide. Leaving a group needs an endpoint that
             * doesn't exist yet.
             */}
-          {chatMenu.item.type === "chat" && (
+          {activeMenuItem.type === "chat" && (
             <>
               <div className="h-px bg-neutral-700 my-0" />
               <button
                 type="button"
                 className="w-[calc(100%-1rem)] mx-2 mb-2 mt-2 flex justify-between items-center p-3 rounded-xl cursor-pointer hover:bg-neutral-800 text-red-400"
-                onClick={() => handleDeleteItem(chatMenu.item)}
+                onClick={() => handleDeleteItem(activeMenuItem)}
               >
                 <span className="font-semibold text-[15px]">Delete</span>
                 <Trash2 className="w-5 h-5" />
@@ -2282,6 +2437,66 @@ const ChatPage = ({ embedded = false }) => {
           )}
         </div>
       </ResponsiveMenu>
+      )}
+
+      {/*
+        "Add to list" as its own sheet.
+
+        It was a nested scrolling panel inside the already-scrolling options menu,
+        which on a phone pushed the list of lists past the bottom of the sheet. A
+        separate sheet also gives it a title and a back-out, and means creating a list
+        from here can hand the chat over to the naming sheet.
+      */}
+      {listSheetItem && (
+        <ResponsiveSheet
+          title={listSheetItem.categoryId ? "Change list" : "Add to list"}
+          onClose={() => setListSheetItem(null)}
+        >
+          <div className="p-2">
+            {sortedCustomCategories.length === 0 && (
+              <p className="px-3 py-2 text-sm text-neutral-400">
+                You don't have any lists yet.
+              </p>
+            )}
+            {sortedCustomCategories.map((category) => {
+              const isCurrent = listSheetItem.categoryId === category.id;
+              return (
+                <button
+                  key={category.id}
+                  type="button"
+                  className="w-full text-left px-3 py-3 rounded-xl hover:bg-neutral-800 text-[15px] text-white flex items-center justify-between gap-3"
+                  onClick={() =>
+                    assignChatToList(listSheetItem.id, isCurrent ? null : category.id)
+                  }
+                >
+                  <span className="truncate">{category.name}</span>
+                  {/* The chat's current list says what tapping it does, rather than
+                      just showing a tick and leaving "so does that remove it?" open. */}
+                  {isCurrent && (
+                    <span className="shrink-0 inline-flex items-center gap-1.5 text-[13px] text-neutral-400">
+                      Remove
+                      <Check className="w-4 h-4 text-white" />
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              className="w-full text-left px-3 py-3 rounded-xl hover:bg-neutral-800 text-[15px] text-white inline-flex items-center gap-2"
+              onClick={() => {
+                // The chat is remembered here; `createCustomCategory` assigns it once
+                // the list exists.
+                setPendingListChatId(listSheetItem.id);
+                setListSheetItem(null);
+                setIsCategoryModalOpen(true);
+              }}
+            >
+              <Plus className="w-4 h-4" />
+              Create new list
+            </button>
+          </div>
+        </ResponsiveSheet>
       )}
       {isPinModalOpen && (
         <ResponsiveSheet title="Chat lock" onClose={closePinModal}>
