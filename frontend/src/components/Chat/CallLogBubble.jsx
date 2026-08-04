@@ -1,5 +1,12 @@
 import React from "react";
-import { Icons } from "../icons";
+import {
+  PhoneIncoming,
+  PhoneMissed,
+  PhoneOff,
+  PhoneOutgoing,
+  Video,
+  VideoOff,
+} from "lucide-react";
 
 /**
  * A finished call, in the thread.
@@ -43,22 +50,34 @@ const CallLogBubble = ({ call, isOwn }) => {
 
   const missed = status !== "answered";
 
+  /*
+   * The glyph says what happened, not just "call".
+   *
+   * A single handset for every row made an answered call, a declined one and a missed
+   * one look identical — the direction and the outcome are the whole content of a call
+   * log. lucide has the vocabulary for this: an arrow-in handset for a call you
+   * received, arrow-out for one you placed, a struck handset for missed, and a crossed
+   * one for declined.
+   */
+  const Glyph = (() => {
+    if (status === "rejected") return isVideo ? VideoOff : PhoneOff;
+    if (status !== "answered") return isVideo ? VideoOff : PhoneMissed;
+    if (isVideo) return Video;
+    return isOwn ? PhoneOutgoing : PhoneIncoming;
+  })();
+
   return (
     <div className="flex items-center gap-2.5 px-3 py-2 min-w-[170px] max-w-[260px] rounded-2xl bg-white/[0.06] border border-white/10">
       <span
         aria-hidden="true"
         className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${
-          missed ? "bg-red-500/15 text-red-400" : "bg-white/10 text-white/80"
+          missed ? "bg-rose-500/15 text-rose-400" : "bg-white/10 text-white/80"
         }`}
       >
-        {isVideo ? (
-          <Icons.videocam className="w-4 h-4" />
-        ) : (
-          <Icons.phone className="w-4 h-4" />
-        )}
+        <Glyph className="w-4 h-4" strokeWidth={2.1} />
       </span>
       <div className="min-w-0">
-        <p className={`text-[13.5px] font-medium ${missed ? "text-red-400" : "text-white/90"}`}>
+        <p className={`text-[13.5px] font-medium ${missed ? "text-rose-400" : "text-white/90"}`}>
           {label}
         </p>
         {/* Only for a call that actually happened — a duration on a missed call would

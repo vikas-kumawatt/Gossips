@@ -31,6 +31,7 @@ import { useLongPress } from "../hooks/useLongPress";
 import ConfirmDialog from "../components/ui/ConfirmDialog";
 import ReconnectBanner from "../components/Chat/ReconnectBanner";
 import { toast } from "react-hot-toast";
+import { Phone, Video } from "lucide-react";
 import EmojiPicker from "emoji-picker-react";
 import GifPicker from "../components/GifPicker";
 import RichText from "../components/RichText";
@@ -3384,21 +3385,29 @@ const UserConversationPage = () => {
               is blocked: the buttons are part of the header's shape, and removing them
               would shift the layout as the profile loads.
             */}
+            {/*
+              lucide, at a 2.1 stroke, in a 40px tap target.
+              `Icons.phone` and `Icons.video` are drawn at different weights and optical
+              sizes — the camcorder in particular has a 2px stroke on a 24px grid and
+              closes into a smudge at 20px — so side by side they looked like two icons
+              from two different sets. These are one family, and the hover plate gives
+              them a real pressed state instead of a colour change.
+            */}
             <button
               onClick={() => startCall(headerUser, "voice")}
               disabled={!headerUser?._id || blocked}
-              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
-              aria-label="Voice Call"
+              className="w-10 h-10 -mr-1 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-white/10 active:scale-90 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              aria-label="Voice call"
             >
-              <Icons.phone className="w-5 h-5 shrink-0" />
+              <Phone className="w-5 h-5 shrink-0" strokeWidth={2.1} />
             </button>
             <button
               onClick={() => startCall(headerUser, "video")}
               disabled={!headerUser?._id || blocked}
-              className="text-neutral-400 hover:text-white transition-colors cursor-pointer p-0.5 disabled:opacity-40 disabled:cursor-not-allowed"
-              aria-label="Video Call"
+              className="w-10 h-10 rounded-full flex items-center justify-center text-neutral-300 hover:text-white hover:bg-white/10 active:scale-90 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              aria-label="Video call"
             >
-              <Icons.video className="w-5 h-5 shrink-0" />
+              <Video className="w-5 h-5 shrink-0" strokeWidth={2.1} />
             </button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

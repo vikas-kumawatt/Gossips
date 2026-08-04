@@ -1,8 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Icons } from "../icons";
+import { Mic, MicOff, Phone, PhoneOff, Video, VideoOff } from "lucide-react";
 import { useCall } from "../../contexts/CallContext";
 import { lockBodyScroll, unlockBodyScroll } from "../../lib/scrollLock";
+
+/*
+ * lucide-react, not the app's `Icons` object.
+ *
+ * The call screen was drawn with a mix of the app's outline set and four glyphs
+ * hand-rolled for it, at two different stroke weights and optical sizes — which is
+ * what made it look thrown together. lucide is already a direct dependency of a dozen
+ * components here, and it has the whole call vocabulary drawn as one consistent family
+ * on a 24px grid, so every control matches at every size.
+ */
 
 /**
  * The call screen: ringing, dialling and in-call.
@@ -133,8 +143,27 @@ const CallOverlay = () => {
   /* Remote video fills the screen only once there is something to show. */
   const showRemoteVideo = isVideo && remoteStream && isRemoteVideoLive && phase === "active";
 
-  const controlButton =
-    "w-14 h-14 rounded-full flex items-center justify-center transition-colors active:scale-95 shrink-0";
+  /*
+   * Control chrome, in one place.
+   *
+   * The buttons were flat filled circles, which is most of what made the screen look
+   * cheap — a solid green disc reads as a placeholder. These get a soft inner ring, a
+   * drop shadow to lift them off live video, and a press transform. 56px for the
+   * toggles, 64px for the two that end or answer a call.
+   */
+  const controlBase =
+    "rounded-full flex items-center justify-center shrink-0 ring-1 transition-all duration-150 active:scale-90";
+  const toggleIdle =
+    "w-14 h-14 bg-white/10 ring-white/15 text-white backdrop-blur-md hover:bg-white/20";
+  const toggleOn =
+    "w-14 h-14 bg-white ring-white/40 text-neutral-900 shadow-lg shadow-black/30";
+  const answerButton =
+    "w-16 h-16 bg-gradient-to-b from-emerald-400 to-emerald-600 ring-white/25 text-white shadow-xl shadow-emerald-900/40";
+  const hangupButton =
+    "w-16 h-16 bg-gradient-to-b from-rose-500 to-rose-700 ring-white/25 text-white shadow-xl shadow-rose-900/40";
+  const hangupSmall =
+    "w-14 h-14 bg-gradient-to-b from-rose-500 to-rose-700 ring-white/25 text-white shadow-lg shadow-rose-900/40";
+  const iconStroke = 2.1;
 
   return createPortal(
     <div
@@ -204,7 +233,7 @@ const CallOverlay = () => {
               />
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-neutral-900">
-                <Icons.videoOff className="w-6 h-6 text-neutral-500" />
+                <VideoOff className="w-6 h-6 text-neutral-500" strokeWidth={2} />
               </div>
             )}
           </div>
@@ -220,43 +249,49 @@ const CallOverlay = () => {
            * without looking, so they are 64px and separated by the full width rather
            * than sitting next to each other where a mis-tap declines a call.
            */
-          <div className="flex items-center justify-between max-w-xs mx-auto">
-            <button
-              type="button"
-              onClick={rejectCall}
-              aria-label="Decline call"
-              className={`${controlButton} bg-red-500 hover:bg-red-600`}
-            >
-              <Icons.phoneOff className="w-6 h-6" />
-            </button>
-            <button
-              type="button"
-              onClick={acceptCall}
-              aria-label="Accept call"
-              className={`${controlButton} bg-green-500 hover:bg-green-600`}
-            >
-              {isVideo ? (
-                <Icons.videocam className="w-6 h-6" />
-              ) : (
-                <Icons.phone className="w-6 h-6" />
-              )}
-            </button>
+          <div className="flex items-end justify-between max-w-[19rem] mx-auto">
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={rejectCall}
+                aria-label="Decline call"
+                className={`${controlBase} ${hangupButton}`}
+              >
+                <PhoneOff className="w-6 h-6" strokeWidth={iconStroke} />
+              </button>
+              {/* Labelled, because these two are pressed under pressure and a red
+                  circle and a green circle are not self-explanatory to everyone. */}
+              <span className="text-[11px] text-neutral-400">Decline</span>
+            </div>
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={acceptCall}
+                aria-label="Accept call"
+                className={`${controlBase} ${answerButton} animate-pulse`}
+              >
+                {isVideo ? (
+                  <Video className="w-6 h-6" strokeWidth={iconStroke} />
+                ) : (
+                  <Phone className="w-6 h-6" strokeWidth={iconStroke} />
+                )}
+              </button>
+              <span className="text-[11px] text-neutral-400">Accept</span>
+            </div>
           </div>
         ) : (
-          <div className="flex items-center justify-center gap-4">
+          <div className="flex items-center justify-center gap-5">
             <button
               type="button"
               onClick={toggleMic}
               aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
               aria-pressed={!micEnabled}
-              className={`${controlButton} ${
-                micEnabled ? "bg-white/15 hover:bg-white/25" : "bg-white text-black"
-              }`}
+              className={`${controlBase} ${micEnabled ? toggleIdle : toggleOn}`}
             >
               {micEnabled ? (
-                <Icons.mic className="w-6 h-6" />
+                <Mic className="w-[22px] h-[22px]" strokeWidth={iconStroke} />
               ) : (
-                <Icons.micOff className="w-6 h-6" />
+                <MicOff className="w-[22px] h-[22px]" strokeWidth={iconStroke} />
               )}
             </button>
 
@@ -266,14 +301,12 @@ const CallOverlay = () => {
                 onClick={toggleCamera}
                 aria-label={cameraEnabled ? "Turn camera off" : "Turn camera on"}
                 aria-pressed={!cameraEnabled}
-                className={`${controlButton} ${
-                  cameraEnabled ? "bg-white/15 hover:bg-white/25" : "bg-white text-black"
-                }`}
+                className={`${controlBase} ${cameraEnabled ? toggleIdle : toggleOn}`}
               >
                 {cameraEnabled ? (
-                  <Icons.videocam className="w-6 h-6" />
+                  <Video className="w-[22px] h-[22px]" strokeWidth={iconStroke} />
                 ) : (
-                  <Icons.videoOff className="w-6 h-6" />
+                  <VideoOff className="w-[22px] h-[22px]" strokeWidth={iconStroke} />
                 )}
               </button>
             )}
@@ -282,9 +315,9 @@ const CallOverlay = () => {
               type="button"
               onClick={endCall}
               aria-label="End call"
-              className={`${controlButton} bg-red-500 hover:bg-red-600`}
+              className={`${controlBase} ${hangupSmall}`}
             >
-              <Icons.phoneOff className="w-6 h-6" />
+              <PhoneOff className="w-[22px] h-[22px]" strokeWidth={iconStroke} />
             </button>
           </div>
         )}
