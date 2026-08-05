@@ -11,7 +11,9 @@
     "migrate": "node migrations/migrate.js",
     "migrate:verify": "node migrations/migrate.js --verify",
     "migrate:drop-legacy": "node migrations/migrate.js --drop-legacy",
-    "migrate:backfill-flags": "node migrations/migrate.js --backfill-flags"
+    "migrate:backfill-flags": "node migrations/migrate.js --backfill-flags",
+    "docs:purge:check": "node scripts/purgeDocumentMessages.js",
+    "docs:purge": "node scripts/purgeDocumentMessages.js --apply"
   },
   "author": "",
   "license": "ISC",

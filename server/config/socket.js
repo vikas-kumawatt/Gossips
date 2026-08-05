@@ -145,7 +145,7 @@ const parseSendPayload = ({ content, media, messageType }) => {
     }
     // The upload endpoint derives `type` from the file it received and signs
     // the result. Checking that signature is what stops a document being
-    // relabelled as an image to slip past a group's fileSharing rule, and stops
+    // relabelled as an image to slip past a group's mediaSharing rule, and stops
     // an arbitrary URL being passed off as an upload at all.
     //
     // GIFs are the exception: they're hotlinked from the picker and never

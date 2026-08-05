@@ -548,11 +548,7 @@ const ChatPage = ({ embedded = false }) => {
 
     if (message.messageType === "media") {
       const mediaType = message.media?.[0]?.type;
-      // `document` is the case the media branch missed — a PDF previewed as
-      // "Sent a photo" because the branch only distinguished video from everything
-      // else.
       if (mediaType === "video") return "Sent a video";
-      if (mediaType === "document") return "Sent a file";
       if (mediaType === "audio") return "Sent an audio file";
       return "Sent a photo";
     }
@@ -576,7 +572,6 @@ const ChatPage = ({ embedded = false }) => {
       if (kind === "comment") return "Shared a comment";
       return "Shared a post";
     }
-    if (message.messageType === "file") return "Sent a file";
     if (message.messageType === "location") return "Shared a location";
     if (message.messageType === "call") {
       return message.call?.type === "video" ? "Video call" : "Voice call";

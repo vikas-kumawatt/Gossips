@@ -272,8 +272,6 @@ const GroupInfoPage = () => {
   const handleSlowModeChange = (seconds) => updateSetting({ slowModeSeconds: seconds });
   const handleToggleMediaSharing = () =>
     updateSetting({ mediaSharing: !group.settings?.mediaSharing });
-  const handleToggleFileSharing = () =>
-    updateSetting({ fileSharing: !group.settings?.fileSharing });
   /*
    * No-ops when the value hasn't changed, because `updateGroup` answers 400 for an empty
    * update and re-selecting the current option would surface that as a failed save.
@@ -599,14 +597,6 @@ const GroupInfoPage = () => {
                 <Toggle
                   checked={!!group.settings?.mediaSharing}
                   onChange={handleToggleMediaSharing}
-                  disabled={settingsSaving}
-                />
-              </div>
-              <div className="flex items-center justify-between">
-                <p className="text-sm text-white">File sharing</p>
-                <Toggle
-                  checked={!!group.settings?.fileSharing}
-                  onChange={handleToggleFileSharing}
                   disabled={settingsSaving}
                 />
               </div>

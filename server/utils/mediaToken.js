@@ -6,7 +6,7 @@ import crypto from "crypto";
  * The upload endpoint derives an attachment's `type` from the file it actually
  * received. The send path then took that type back from the client and trusted
  * it — so relabelling a PDF as an image was enough to walk past a group's
- * `fileSharing: false` rule, and any URL at all could be passed off as an
+ * `mediaSharing: false` rule, and any URL at all could be passed off as an
  * upload. The server has no way to re-derive the type from a URL without going
  * back to Cloudinary, so instead it signs what it decided and checks the
  * signature on the way back in.

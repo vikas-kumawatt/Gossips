@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { toast } from "react-hot-toast";
 import { Icons } from "../icons";
 import RichText from "../RichText";
 import SharedPostCard from "./SharedPostCard";
@@ -8,7 +7,6 @@ import VoiceNoteBubble from "./VoiceNoteBubble";
 import ChatVideoBubble from "./ChatVideoBubble";
 import CallLogBubble from "./CallLogBubble";
 import { useLongPress } from "../../hooks/useLongPress";
-import { downloadMedia } from "../../lib/downloadMedia";
 import { formatInstagramTimestamp, messagePreviewLabel } from "../../lib/chatMessage";
 
 /**
@@ -445,45 +443,6 @@ const MessageBubble = React.memo(function MessageBubble({
                   }
                 }
                 return <VoiceNoteBubble key={idx} item={item} isOwn={isOwn} bubbleRadius={vRadius} />;
-              }
-              if (item.type === "document") {
-                return (
-                  <div
-                    key={idx}
-                    className="flex items-center gap-2.5 min-w-[190px] max-w-[260px] py-0.5"
-                  >
-                    <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
-                      <Icons.file className="w-5 h-5 text-white" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[13px] font-medium truncate">
-                        {item.filename}
-                      </p>
-                      <p className="text-[11px] text-white/40">
-                        {(item.fileSize / 1024 / 1024).toFixed(1)} MB
-                      </p>
-                    </div>
-                    {/*
-                      A button that fetches, not an `<a download>`.
-                      The attribute is honoured same-origin only, and these files
-                      are on Cloudinary — so this control navigated to the document
-                      rather than saving it, dropping the user out of the thread.
-                    */}
-                    <button
-                      type="button"
-                      onClick={() =>
-                        downloadMedia(item).catch((error) => {
-                          console.error("Failed to download document:", error);
-                          toast.error("Couldn't download that");
-                        })
-                      }
-                      aria-label={`Download ${item.filename || "file"}`}
-                      className="opacity-50 hover:opacity-90 transition-opacity shrink-0"
-                    >
-                      <Icons.download className="w-4 h-4" />
-                    </button>
-                  </div>
-                );
               }
               return null;
             })}

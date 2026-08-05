@@ -2722,10 +2722,25 @@ export const uploadChatMedia = async (req, res) => {
       return res.status(400).json({ error: "Invalid file type" });
     }
 
-    let fileType = "document";
+    /*
+     * Classified, or refused — no default.
+     *
+     * This defaulted to `"document"`, which was the branch that made documents work and
+     * is now not a value `Message.media[].type` accepts. Left as a default it would be
+     * worse than dead code: an unclassifiable file would be uploaded to Cloudinary,
+     * signed, returned to the client, and then rejected by schema validation at the
+     * moment of sending — a failure two steps away from its cause. `CHAT_UPLOAD_TYPES`
+     * only admits images, video and audio, so anything reaching the else is a mismatch
+     * between that list and this one, and saying so immediately is the point.
+     */
+    let fileType = null;
     if (req.file.mimetype.startsWith("image/")) fileType = "image";
-    if (req.file.mimetype.startsWith("video/")) fileType = "video";
-    if (req.file.mimetype.startsWith("audio/")) fileType = "audio";
+    else if (req.file.mimetype.startsWith("video/")) fileType = "video";
+    else if (req.file.mimetype.startsWith("audio/")) fileType = "audio";
+    if (!fileType) {
+      console.error("Unclassifiable upload passed the type filter:", req.file.mimetype);
+      return res.status(400).json({ error: "Invalid file type" });
+    }
 
     const result = await uploadToCloudinary(req.file.path, "chat_media");
 
@@ -2755,8 +2770,8 @@ export const uploadChatMedia = async (req, res) => {
       duration: result.duration || null,
       dimensions: result.width && result.height ? { width: result.width, height: result.height } : null,
     };
-    // Signed so the send path can trust the type it derived here. Without it a
-    // document relabelled as an image walks past a group's fileSharing rule.
+    // Signed so the send path can trust the type it derived here. Without it a client
+    // could relabel a video as an image and walk past a group's mediaSharing rule.
     res.status(200).json({ ...descriptor, token: signMedia(descriptor) });
   } catch (error) {
     console.error("uploadChatMedia error:", error);

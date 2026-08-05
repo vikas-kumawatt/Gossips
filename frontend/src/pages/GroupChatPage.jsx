@@ -40,9 +40,6 @@ const VOICE_IDLE_WAVEFORM = Array.from(
   { length: 32 },
   (_, i) => 0.18 + Math.abs(Math.sin(i * 0.7 + 1)) * 0.65
 );
-// Matches multer's limit on the server. It was 100MB here against 50MB there,
-// so a 60MB file passed this check, uploaded, and then failed.
-const MAX_FILE_SIZE = 50 * 1024 * 1024;
 
 const GroupChatPage = () => {
   const { userAuth } = useContext(UserContext);
@@ -78,19 +75,14 @@ const GroupChatPage = () => {
   const [loading, setLoading] = useState(true);
   const [isSending, setIsSending] = useState(false); // Corrected declaration
   const [uploadingPreview, setUploadingPreview] = useState(null);
-  const [mediaPreview, setMediaPreview] = useState(null);
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [replyingTo, setReplyingTo] = useState(null);
   const [editingMessage, setEditingMessage] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [selectedMessage, setSelectedMessage] = useState(null);
   const [error, setError] = useState(null); // Added missing error state
   /*
-   * Attachments, the same tray the DM composer uses.
-   *
-   * `mediaPreview` above is now only the document path: the picker this replaces took
-   * one file at a time into a modal, so sending three photos to a group meant three
-   * separate messages and three trips through it.
+   * Attachments, the same tray the DM composer uses. Photos and videos only — see the
+   * `accept` list in lib/composerMedia.js.
    */
   const tray = useMediaTray({ onReject: (message) => setError(message) });
   const [showPollComposer, setShowPollComposer] = useState(false);
@@ -127,7 +119,6 @@ const GroupChatPage = () => {
   });
   const messagesEndRef = useRef(null);
   const messagesContainerRef = useRef(null);
-  const documentInputRef = useRef(null);
   /*
    * The composer's height follows its content.
    *
@@ -417,7 +408,7 @@ const GroupChatPage = () => {
    * `media` through to avoid.
    */
   const validateMessage = (media = []) => {
-    if (!newMessage.trim() && !media.length && !tray.items.length && !mediaPreview) {
+    if (!newMessage.trim() && !media.length && !tray.items.length) {
       return "Message cannot be empty";
     }
     if (newMessage.length > MAX_MESSAGE_LENGTH) {
@@ -544,10 +535,10 @@ const GroupChatPage = () => {
   /**
    * Send the staged photos and videos as one message, captioned by the composer text.
    *
-   * Ported from the DM thread rather than rewritten. The group page had no equivalent:
-   * `handleMediaUploadConfirm` below sent exactly one file, with no caption, through a
-   * modal — so a group could not receive a multi-photo message at all, and anything
-   * typed alongside was posted separately afterwards.
+   * Ported from the DM thread rather than rewritten. The group page had no equivalent —
+   * its picker took one file at a time into a modal, with no caption, so a group could
+   * not receive a multi-photo message at all and anything typed alongside was posted
+   * separately afterwards.
    */
   const handleSendMedia = async () => {
     if (!tray.items.length || isSending) return;
@@ -643,32 +634,12 @@ const GroupChatPage = () => {
     sendMessage([{ type: "gif", url: gif.url, thumbnail: gif.url }], "gif");
   };
 
-  /*
-   * Documents keep the one-at-a-time modal.
-   *
-   * The tray previews photos and videos and captions them as a set, which a PDF has no
-   * equivalent of — and `handleMediaUploadConfirm` below already sends one correctly.
-   * Dropping it to unify the two composers would have quietly removed the only way to
-   * send a file to a group.
-   */
-  const handleDocumentSelect = (e) => {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    if (file.size > MAX_FILE_SIZE) {
-      setError(`File size too large. Max ${MAX_FILE_SIZE / 1024 / 1024}MB`);
-      return;
-    }
-    setMediaPreview({ file, url: URL.createObjectURL(file), type: "document" });
-    setIsPreviewOpen(true);
-  };
-
   /**
    * Send the recorded clip.
    *
-   * Deliberately not routed through `handleMediaUploadConfirm`: that path takes a file
-   * off the picker and knows nothing about a duration or an envelope, and both have to
-   * reach the server or the bubble draws a synthetic waveform and claims 0:00.
+   * Deliberately not routed through `handleSendMedia`: that path takes files off the
+   * picker and knows nothing about a duration or an envelope, and both have to reach the
+   * server or the bubble draws a synthetic waveform and claims 0:00.
    *
    * `takePreview` clears the composer and hands the clip over, without revoking its
    * blob URL — nothing here needs it, but keeping the contract identical to the DM
@@ -704,43 +675,6 @@ const GroupChatPage = () => {
     } finally {
       setIsSending(false);
       if (clip.url) URL.revokeObjectURL(clip.url);
-    }
-  };
-
-  /** Send the confirmed document. Only documents reach here — see `handleDocumentSelect`. */
-  const handleMediaUploadConfirm = async () => {
-    if (!mediaPreview) return;
-    const file = mediaPreview.file;
-
-    /*
-     * The image / video / audio branches this used to pick between are gone with the
-     * modal's other types. It classified `audio` as `voice` and posted it to
-     * `/chats/upload/voice`, which is `chatUpload.single("audio")` — the field name is
-     * why that mattered, and a document only ever goes to `/chats/upload` as `file`.
-     */
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      // Through chatAPI (#119): the shared client refreshes an expired token on 401,
-      // which the hand-rolled Authorization header snapshotted at render time never
-      // did — so a long composing session ended in a silent upload failure.
-      //
-      // The upload endpoints return a single flat object — { url, type, ... } from
-      // /chats/upload and { url, duration, waveform } from /upload/voice. Reading
-      // `.media` off it gave undefined, so every group attachment was sent with no
-      // media at all and arrived as an empty bubble.
-      const uploaded = await chatAPI.uploadMedia(formData);
-      if (!uploaded?.url) throw new Error("Upload returned no file");
-
-      await sendMessage([uploaded], "file");
-
-      if (mediaPreview.url?.startsWith("blob:")) URL.revokeObjectURL(mediaPreview.url);
-      setMediaPreview(null);
-      setIsPreviewOpen(false);
-    } catch (err) {
-      console.error("Upload failed", err);
-      setError("Failed to upload that file");
     }
   };
 
@@ -1179,14 +1113,7 @@ const GroupChatPage = () => {
           onSend={handleSendButtonClick}
           onEmoji={handleEmojiClick}
           onGifSelect={handleGifSelect}
-          onPickDocument={() => documentInputRef.current?.click()}
           onPoll={() => setShowPollComposer(true)}
-        />
-        <input
-          type="file"
-          ref={documentInputRef}
-          className="hidden"
-          onChange={handleDocumentSelect}
         />
         {showPollComposer && (
           <CreatePollSheet
@@ -1325,58 +1252,6 @@ const GroupChatPage = () => {
         </div>
       )}
 
-      {isPreviewOpen && mediaPreview && (
-        <div className="fixed inset-0 bg-black/90 z-50 flex flex-col items-center justify-center p-4">
-          <div className="bg-neutral-900 p-4 rounded-xl max-w-lg w-full">
-            <h3 className="text-lg font-semibold mb-4">Send file</h3>
-            {/*
-              Documents only, now that photos and videos go through the tray.
-
-              This modal used to be the single path for every attachment type, and its
-              image, video and audio branches became unreachable the moment the composer
-              grew a tray — dead branches that still looked load-bearing. `handleDocumentSelect`
-              is the only thing that opens it, and it only ever sets `type: "document"`.
-            */}
-            <div className="flex justify-center mb-4">
-              <div className="flex items-center gap-3 w-full px-3 py-4 rounded-lg bg-neutral-800">
-                <Icons.file className="w-8 h-8 text-white shrink-0" />
-                <div className="min-w-0">
-                  <p className="text-sm font-medium truncate">
-                    {mediaPreview.file?.name || "Document"}
-                  </p>
-                  {mediaPreview.file?.size > 0 && (
-                    <p className="text-xs text-neutral-400">
-                      {(mediaPreview.file.size / 1024 / 1024).toFixed(1)} MB
-                    </p>
-                  )}
-                </div>
-              </div>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => {
-                  // Revoked, which it wasn't: cancelling leaked the blob URL and the
-                  // file behind it stayed in memory for the life of the tab.
-                  if (mediaPreview?.url?.startsWith("blob:")) {
-                    URL.revokeObjectURL(mediaPreview.url);
-                  }
-                  setIsPreviewOpen(false);
-                  setMediaPreview(null);
-                }}
-                className="px-4 py-2 rounded bg-neutral-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleMediaUploadConfirm}
-                className="px-4 py-2 rounded bg-blue-600 text-white"
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };

@@ -13,7 +13,7 @@
  */
 
 /** Message types whose text is the author's own. Mirrors utils/messageContent.js. */
-const EDITABLE_TYPES = new Set(["text", "media", "file"]);
+const EDITABLE_TYPES = new Set(["text", "media"]);
 
 const EDIT_WINDOW_MS = 15 * 60 * 1000;
 

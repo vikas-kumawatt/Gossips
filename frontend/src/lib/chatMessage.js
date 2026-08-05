@@ -95,8 +95,6 @@ export const messagePreviewLabel = (message) => {
       return "🎨 Sticker";
     case "gif":
       return "GIF";
-    case "file":
-      return caption || "📎 File";
     case "post_share":
       return caption || "📷 Shared a post";
     /*

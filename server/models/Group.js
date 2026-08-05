@@ -40,7 +40,6 @@ const groupSchema = new Schema(
     settings: {
       slowModeSeconds: { type: Number, default: 0 },
       mediaSharing:    { type: Boolean, default: true },
-      fileSharing:     { type: Boolean, default: true },
 
       /*
        * How much of the past a member may read.

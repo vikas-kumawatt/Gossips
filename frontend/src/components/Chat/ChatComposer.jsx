@@ -22,9 +22,12 @@ import { COMPOSER_ACCEPT, MAX_MESSAGE_LENGTH } from "../../lib/composerMedia";
  * permissions — that sharing the *sending* would mean a component full of branches.
  * This shares the part that should genuinely be identical, which is all of the chrome.
  *
- * `onPickDocument` and `onPoll` are the two slots. Both render only when passed, and
- * both are currently group-only: a poll between two people collapses into a question you
- * could just ask, and documents were reachable only from the group's old modal.
+ * `onPoll` is the one slot: it renders only when passed, and only the group thread passes
+ * it — a poll between two people collapses into a question you could just ask.
+ *
+ * There is no document button. Attachments are photos and videos, which the tray can
+ * preview and caption as a set; a PDF has no equivalent of either, and the one-at-a-time
+ * modal that used to handle it is gone.
  */
 const ChatComposer = ({
   value,
@@ -52,7 +55,6 @@ const ChatComposer = ({
   onEmoji,
   onGifSelect,
 
-  onPickDocument,
   onPoll,
 }) => {
   const fileInputRef = useRef(null);
@@ -346,17 +348,6 @@ const ChatComposer = ({
                   >
                     <Icons.gif className="w-6 h-6" />
                   </button>
-                  {onPickDocument && (
-                    <button
-                      type="button"
-                      onClick={onPickDocument}
-                      className="text-neutral-400 hover:text-white p-1.5 sm:p-2 transition-colors disabled:opacity-50"
-                      disabled={sending}
-                      aria-label="Document"
-                    >
-                      <Icons.file className="w-6 h-6" />
-                    </button>
-                  )}
                   {onPoll && (
                     <button
                       type="button"

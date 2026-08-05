@@ -615,9 +615,14 @@ export const resolveGroupSend = async (groupId, userId, { media = [] } = {}) => 
     if (settings.mediaSharing === false) {
       return { ok: false, reason: "Media sharing is turned off in this group" };
     }
-    if (settings.fileSharing === false && items.some((m) => m?.type === "document")) {
-      return { ok: false, reason: "File sharing is turned off in this group" };
-    }
+    /*
+     * There is no `fileSharing` rule any more.
+     *
+     * It gated `type === "document"`, and documents were removed from the product — no
+     * client can produce one and the upload endpoint refuses every document mimetype. A
+     * check that can never fire is worse than no check: it reads as protection.
+     * `mediaSharing` above still covers photos, videos and voice notes.
+     */
   }
 
   // Admins are exempt: someone who turns on a five-minute slow mode shouldn't

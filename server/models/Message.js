@@ -59,14 +59,16 @@ const messageSchema = new Schema(
        * message carrying one would have thrown on the next edit, unsend or pin. R4
        * removed them, hit exactly that, and put them back (CF14).
        *
-       * `scripts/migrateLegacyMessageTypes.js` retypes any such row to "text", and
-       * `npm run chat:types:verify` reported zero of all four before this narrowing —
-       * so on this database nothing was ever stored with them. Re-run the verify
-       * before deploying to any environment that hasn't had it.
+       * `file` is gone for the same reason and with the same care. Documents were
+       * removed from the product, and `scripts/purgeDocumentMessages.js` retypes every
+       * stored one to "text" as a tombstone. **Run it before deploying this**, in every
+       * environment: its dry run (`npm run docs:purge:check`) counts what is left, and
+       * while that count is above zero, an edit, unsend, pin or reaction on one of those
+       * messages will throw a validation error on save.
        */
       enum: [
         "text", "media", "voice", "location",
-        "poll", "sticker", "gif", "file", "system",
+        "poll", "sticker", "gif", "system",
         "story_reply", "call", "post_share",
       ],
       default: "text",
@@ -111,7 +113,11 @@ const messageSchema = new Schema(
      */
     media: [{
       _id:        false,
-      type:       { type: String, enum: ["image", "video", "gif", "audio", "document", "voice", "sticker"] },
+      /*
+       * No "document": see the `messageType` note above. The purge script empties the
+       * `media` array of every message that had one, so nothing stored carries it.
+       */
+      type:       { type: String, enum: ["image", "video", "gif", "audio", "voice", "sticker"] },
       url:        { type: String, required: true },
       thumbnail:  String,
       filename:   String,

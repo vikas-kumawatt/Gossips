@@ -17,20 +17,16 @@ const storage = diskStorage({
 });
 
 /*
- * Two filters, because two kinds of route.
+ * Two filters, because two kinds of route — though both now allow the same types.
  *
- * Posts, comments, avatars and report attachments are media: an image, a video
- * or an audio clip. Chat is the only place that takes documents, and its
- * controller was written to classify them — but the shared filter stopped at
- * image/video/audio, so the document branch in `uploadChatMedia` could never be
- * reached and a PDF was refused before the handler ran.
- *
- * Widening the *shared* filter would have fixed chat by breaking the rest:
- * `/posts/create`, `/reply/comment` and `/user/profile-setup` don't re-check
- * the mimetype, and `uploadFiles.uploadMedia` classifies anything that isn't
- * audio, video or a gif as `type: "image"` — so a PDF posted to the feed would
- * be stored as an image descriptor pointing at a document. The chat routes get
- * their own instance instead.
+ * Posts, comments, avatars and report attachments are media: an image, a video or an
+ * audio clip. Chat used to additionally accept documents, and this separate instance is
+ * what let it. Documents have since been removed from the product, so the two lists agree
+ * again; the instances stay separate because they differ in more than the filter, and
+ * because widening the *shared* one is the mistake this comment originally existed to
+ * prevent — `/posts/create`, `/reply/comment` and `/user/profile-setup` don't re-check the
+ * mimetype, and `uploadFiles.uploadMedia` classifies anything that isn't audio, video or a
+ * gif as `type: "image"`.
  */
 const MEDIA_TYPES = [
   "image/",
@@ -43,25 +39,16 @@ const MEDIA_TYPES = [
   "audio/",
 ];
 
-const DOCUMENT_TYPES = [
-  "application/pdf",
-  "text/plain",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "application/vnd.ms-excel",
-  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  "application/vnd.ms-powerpoint",
-  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-  "application/vnd.oasis.opendocument.text",
-  "application/vnd.oasis.opendocument.spreadsheet",
-  "application/vnd.oasis.opendocument.presentation",
-];
-
 /**
- * The types chat accepts, exported so the controller's own allow-list can be
- * the same list rather than a second copy that drifts from this one.
+ * The types chat accepts, exported so the controller's own allow-list can be the same
+ * list rather than a second copy that drifts from this one.
+ *
+ * Documents are gone. This was `[...MEDIA_TYPES, ...DOCUMENT_TYPES]` — PDFs, Word files,
+ * spreadsheets — and the client has no way to send one any more, so leaving the endpoint
+ * willing to store them would be an upload path with no feature behind it. `audio/` stays:
+ * that is how voice notes arrive.
  */
-export const CHAT_UPLOAD_TYPES = [...MEDIA_TYPES, ...DOCUMENT_TYPES];
+export const CHAT_UPLOAD_TYPES = [...MEDIA_TYPES];
 
 /*
  * The size ceiling lives here and only here. The chat controller carried its

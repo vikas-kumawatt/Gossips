@@ -433,7 +433,7 @@ export const updateGroup = async (req, res) => {
 
     // Settings the code actually enforces, and only those.
     if (req.body?.settings && typeof req.body.settings === "object") {
-      const { slowModeSeconds, mediaSharing, fileSharing, messageHistory } = req.body.settings;
+      const { slowModeSeconds, mediaSharing, messageHistory } = req.body.settings;
       if (Number.isFinite(slowModeSeconds)) {
         updates["settings.slowModeSeconds"] = Math.min(
           Math.max(Math.trunc(slowModeSeconds), 0),
@@ -441,7 +441,6 @@ export const updateGroup = async (req, res) => {
         );
       }
       if (typeof mediaSharing === "boolean") updates["settings.mediaSharing"] = mediaSharing;
-      if (typeof fileSharing === "boolean") updates["settings.fileSharing"] = fileSharing;
       /*
        * Allowlisted, like `type` above, rather than passed through for the schema enum to
        * reject. A value that reaches the database unrecognised is one `historyFloorFor`

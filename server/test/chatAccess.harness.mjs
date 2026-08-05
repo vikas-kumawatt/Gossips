@@ -867,11 +867,17 @@ ok(
   !parseSendPayload({ media: [signed({ type: undefined })], messageType: "media" }).error
 );
 
-for (const t of ["text", "media", "voice", "gif", "file", "location", "sticker"]) {
+for (const t of ["text", "media", "voice", "gif", "location", "sticker"]) {
   ok(`payload: ${t} is client-settable`, !parseSendPayload({ content: "x", messageType: t }).error);
 }
-// Removed from the schema enum entirely, or produced only by the server.
-for (const t of ["system", "call", "payment", "post_share", "poll", "reply", "forward", "story_reply", "contact"]) {
+/*
+ * Removed from the schema enum entirely, or produced only by the server.
+ *
+ * `file` joined this list when documents were removed from the product: the composer has
+ * no way to attach one, the upload endpoint refuses every document mimetype, and a client
+ * naming the type directly must be refused too or that is the way back in.
+ */
+for (const t of ["file", "system", "call", "payment", "post_share", "poll", "reply", "forward", "story_reply", "contact"]) {
   ok(
     `payload: ${t} is server-only and refused`,
     Boolean(parseSendPayload({ content: "x", messageType: t }).error)
@@ -937,9 +943,16 @@ scenario({ settings: { mediaSharing: false } });
 eq("group gate: mediaSharing off refuses media", (await gate(IMAGE)).ok, false);
 eq("group gate: mediaSharing off still allows text", (await gate([])).ok, true);
 
-scenario({ settings: { fileSharing: false } });
-eq("group gate: fileSharing off refuses a document", (await gate(DOC)).ok, false);
-eq("group gate: fileSharing off still allows an image", (await gate(IMAGE)).ok, true);
+/*
+ * There is no `fileSharing` setting to test.
+ *
+ * It gated `type === "document"`, which nothing can produce now — the media type is gone
+ * from the schema enum, so `mediaSharing` above is the only sharing rule left. What still
+ * matters is that a document *descriptor* can't be smuggled past the media gate, which
+ * the signature test further down covers.
+ */
+scenario({ settings: { mediaSharing: false } });
+eq("group gate: a document descriptor is refused like any other media", (await gate(DOC)).ok, false);
 
 // Slow mode
 const CONV_GATED = `g:${GATED}`;
