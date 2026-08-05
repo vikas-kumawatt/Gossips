@@ -295,7 +295,7 @@ const ChatComposer = ({
                 onKeyDown={handleKeyDown}
                 placeholder={editingMessage ? "Edit message..." : placeholder}
                 aria-label={editingMessage ? "Edit message" : "Message"}
-                className="flex-1 min-w-0 resize-none bg-neutral-800 text-sm text-white placeholder-neutral-400 focus:outline-none py-2 sm:py-2.5 px-3 sm:px-4 rounded-2xl max-h-32 overflow-y-auto"
+                className="flex-1 min-w-0 resize-none bg-neutral-800 text-sm text-white placeholder-neutral-400 focus:outline-none py-2 sm:py-2.5 px-3 sm:px-4 rounded-2xl max-h-32 overflow-y-auto scrollbar-hide"
                 readOnly={sending}
                 maxLength={MAX_MESSAGE_LENGTH}
               />

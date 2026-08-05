@@ -194,10 +194,20 @@ const MessageList = ({
                 </div>
               </div>
 
+              {/*
+                A flex row, not `text-right`.
+
+                `text-align` only moves *inline* content, and the indicators aren't all
+                inline: "Delivered" is a bare string and the failure is a `<span>`, so
+                those did sit on the right — but "Seen" returns a block-level flex div,
+                which filled the line and laid its avatar and label out from the left.
+                So the same indicator appeared on a different side depending on which
+                branch produced it. Justifying the row aligns every shape the same way.
+              */}
               {indicator && (
                 <div
-                  className={`text-xs text-neutral-400 mt-1 px-3 ${
-                    isOwn ? "text-right" : "text-left ml-12"
+                  className={`text-xs text-neutral-400 mt-1 px-3 flex items-center ${
+                    isOwn ? "justify-end" : "justify-start ml-12"
                   }`}
                 >
                   {indicator}

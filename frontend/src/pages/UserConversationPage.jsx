@@ -1766,7 +1766,7 @@ const UserConversationPage = () => {
           </p>
         </div>
 
-        <div className="max-h-96 overflow-y-auto">
+        <div className="max-h-96 overflow-y-auto scrollbar-hide">
           {forwardContacts.map((contact) => (
             <div
               key={contact._id}
@@ -1845,7 +1845,7 @@ const UserConversationPage = () => {
         </button>
       </div>
       <div
-        className={`space-y-2 overflow-y-auto ${
+        className={`space-y-2 overflow-y-auto scrollbar-hide ${
           showAllPinned ? "max-h-64" : "max-h-32"
         }`}
       >
@@ -2241,7 +2241,7 @@ const UserConversationPage = () => {
         aria-live="polite"
         aria-relevant="additions"
         aria-label={`Conversation with ${selectedUser?.name || selectedUser?.username || username}`}
-        className="flex-1 min-h-0 overflow-y-auto custom-scrollbar"
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide"
       >
         {/*
           The spinner only when there is nothing to show. `loading` covers the

@@ -25,22 +25,19 @@ const ChatLayout = () => {
    * Every hook must run every render — do not use || between useMatch calls,
    * because short-circuiting skips one and breaks the Rules of Hooks.
    *
-   * The two group patterns are separate entries rather than a looser
-   * `/chat/:a/:b`: groups moved under /chat so they'd inherit this layout, and
-   * with only the two-segment patterns here `hasActiveChat` stayed false for
-   * them — so the Outlet below never rendered and opening a group showed the
-   * "Select a conversation" placeholder instead of the group.
+   * `end: false`, so a conversation counts as active while one of its own sub-routes is
+   * open. Details, group info, People and Add people are children of the thread now, and
+   * with `end: true` each needed its own pattern listed here — a list that was already
+   * missing both People routes, which is why opening People on a desktop rendered the
+   * "Select a conversation" placeholder instead of the page. Two prefixes cover every
+   * descendant, including any added later.
    */
-  const matchConversation = useMatch({ path: "/chat/:username", end: true });
-  const matchDetails = useMatch({ path: "/chat/:username/details", end: true });
-  const matchGroup = useMatch({ path: "/chat/group/:groupId", end: true });
-  const matchGroupInfo = useMatch({ path: "/chat/group/:groupId/info", end: true });
+  const matchConversation = useMatch({ path: "/chat/:username", end: false });
+  const matchGroup = useMatch({ path: "/chat/group/:groupId", end: false });
   const hasActiveChat = !!(
     matchGroup ||
-    matchGroupInfo ||
-    // Checked last: "/chat/group" would otherwise match :username.
-    ((matchConversation || matchDetails) &&
-      (matchConversation || matchDetails).params.username !== "group")
+    // Checked last, and excluded by name: "/chat/group" also matches `:username`.
+    (matchConversation && matchConversation.params.username !== "group")
   );
   const { pathname } = useLocation();
   const { userAuth, unreadNotificationCount } = useContext(UserContext);

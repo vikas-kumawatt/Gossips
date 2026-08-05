@@ -29,6 +29,7 @@ import GroupInfoPage from "./pages/GroupInfoPage.jsx";
 import GroupPeoplePage from "./pages/GroupPeoplePage.jsx";
 import GroupAddPeoplePage from "./pages/GroupAddPeoplePage.jsx";
 import GroupJoinPage from "./pages/GroupJoinPage.jsx";
+import ThreadWithDetails from "./components/Chat/ThreadWithDetails.jsx";
 import ChatLayout from "./pages/ChatLayout.jsx";
 import TermsPage from "./pages/TermsPage.jsx";
 import PrivacyPage from "./pages/PrivacyPage.jsx";
@@ -276,11 +277,21 @@ function App() {
                   </ProtectedRoute>
                 }
               >
+                {/*
+                  Details nests *inside* the conversation, so the thread stays mounted
+                  behind it and can sit beside it as a third column on a wide screen —
+                  see components/Chat/ThreadWithDetails.jsx.
+                */}
                 <Route
-                  path=":username/details"
-                  element={<ConversationDetailsPage />}
-                />
-                <Route path=":username" element={<UserConversationPage />} />
+                  path=":username"
+                  element={
+                    <ThreadWithDetails>
+                      <UserConversationPage />
+                    </ThreadWithDetails>
+                  }
+                >
+                  <Route path="details" element={<ConversationDetailsPage />} />
+                </Route>
               </Route>
               {/*
                 Groups live under /chat, inside ChatLayout, like DMs do.
@@ -298,12 +309,30 @@ function App() {
                   </ProtectedRoute>
                 }
               >
-                {/* Most specific first: `:groupId/people/add` would otherwise be
-                    swallowed by a looser pattern above it. */}
-                <Route path=":groupId/people/add" element={<GroupAddPeoplePage />} />
-                <Route path=":groupId/people" element={<GroupPeoplePage />} />
-                <Route path=":groupId/info" element={<GroupInfoPage />} />
-                <Route path=":groupId" element={<GroupChatPage />} />
+                {/*
+                  Info, People and Add people are all nested under the group thread, for
+                  the same reason DM details is: they render as a column beside the
+                  conversation rather than instead of it.
+
+                  Nesting also settles the ordering problem the previous comment here was
+                  about — `people/add` and `people` are children of `:groupId` now, so
+                  they can't be swallowed by it. And it fixes a real bug: as siblings,
+                  neither People page matched `hasActiveChat` in ChatLayout, so opening
+                  People on a desktop rendered the "Select a conversation" placeholder
+                  instead of the page.
+                */}
+                <Route
+                  path=":groupId"
+                  element={
+                    <ThreadWithDetails>
+                      <GroupChatPage />
+                    </ThreadWithDetails>
+                  }
+                >
+                  <Route path="info" element={<GroupInfoPage />} />
+                  <Route path="people/add" element={<GroupAddPeoplePage />} />
+                  <Route path="people" element={<GroupPeoplePage />} />
+                </Route>
               </Route>
               {/*
                 Invite links. Outside ChatLayout and outside ProtectedRoute — the page

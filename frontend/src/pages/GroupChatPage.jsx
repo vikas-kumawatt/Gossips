@@ -988,7 +988,7 @@ const GroupChatPage = () => {
               <Icons.close className="w-4 h-4" />
             </button>
           </div>
-          <div className="space-y-2 max-h-32 overflow-y-auto">
+          <div className="space-y-2 max-h-32 overflow-y-auto scrollbar-hide">
             {pinnedMessages.slice(0, 3).map((m) => (
               <button
                 type="button"
@@ -1018,7 +1018,7 @@ const GroupChatPage = () => {
           the list pushed the composer out of the shell instead of scrolling. */}
       <div
         ref={messagesContainerRef}
-        className="flex-1 min-h-0 overflow-y-auto px-4 py-4 space-y-4"
+        className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden scrollbar-hide px-4 py-4 space-y-4"
       >
         {/*
           The same list the DM thread renders.
