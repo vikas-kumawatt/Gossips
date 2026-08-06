@@ -13,10 +13,13 @@ import adminRoutes from "./routes/adminRoutes.js";
 import scheduleRoutes from "./routes/scheduleRoutes.js";
 import attachmentRoutes from "./routes/attachmentRoutes.js";
 import searchRoutes from "./routes/searchRoutes.js";
+import botRoutes from "./routes/botRoutes.js";
 import { maintenanceGate } from "./middleware/maintenanceMiddleware.js";
 import { sanitizeMongo } from "./middleware/sanitizeMongo.js";
 import { backfillRoles } from "./utils/roles.js";
 import { startScheduler } from "./utils/scheduler.js";
+import { startBotRunner } from "./bots/runner.js";
+import { startDmResponder } from "./bots/dmResponder.js";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import { createServer } from "http";
@@ -150,6 +153,20 @@ mongoose
     // Started only after the connection is up. Its first tick doubles as the
     // catch-up sweep for anything that came due while the server was down.
     startScheduler();
+
+    /*
+     * The AI bot loop and the fast DM reply path. Both no-ops unless
+     * BOTS_ENABLED=true, so an environment without the Python reasoning
+     * service — or a staging copy of production data, where bots spending real
+     * money would be a bad surprise — runs exactly as it does today.
+     *
+     * Not awaited: `startBotRunner` probes the reasoning service, and a slow or
+     * absent probe must not delay the rest of boot. It logs its own outcome.
+     */
+    startDmResponder();
+    startBotRunner().catch((error) =>
+      console.error("Bot runner failed to start:", error?.message ?? error)
+    );
   })
   .catch((err) => console.error("MongoDB Error:", err));
 
@@ -172,6 +189,8 @@ app.use("/tags", hashtagRoutes);
 app.use("/attachments", attachmentRoutes);
 // Content search (posts + replies) and recent-search history.
 app.use("/search", searchRoutes);
+// Owner-managed AI bot accounts and the BYOK keys that pay for them.
+app.use("/bots", botRoutes);
 
 app.get("/", (req, res) => {
   res.send("Server is running");

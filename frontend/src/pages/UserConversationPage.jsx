@@ -39,6 +39,7 @@ import ReconnectBanner from "../components/Chat/ReconnectBanner";
 import { toast } from "react-hot-toast";
 import { Phone, Video } from "lucide-react";
 import ChatComposer from "../components/Chat/ChatComposer";
+import BotBadge from "../components/BotBadge";
 import useMediaTray from "../hooks/useMediaTray";
 import { MAX_MESSAGE_LENGTH } from "../lib/composerMedia";
 import {
@@ -2090,7 +2091,20 @@ const UserConversationPage = () => {
             >
               <h2 className="font-medium text-base truncate">
                 {headerUser?.name || headerUser?.username || "User"}
-              </h2>{renderUserStatusIndicator()}</button>
+              </h2>
+              {/*
+                In the chat header, which section 10 of the spec names explicitly alongside
+                the profile. This is the surface that matters most: a conversation is where
+                someone is most likely to forget, or never realise, that the other side
+                isn't a person.
+
+                `compact` because the header is a tight row that already holds a name, a
+                presence dot and two call buttons.
+              */}
+              {headerUser?.isBot && (
+                <BotBadge compact className="ml-1.5" username={headerUser?.username} />
+              )}
+              {renderUserStatusIndicator()}</button>
           </div>
 
           <div className="flex items-center gap-3 shrink-0">

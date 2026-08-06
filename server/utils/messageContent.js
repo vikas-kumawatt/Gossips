@@ -52,3 +52,68 @@ export const CLIENT_MESSAGE_TYPES = new Set([
  * that can no longer exist.
  */
 export const EDITABLE_MESSAGE_TYPES = new Set(["text", "media"]);
+
+/*
+ * ── The send pipeline ───────────────────────────────────────────────────────
+ *
+ * `parseSendPayload` was local to config/socket.js, which made it unreachable from anything
+ * that wasn't a socket handler. It belongs here, with the limits and type sets it enforces, so
+ * every send path applies one implementation of "is this payload acceptable" rather than a
+ * copy each.
+ *
+ * `messageEntities` moved out again, to utils/mentions.js. It needs `resolveMessageMentions`,
+ * which imports four models — so having it here turned this module from a leaf into something
+ * that transitively loads the whole User graph, and the chatAccess harness, which imports
+ * these constants cheaply, stopped being able to start. A validation module should be
+ * importable without a database.
+ */
+import { isAllowedGif, stripMediaToken, verifyMedia } from "./mediaToken.js";
+
+/**
+ * Validate the parts of a send payload both handlers share.
+ *
+ * Nothing previously required content *or* media, so an empty bubble was a
+ * valid message — and at socket speed, a flood primitive.
+ *
+ * Returns `{ error }` or the cleaned fields.
+ */
+export const parseSendPayload = ({ content, media, messageType }) => {
+  const text = typeof content === "string" ? content.trim() : "";
+  const items = Array.isArray(media) ? media : [];
+
+  if (!text && !items.length) return { error: "Write something first" };
+  if (text.length > MAX_CONTENT_LENGTH) {
+    // Caught here rather than by the schema, which would surface as a generic
+    // "failed to send" from the catch block.
+    return { error: "That message is too long" };
+  }
+  if (items.length > MAX_MEDIA_PER_MESSAGE) {
+    return { error: `Up to ${MAX_MEDIA_PER_MESSAGE} attachments per message` };
+  }
+  const verified = [];
+  for (const item of items) {
+    if (!item || typeof item.url !== "string" || !item.url.startsWith("https://")) {
+      return { error: "That attachment isn't valid" };
+    }
+    if (item.type !== undefined && !MEDIA_TYPES.has(item.type)) {
+      return { error: "That attachment isn't valid" };
+    }
+    // The upload endpoint derives `type` from the file it received and signs
+    // the result. Checking that signature is what stops a document being
+    // relabelled as an image to slip past a group's mediaSharing rule, and stops
+    // an arbitrary URL being passed off as an upload at all.
+    //
+    // GIFs are the exception: they're hotlinked from the picker and never
+    // uploaded, so there's nothing to have signed. The host allow-list does
+    // that job instead.
+    if (!isAllowedGif(item) && !verifyMedia(item)) {
+      return { error: "That attachment couldn't be verified — try uploading it again" };
+    }
+    verified.push(stripMediaToken(item));
+  }
+
+  if (!CLIENT_MESSAGE_TYPES.has(messageType)) {
+    return { error: "Unsupported message type" };
+  }
+  return { content: text, media: verified, messageType };
+};

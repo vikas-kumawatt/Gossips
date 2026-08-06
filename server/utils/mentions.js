@@ -2,7 +2,7 @@ import User from "../models/User.js";
 import UserSettings from "../models/UserSettings.js";
 import Follow from "../models/Follow.js";
 import UserRelation from "../models/UserRelation.js";
-import { parseMentionUsernames } from "./richText.js";
+import { parseHashtags, parseMentionUsernames } from "./richText.js";
 
 export { parseMentionUsernames };
 
@@ -131,3 +131,15 @@ export const resolveMessageMentions = async (content = "") => {
     .select("_id username")
     .lean();
 };
+
+/**
+ * Mentions and hashtags, resolved from a message body.
+ *
+ * Lives here rather than with the other send-payload helpers because it needs
+ * `resolveMessageMentions`, and that needs four models. Keeping it next to its dependency
+ * leaves utils/messageContent.js importable without loading the User graph.
+ */
+export const messageEntities = async (content) => ({
+  mentions: (await resolveMessageMentions(content || "")).map((u) => u._id),
+  hashtags: parseHashtags(content || ""),
+});

@@ -34,6 +34,13 @@ const notificationSchema = new Schema(
         // what happened to something you scheduled, not another user acting.
         "scheduled_published",
         "scheduled_failed",
+        /*
+         * An AI bot stopped acting and needs its owner. The sender is the *bot*, not the app, so
+         * the row renders with the bot's own avatar — which is how an owner with several bots
+         * sees at a glance which one it is. No entity: the reason lives on the persona's
+         * `statusReason`, and there is no document to navigate to.
+         */
+        "bot_paused",
       ],
       required: true,
     },

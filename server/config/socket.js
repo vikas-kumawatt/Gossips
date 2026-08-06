@@ -19,14 +19,12 @@ import {
   CLIENT_MESSAGE_TYPES,
   EDITABLE_MESSAGE_TYPES,
   MAX_CONTENT_LENGTH,
-  MAX_MEDIA_PER_MESSAGE,
-  MEDIA_TYPES,
+  parseSendPayload,
 } from "../utils/messageContent.js";
-import { resolveMessageMentions } from "../utils/mentions.js";
-import { parseHashtags } from "../utils/richText.js";
 import { scrub } from "../middleware/sanitizeMongo.js";
-import { isAllowedGif, stripMediaToken, verifyMedia } from "../utils/mediaToken.js";
+import { messageEntities } from "../utils/mentions.js";
 import { getRedis } from "./redis.js";
+import { sendDirectMessage } from "../services/directMessage.js";
 import {
   bindUserToCall,
   createCall,
@@ -46,8 +44,6 @@ import {
   canReadConversation,
   cleanIds,
   conversationRoom,
-  MAX_TTL_SECONDS,
-  conversationTtlSeconds,
   isConversationMuted,
   isGroupMember,
   isMessageParticipant,
@@ -78,10 +74,6 @@ import {
  * tags aren't filtered either: a private message isn't a discovery surface, and
  * the tag is only ever rendered as text here.
  */
-const messageEntities = async (content) => ({
-  mentions: (await resolveMessageMentions(content || "")).map((u) => u._id),
-  hashtags: parseHashtags(content || ""),
-});
 
 /**
  * The admin kill-switches, for every path that creates a message.
@@ -114,54 +106,6 @@ const messagingBlockedReason = async (socket) => {
   return null;
 };
 
-/**
- * Validate the parts of a send payload both handlers share.
- *
- * Nothing previously required content *or* media, so an empty bubble was a
- * valid message — and at socket speed, a flood primitive.
- *
- * Returns `{ error }` or the cleaned fields.
- */
-const parseSendPayload = ({ content, media, messageType }) => {
-  const text = typeof content === "string" ? content.trim() : "";
-  const items = Array.isArray(media) ? media : [];
-
-  if (!text && !items.length) return { error: "Write something first" };
-  if (text.length > MAX_CONTENT_LENGTH) {
-    // Caught here rather than by the schema, which would surface as a generic
-    // "failed to send" from the catch block.
-    return { error: "That message is too long" };
-  }
-  if (items.length > MAX_MEDIA_PER_MESSAGE) {
-    return { error: `Up to ${MAX_MEDIA_PER_MESSAGE} attachments per message` };
-  }
-  const verified = [];
-  for (const item of items) {
-    if (!item || typeof item.url !== "string" || !item.url.startsWith("https://")) {
-      return { error: "That attachment isn't valid" };
-    }
-    if (item.type !== undefined && !MEDIA_TYPES.has(item.type)) {
-      return { error: "That attachment isn't valid" };
-    }
-    // The upload endpoint derives `type` from the file it received and signs
-    // the result. Checking that signature is what stops a document being
-    // relabelled as an image to slip past a group's mediaSharing rule, and stops
-    // an arbitrary URL being passed off as an upload at all.
-    //
-    // GIFs are the exception: they're hotlinked from the picker and never
-    // uploaded, so there's nothing to have signed. The host allow-list does
-    // that job instead.
-    if (!isAllowedGif(item) && !verifyMedia(item)) {
-      return { error: "That attachment couldn't be verified — try uploading it again" };
-    }
-    verified.push(stripMediaToken(item));
-  }
-
-  if (!CLIENT_MESSAGE_TYPES.has(messageType)) {
-    return { error: "Unsupported message type" };
-  }
-  return { content: text, media: verified, messageType };
-};
 
 // Group send permissions — mute, media, slow mode — live in
 // chatAccess.resolveGroupSend so that /share, /polls and forwarding apply the
@@ -627,263 +571,44 @@ export const initializeSocket = (server) => {
       inSendOrder(socket.userId, async () => {
       const tempId = data?.tempId;
       try {
-        const {
-          senderId,
-          receiverId,
-          content,
-          media,
-          replyTo,
-          messageType = "text",
-          isEphemeral = false,
-          selfDestructTimer,
-        } = data;
-
-        // Validate sender
-        if (senderId !== socket.userId) {
+        /*
+         * Everything but the socket's own concerns lives in services/directMessage.js now.
+         *
+         * What remains is what only a socket can do: prove the claimed sender is the
+         * authenticated one, and turn a result into an ack. The ~200 lines that used to sit
+         * here — validation, permissions, persistence, delivery, push, chat-list updates —
+         * are the same code in the same order, now callable by a bot as well.
+         */
+        if (data?.senderId !== socket.userId) {
           fail(socket, "Unauthorized", { tempId, ack });
           return;
         }
 
-        const blockedReason = await messagingBlockedReason(socket);
-        if (blockedReason) {
-          fail(socket, blockedReason, { tempId, ack });
+        const result = await sendDirectMessage({
+          senderId: socket.userId,
+          receiverId: data?.receiverId,
+          content: data?.content,
+          media: data?.media,
+          messageType: data?.messageType ?? "text",
+          replyTo: data?.replyTo,
+          // The client's optimistic id doubles as the idempotency key.
+          clientId: tempId,
+          isEphemeral: data?.isEphemeral ?? false,
+          selfDestructTimer: data?.selfDestructTimer,
+          // Staff bypass the maintenance and feature-flag gate, as they do in middleware.
+          actorRole: socket.userRole,
+        });
+
+        if (!result.ok) {
+          fail(socket, result.error, { tempId, ack });
           return;
         }
 
-        const payload = parseSendPayload({ content, media, messageType });
-        if (payload.error) {
-          fail(socket, payload.error, { tempId, ack });
-          return;
-        }
-
-        if (!receiverId) {
-          fail(socket, "No recipient", { tempId, ack });
-          return;
-        }
-
-        // Fetch sender and receiver (minimal fields for notification/broadcast).
-        // ACTIVE_ACCOUNT on the receiver: /share has always filtered deleted
-        // and suspended accounts and this path didn't, so a DM to a deleted
-        // account succeeded over the socket and was stored forever.
-        const [sender, receiver] = await Promise.all([
-          User.findById(senderId).select("username name profilePic isVerified").lean(),
-          User.findOne({ _id: receiverId, ...ACTIVE_ACCOUNT })
-            .select("username name profilePic isVerified")
-            .lean(),
-        ]);
-
-        if (!sender || !receiver) {
-          fail(socket, "User not found", { tempId, ack });
-          return;
-        }
-
-        // Block check via UserRelation
-        const blocked = await UserRelation.eitherBlocks(senderId, receiver._id);
-        if (blocked) {
-          fail(socket, "Cannot send message to blocked user", { tempId, ack });
-          return;
-        }
-
-        // whoCanMessage, through the same helper /share and forwarding use —
-        // this was a second inline implementation of one rule.
-        const messageable = await messageableIdSet(senderId, [receiver._id]);
-        if (!messageable.has(receiver._id.toString())) {
-          fail(socket, "They don't accept messages from you", { tempId, ack });
-          return;
-        }
-
-        // Everything below uses the id the database returned, not the string
-        // the client sent. dmConversationKey sorts raw strings, so an
-        // uppercase-hex receiverId produces a different key and the message
-        // lands in a conversation neither party's thread query will ever match
-        // — and userSockets is keyed by canonical id, so the delivery emit
-        // would miss too.
-        const receiverKey = receiver._id.toString();
-        const conversation = Message.dmConversationKey(senderId, receiverKey);
-
-        // Build message doc using new schema
-        const messageData = {
-          sender: senderId,
-          receiver: receiver._id,
-          conversation,
-          content: payload.content,
-          media: payload.media,
-          replyTo: await resolveReplyTo(replyTo, { conversation, userId: senderId }),
-          messageType: payload.messageType,
-          ...(await messageEntities(payload.content)),
-          // The client's own id, so a retry finds this row rather than writing a
-          // second one — see the {sender, clientId} unique index on Message.
-          ...(typeof tempId === "string" && tempId ? { clientId: tempId } : {}),
-          status: "sent",
-        };
-
         /*
-         * Disappearing messages.
-         *
-         * The conversation's stored setting decides this, not the payload. The
-         * client used to send `selfDestructTimer` and the server applied it
-         * verbatim with no validation — so a negative value produced an
-         * `expiresAt` in the past and the TTL index removed the message within
-         * the minute, which is an unsend with no time limit. Meanwhile the
-         * per-chat setting the UI writes was read by nothing.
-         *
-         * A client may still shorten the life of its own message, but only
-         * within a sane range and never below whatever the conversation
-         * already agreed.
+         * The definite answer. A client can settle its optimistic bubble on this rather than
+         * waiting for an echo that may never arrive.
          */
-        const ttlSeconds = await conversationTtlSeconds(conversation, [senderId, receiver._id]);
-        const requested = Number(selfDestructTimer);
-        const clientTtl =
-          isEphemeral && Number.isInteger(requested) && requested > 0 && requested <= MAX_TTL_SECONDS
-            ? requested
-            : null;
-        const effectiveTtl =
-          ttlSeconds && clientTtl ? Math.min(ttlSeconds, clientTtl) : ttlSeconds ?? clientTtl;
-
-        if (effectiveTtl) {
-          messageData.isEphemeral = true;
-          messageData.selfDestructSeconds = effectiveTtl;
-          messageData.expiresAt = new Date(Date.now() + effectiveTtl * 1000);
-        }
-
-        /*
-         * A retry finds the first attempt's row instead of writing a second.
-         *
-         * There was no idempotency and no ack, so a client that lost the response
-         * had no way to tell "refused" from "slow" — and the correct behaviour for
-         * it, retrying, duplicated the message. The unique {sender, clientId}
-         * index turns the second attempt into an E11000, and answering it with the
-         * existing message means the retry is indistinguishable from a slow first
-         * attempt, which is what idempotency means.
-         */
-        let message;
-        try {
-          message = new Message(messageData);
-          await message.save();
-        } catch (saveError) {
-          if (saveError?.code !== 11000 || !messageData.clientId) throw saveError;
-          const existing = await Message.findOne({
-            sender: senderId,
-            clientId: messageData.clientId,
-          });
-          if (!existing) throw saveError;
-          message = existing;
-        }
-
-        await message.populate([
-          { path: "sender",   select: "username name profilePic isVerified" },
-          { path: "receiver", select: "username name profilePic isVerified" },
-          /*
-           * replyTo was not populated at all, so the echo carried a raw
-           * ObjectId. The client merges the echo over its optimistic object,
-           * which meant the rich reply preview the sender was already looking
-           * at collapsed into an empty box about a second after sending.
-           * Same shape as the REST read, so both paths render identically.
-           */
-          {
-            path: "replyTo",
-            select: "content messageType media isDeleted sender createdAt",
-            populate: { path: "sender", select: "username name" },
-          },
-        ]);
-
-        const messageObject = message.toObject();
-
-        /*
-         * A note to self is one message, not two.
-         *
-         * When sender and receiver are the same account the "emit to receiver"
-         * pass below reaches this very socket, so the message arrived twice —
-         * once as incoming, from yourself, and once as your own. The sender echo
-         * alone is the correct delivery for this case.
-         */
-        const isSelfNote = receiverKey === senderId.toString();
-
-        /*
-         * Delivered to the receiver's *room*, and counted through the adapter.
-         *
-         * This read `userSockets`, which only holds sockets attached to this process — so
-         * with more than one instance a message to someone connected elsewhere was never
-         * delivered live and never marked as delivered. It reappeared on their next fetch,
-         * so the failure looked like lag rather than a bug. `fetchSockets` spans nodes and
-         * every socket joins a room named after its user id on connect.
-         */
-        const receiverOnline = isSelfNote
-          ? false
-          : (await io.in(receiverKey).fetchSockets()).length > 0;
-        if (receiverOnline) {
-          io.to(receiverKey).emit("receiveMessage", { ...messageObject, tempId, isOwn: false });
-
-          // Record delivery receipt
-          await message.markAsDelivered();
-        }
-
-        /*
-         * The sender's *room*, not the sending socket.
-         *
-         * `socket.emit` reaches exactly the one connection that sent the
-         * message, so a second tab or another device never learned about a
-         * message this account had just sent — the thread was missing it until a
-         * reload. shareController gets this right and comments why; the personal
-         * room holds every socket this user has open. `tempId` is harmless in the
-         * other tabs: they have no optimistic bubble to reconcile, so nothing
-         * matches it.
-         */
-        io.to(senderId.toString()).emit("receiveMessage", { ...messageObject, tempId, isOwn: true });
-
-        /*
-         * Push notification when the receiver is offline — unless they've muted this
-         * conversation. `mutedChats` was written by the chat menu and read only to draw
-         * an icon; muting muted nothing.
-         *
-         * Both skip conditions are logged. They were silent, and "no notification and
-         * nothing in the log" is indistinguishable from a broken FCM setup — which is
-         * exactly how it gets misdiagnosed. A recipient who is *online* is the common
-         * case and the one people forget: a background tab still holds a socket, so
-         * closing the tab is not the same as closing the window.
-         */
-        if (receiverOnline) {
-          console.log("Push: skipped, recipient is connected", { to: receiverKey });
-        } else {
-          const muted = await isConversationMuted(receiver._id, `user_${senderId}`);
-          if (muted) {
-            console.log("Push: skipped, conversation muted", { to: receiverKey });
-          } else {
-            await sendPushNotification(receiver, {
-              title: sender.name || sender.username,
-              body: payload.content || (payload.media.length ? "Sent a media" : "Sent a message"),
-              data: { messageId: message._id, senderId },
-            });
-          }
-        }
-
-        /*
-         * Chat list update for both users.
-         *
-         * `unreadCount` is omitted rather than asserted. It used to be
-         * hard-coded to 1 for the receiver, which is only right when they had no
-         * unread messages in that thread already — the badge showed "1" over a
-         * conversation with thirty unread. The client increments its own count
-         * from this event and reconciles against /chats/unread-count, which is
-         * the one place that knows the real number.
-         */
-        const chatUpdateForReceiver = { user: sender, latestMessage: messageObject };
-        const chatUpdateForSender = {
-          user: receiver,
-          latestMessage: messageObject,
-          unreadCount: 0,
-        };
-
-        // Same reasoning as the echo above: every tab this sender has open.
-        io.to(senderId.toString()).emit("chatUpdated", chatUpdateForSender);
-        if (receiverOnline) {
-          io.to(receiverKey).emit("chatUpdated", chatUpdateForReceiver);
-        }
-
-        // The definite answer. A client can now settle its optimistic bubble on
-        // this rather than waiting for an echo that may never arrive.
-        succeed(ack, { tempId, messageId: message._id.toString() });
-
+        succeed(ack, { tempId, messageId: result.message._id.toString() });
       } catch (error) {
         console.error("Error sending message:", error);
         fail(socket, "Failed to send message", { tempId, ack });

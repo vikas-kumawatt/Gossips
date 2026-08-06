@@ -63,10 +63,21 @@ const userSchema = new Schema(
       default: [],
     },
     usernameChangedAt: { type: Date },
+    /*
+     * Required of everyone, unique among *humans* only.
+     *
+     * A bot shares its owner's address: the owner is the accountable contact for it, and
+     * anything the platform would ever email about a bot — "your bot was paused", "its key
+     * expired" — goes to them. One person may own several bots, so several rows legitimately
+     * carry the same address.
+     *
+     * `unique: true` is therefore gone from this field, replaced by the partial index below.
+     * That is an index change on a live collection, not a schema tweak: see
+     * `scripts/migrateBotEmailIndex.js`, which must run before a bot can be created.
+     */
     email: {
       type: String,
       required: true,
-      unique: true,
       lowercase: true,
       trim: true,
     },
@@ -133,6 +144,55 @@ const userSchema = new Schema(
       default: "none",
     },
     isPrivate: { type: Boolean, default: false },
+
+    // ── AI bot accounts ───────────────────────────────────────
+    /*
+     * An AI account, owned and operated by a human.
+     *
+     * A bot is a real row in this collection rather than a separate model, because it has
+     * to appear everywhere a person does — in a follower list, a search result, a group,
+     * a chat header — and a parallel identity type would mean every one of those queries
+     * growing a second branch. What makes it a bot is this flag and the absence of
+     * credentials, not a different shape.
+     *
+     * Bots have no `password`, no verified `email` and no session. `authController` refuses
+     * them explicitly rather than relying on the missing password to fail: a passwordless
+     * row is also what a fresh OAuth signup looks like, and "there is no password so no
+     * password matches" is the kind of reasoning that stops being true after one refactor.
+     */
+    /*
+     * `select: true` — always projected, even into an inclusive `.select(...)`.
+     *
+     * The disclosure is a legal requirement, not a feature: the badge has to be renderable
+     * everywhere a bot appears, and there are 50-odd distinct field projections in this
+     * codebase that build a user payload. Adding `isBot` to each by hand is the pattern
+     * this repo keeps learning the hard way — a rule that exists fifty times will
+     * eventually only be right forty-nine times, and the one that's wrong is an
+     * undisclosed AI account.
+     *
+     * Mongoose merges a schema-level `select: true` into any inclusive projection, so every
+     * existing query gains the field with no edit, and every future one inherits it.
+     * Verified rather than assumed: `.select("username name isVerified")` resolves to
+     * `{username:1, name:1, isVerified:1, isBot:1}`.
+     *
+     * Aggregation pipelines are the exception — `$project` doesn't consult the schema — so
+     * any pipeline that builds a user object names this field explicitly.
+     */
+    isBot: { type: Boolean, default: false, select: true },
+
+    /*
+     * The human accountable for this bot. Required *because* it is a bot — the cap of five
+     * bots per owner is enforced on this field, and an unowned bot would be both
+     * unattributable and uncapped.
+     *
+     * Never exposed publicly. Who runs a bot is the owner's business, and disclosing it
+     * would deanonymise anyone experimenting under a persona; the compliance requirement
+     * is that the account is disclosed as *AI*, not who wrote its prompt.
+     */
+    owner: { type: Schema.Types.ObjectId, ref: "User", default: null },
+
+    /** Which of the owner's BYOK keys pays for this bot's inference. */
+    apiKey: { type: Schema.Types.ObjectId, ref: "ApiKey", default: null },
 
     /*
      * Where the account is based — ISO 3166-1 alpha-2, shown as "Based in
@@ -236,6 +296,16 @@ const userSchema = new Schema(
         // but a route that explicitly asks for it must not serialise it by
         // accident. Only the count is ever public.
         delete ret.usernameHistory;
+        /*
+         * Who owns a bot, and which key pays for it, are never public.
+         *
+         * Stripped by default rather than filtered per route, so a route that returns a
+         * user document — and there are many — cannot deanonymise a persona's author by
+         * omission. The owner's own dashboard builds its view explicitly instead of
+         * relying on this serialiser; see the bots controller.
+         */
+        delete ret.owner;
+        delete ret.apiKey;
         delete ret.__v;
         return ret;
       },
@@ -257,6 +327,33 @@ userSchema.index({ "usernameHistory.username": 1 }, { sparse: true });
  * the overwhelming majority and indexing them would buy nothing.
  */
 userSchema.index({ isVerified: 1 }, { partialFilterExpression: { isVerified: true } });
+
+/*
+ * An owner's bots: the list, and the count the five-per-owner cap is enforced against.
+ *
+ * Partial on `isBot`, so the index holds only bot rows — a few per owner against a
+ * collection of humans. A plain compound index would carry an entry for every user, all of
+ * them with `owner: null`, to answer a question only ever asked about bots.
+ */
+userSchema.index({ owner: 1 }, { partialFilterExpression: { isBot: true } });
+
+/*
+ * One human per email address. Bots are excluded, because they share their owner's.
+ *
+ * `{ isBot: false }` and not `{ isBot: { $ne: true } }`: `partialFilterExpression` accepts
+ * only equality, `$exists`, `$type`, the range operators, `$and`, `$or` and `$in` — `$ne` is
+ * not in that set, and Mongo rejects the index outright rather than ignoring the clause.
+ *
+ * Which is why the migration backfills `isBot: false` onto every account created before the
+ * field existed. Without that they carry no `isBot` at all, fall outside this filter, and
+ * quietly lose uniqueness enforcement on their address — the failure mode being two humans
+ * able to register the same email, which is an account-takeover vector rather than an
+ * inconvenience. The backfill is what makes this filter total.
+ */
+userSchema.index(
+  { email: 1 },
+  { unique: true, partialFilterExpression: { isBot: false } }
+);
 
 // ── Virtuals ──────────────────────────────────────────────────
 userSchema.virtual("age").get(function () {

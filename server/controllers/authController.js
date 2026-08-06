@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import { HUMAN_ACCOUNT } from "../utils/botAccounts.js";
 import fs from "fs";
 import nodemailer from "nodemailer";
 
@@ -312,7 +313,16 @@ export const signupUser = async (req, res) => {
       return res.status(400).json({ message: "Invalid email" });
     }
 
-    const existingUser = await User.findOne({ email }).select(
+    /*
+     * Humans only — and this one is load-bearing now that bots share their owner's address.
+     *
+     * Without the filter, `findOne` could return a *bot* row for an address a human already
+     * uses. The branch below then reads `googleId` and `password` off it, finds neither, and
+     * falls through to "User already exists" — which is the right answer by accident. The
+     * wrong answer was one refactor away: any change that treats a passwordless row as an
+     * account to attach credentials to would have been attaching them to somebody's bot.
+     */
+    const existingUser = await User.findOne({ email, ...HUMAN_ACCOUNT }).select(
       "+googleId +password",
     );
 
@@ -403,7 +413,17 @@ export const loginUser = async (req, res) => {
       return res.status(400).json({ error: "Password is required" });
     }
 
-    const query = {};
+    /*
+     * `HUMAN_ACCOUNT` is part of the query, so a bot account is simply not found.
+     *
+     * A bot row has no password. Without this, logging in with a bot's username found the
+     * row, fell past the OAuth branch below (a bot has no `googleId` either), and reached
+     * `comparePassword` with `undefined` — which throws into the 500 handler. That is both
+     * fragile and an enumeration oracle: a 500 for bot usernames and a 400 for everything
+     * else tells an attacker which accounts are bots through a channel that is meant to be
+     * uniform.
+     */
+    const query = { ...HUMAN_ACCOUNT };
     if (email) query.email = email;
     if (username) query.username = username;
 
@@ -465,7 +485,16 @@ export const googleLogin = async (req, res) => {
       picture = picture.replace("s96-c", "s1024-c");
     }
 
-    let user = await User.findOne({ email }).select("+googleId");
+    /*
+     * A Google identity can never attach to a bot row.
+     *
+     * This is the sharpest of the four: if a bot ever carried an email, signing in with
+     * Google using that address would find the bot, attach `googleId` to it, and issue a
+     * human session *for the bot account* — handing the persona's identity to whoever
+     * controls the mailbox. The filter makes it a miss, so the branch below creates a
+     * separate human account instead.
+     */
+    let user = await User.findOne({ email, ...HUMAN_ACCOUNT }).select("+googleId");
     let newUser = false;
 
     if (!user) {
@@ -535,7 +564,15 @@ export const forgotPassword = async (req, res) => {
       message: "If that email is registered, a reset link has been sent.",
     };
 
-    const user = await User.findOne({ email });
+    /*
+     * Bots excluded here too, even though a bot has no email to be found by.
+     *
+     * "It can't happen" is a property of today's creation flow, not of this endpoint. If a
+     * bot ever gains an email — an owner-set contact address, a migration, a future
+     * feature — this line is what stops a password reset minting a session for an account
+     * that is not supposed to have one.
+     */
+    const user = await User.findOne({ email, ...HUMAN_ACCOUNT });
     if (!user) {
       return res.status(200).json(genericResponse);
     }
@@ -669,6 +706,7 @@ export const resetPassword = async (req, res) => {
     }
 
     const user = await User.findOne({
+      ...HUMAN_ACCOUNT,
       resetPasswordToken: token,
       resetPasswordExpires: { $gt: Date.now() },
     });

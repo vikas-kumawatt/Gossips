@@ -6,6 +6,10 @@ import Comment from "../models/Comment.js";
 import Notification from "../models/Notification.js";
 import Like from "../models/Like.js";
 import Repost from "../models/Repost.js";
+import {
+  likePost as likePostService,
+  repostPost as repostPostService,
+} from "../services/engagement.js";
 import PostView from "../models/PostView.js";
 import Saved from "../models/Saved.js";
 import PollVote from "../models/PollVote.js";
@@ -19,7 +23,6 @@ import {
   encodeCursor,
   parseCursorLimit,
 } from "../utils/cursorPagination.js";
-import { sendNotification } from "../utils/notifications.js";
 import { uploadMedia } from "../utils/uploadFiles.js";
 import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
 import { loadRepostFeedEntries, mergeFeedEntries } from "../utils/feedReposts.js";
@@ -1055,36 +1058,26 @@ export const deletePost = async (req, res) => {
 // Like
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * The logic moved to services/engagement.js so a bot can call it; this is now the HTTP
+ * adapter. Same statuses, same response shape, same messages — a client cannot tell the
+ * difference, which is the requirement.
+ */
 export const likePost = async (req, res) => {
   try {
-    const postId = req.params.id;
-    const userId = req.user.id;
+    const result = await likePostService({
+      actorId: req.user.id,
+      postId: req.params.id,
+    });
 
-    const post = await Post.findById(postId).select("author counts hideLikeShareCount isDeleted").lean();
-    if (!post || post.isDeleted) return res.status(404).json({ message: "Post not found" });
-
-    const existing = await Like.findOne({ user: userId, targetType: "Post", target: postId });
-
-    let liked;
-    if (existing) {
-      await Like.deleteOne({ _id: existing._id });
-      await Post.updateOne({ _id: postId }, { $inc: { "counts.likes": -1 } });
-      liked = false;
-    } else {
-      await Like.create({ user: userId, targetType: "Post", target: postId });
-      await Post.updateOne({ _id: postId }, { $inc: { "counts.likes": 1 } });
-      liked = true;
-
-      if (post.author.toString() !== userId.toString()) {
-        await sendNotification(post.author, userId, "like", { entity: postId, entityType: "Post" });
-      }
+    if (!result.ok) {
+      return res.status(result.status).json({ message: result.error });
     }
 
-    const updated = await Post.findById(postId).select("counts hideLikeShareCount").lean();
     res.status(200).json({
-      message: liked ? "Post liked successfully" : "Post unliked successfully",
-      liked,
-      counts: updated.counts,
+      message: result.liked ? "Post liked successfully" : "Post unliked successfully",
+      liked: result.liked,
+      counts: result.counts,
     });
   } catch (error) {
     console.error("likePost error:", error);
@@ -1140,32 +1133,27 @@ export const getPostLikes = async (req, res) => {
 // Repost
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** HTTP adapter over services/engagement.js — see the note on `likePost`. */
 export const repostPost = async (req, res) => {
   try {
-    const userId = req.user._id;
-    const postId = req.params.id;
+    const result = await repostPostService({
+      actorId: req.user._id,
+      postId: req.params.id,
+    });
 
-    const post = await Post.findById(postId).select("author counts isDeleted").lean();
-    if (!post || post.isDeleted) return res.status(404).json({ message: "Post not found" });
-
-    const existing = await Repost.findOne({ user: userId, targetType: "Post", target: postId });
-
-    if (existing) {
-      await Repost.deleteOne({ _id: existing._id });
-      await Post.updateOne({ _id: postId }, { $inc: { "counts.reposts": -1 } });
-      const updated = await Post.findById(postId).select("counts").lean();
-      return res.status(200).json({ message: "Repost removed successfully", reposted: false, counts: updated?.counts });
+    if (!result.ok) {
+      return res.status(result.status).json({ message: result.error });
     }
 
-    await Repost.create({ user: userId, targetType: "Post", target: postId });
-    await Post.updateOne({ _id: postId }, { $inc: { "counts.reposts": 1 } });
-
-    if (post.author.toString() !== userId.toString()) {
-      await sendNotification(post.author, userId, "repost", { entity: postId, entityType: "Post" });
-    }
-
-    const updated = await Post.findById(postId).select("counts").lean();
-    return res.status(201).json({ message: "Post reposted successfully", reposted: true, counts: updated?.counts });
+    /*
+     * 201 for a new repost, 200 for removing one — the original's distinction, preserved.
+     * A client keying off the status rather than the body would otherwise break silently.
+     */
+    return res.status(result.reposted ? 201 : 200).json({
+      message: result.reposted ? "Post reposted successfully" : "Repost removed successfully",
+      reposted: result.reposted,
+      counts: result.counts,
+    });
   } catch (error) {
     console.error("repostPost error:", error);
     res.status(500).json({ error: "Server error while processing repost" });

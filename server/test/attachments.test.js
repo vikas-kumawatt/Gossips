@@ -29,9 +29,33 @@ test("does not permit a client to combine a poll and uploaded audio", async () =
       }),
     },
     files: [{ mimetype: "audio/webm" }],
-    uploader: async () => [{ url: "https://cdn.example/audio.webm", type: "audio" }],
+    /*
+     * `duration` matters, and its absence is what made this test fail for as long as it existed.
+     *
+     * `parseAttachments` checks the clip's length before it checks the combination, and a clip with
+     * no probed duration is refused outright — see the test below, which is the rule this fixture
+     * kept tripping over. So an upload without a duration never reached the mutual-exclusion check,
+     * and the assertion below was reading the wrong error the whole time.
+     */
+    uploader: async () => [
+      { url: "https://cdn.example/audio.webm", type: "audio", duration: 12 },
+    ],
   });
   assert.match(result.error, /not more than one/);
+});
+
+test("an audio clip with no probed duration is refused, not waved through", async () => {
+  /*
+   * The deliberate rule the fixture above collided with, and it had no test of its own. A clip
+   * Cloudinary couldn't probe is exactly the kind most likely to be oversized, so an unknown
+   * duration fails closed rather than open.
+   */
+  const result = await parseAttachments({
+    body: {},
+    files: [{ mimetype: "audio/webm" }],
+    uploader: async () => [{ url: "https://cdn.example/audio.webm", type: "audio" }],
+  });
+  assert.match(result.error, /up to 5 minutes/);
 });
 
 test("withholds a live poll tally until the viewer votes", () => {

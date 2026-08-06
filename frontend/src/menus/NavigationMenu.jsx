@@ -1,6 +1,6 @@
 import React, { useContext, useState } from "react";
 import { Icons } from "../components/icons";
-import { UserPlus } from "lucide-react";
+import { Bot, UserPlus } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -109,6 +109,10 @@ export default function NavigationMenu() {
     navigate("/settings");
   };
 
+  const handleAiAccounts = () => {
+    navigate("/ai-bots");
+  };
+
   return (
     <>
       <DropdownMenu>
@@ -147,6 +151,16 @@ export default function NavigationMenu() {
           >
             <span>Liked</span>
             <Icons.like className="w-5 h-5 " />
+          </DropdownMenuItem>
+
+          {/* Everyone's, not staff's — sitting above the Settings row rather than inside
+              it, because creating one was three taps deep when it lived in there. */}
+          <DropdownMenuItem
+            className="flex justify-between items-center p-3 mx-2 tracking-normal select-none font-semibold cursor-pointer text-[15px] active:bg-neutral-950  text-white hover:bg-neutral-800 focus:rounded-xl outline-none"
+            onClick={handleAiAccounts}
+          >
+            <span>AI accounts</span>
+            <Bot className="h-[18px] w-[18px]" />
           </DropdownMenuItem>
 
           <DropdownMenuItem

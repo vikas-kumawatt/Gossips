@@ -48,6 +48,8 @@ const clearFollowRequestNotification = (recipientId, senderId) =>
     type: "follow_request",
   }).catch((error) => console.error("clearFollowRequestNotification error:", error));
 
+import { followUser as followUserService } from "../services/engagement.js";
+
 const invalidateFollowRelatedCaches = async (...usernames) => {
   const unique = [...new Set(usernames.filter(Boolean))];
   await Promise.all(
@@ -664,86 +666,43 @@ export const getUsers = async (req, res) => {
 // Follow / Unfollow
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * HTTP adapter over services/engagement.js.
+ *
+ * The logic moved so a bot agent can follow someone without a request object. This resolves
+ * the username the route is keyed on, then delegates; the statuses and messages are the
+ * originals, so no client sees a change.
+ */
 export const followUser = async (req, res) => {
   try {
-    const userToFollow = await User.findOne({ username: req.params.username }).select("_id username isPrivate");
+    const userToFollow = await User.findOne({ username: req.params.username })
+      .select("_id")
+      .lean();
     if (!userToFollow) return res.status(404).json({ message: "User not found" });
 
-    if (userToFollow._id.toString() === req.user._id.toString()) {
-      return res.status(400).json({ message: "You cannot follow yourself" });
-    }
-
-    // Block gating — can't follow someone you blocked or who blocked you.
-    if (await UserRelation.eitherBlocks(req.user._id, userToFollow._id)) {
-      return res.status(403).json({ message: "Unable to follow this account" });
-    }
-
-    // Check for existing edge
-    const existing = await Follow.findOne({
-      follower: req.user._id,
-      following: userToFollow._id,
+    const result = await followUserService({
+      actorId: req.user._id,
+      targetId: userToFollow._id,
     });
 
-    if (existing?.status === "accepted") {
-      return res.status(400).json({ message: "You already follow this user" });
-    }
-    if (existing?.status === "pending") {
-      return res.status(400).json({ message: "Follow request already sent" });
+    if (!result.ok) {
+      return res.status(result.status).json({ message: result.error });
     }
 
-    if (userToFollow.isPrivate) {
-      await Follow.create({
-        follower: req.user._id,
-        following: userToFollow._id,
-        status: "pending",
-      });
-
-      /*
-       * A pending request was silent until now: the edge was written and the
-       * recipient learned about it only if they happened to open the follow
-       * requests page. The Activity tab reads notifications, so it needs one.
-       */
-      await sendNotification(userToFollow._id, req.user._id, "follow_request");
-
-      // This user's own room, so every tab they have open is told — on any instance.
-      // `getUserSocket` only ever listed the sockets attached to this one.
-      io.to(req.user._id.toString()).emit("followStatusUpdate", {
-        username: userToFollow.username,
-        action: "follow",
-        isPending: true,
-        isPrivate: true,
-      });
-
-      await invalidateFollowRelatedCaches(req.user.username, req.params.username);
-      return res.status(200).json({ message: "Follow request sent successfully" });
-    }
-
-    // Public user — accept immediately
-    await Follow.create({
-      follower: req.user._id,
-      following: userToFollow._id,
-      status: "accepted",
+    res.status(200).json({
+      message: result.pending
+        ? "Follow request sent successfully"
+        : "User followed successfully",
     });
-
-    await Promise.all([
-      User.updateOne({ _id: req.user._id }, { $inc: { "counts.following": 1 } }),
-      User.updateOne({ _id: userToFollow._id }, { $inc: { "counts.followers": 1 } }),
-    ]);
-
-    await sendNotification(userToFollow._id, req.user._id, "follow");
-
-    // This user's own room, so every tab they have open is told — on any instance.
-    // `getUserSocket` only ever listed the sockets attached to this one.
-    io.to(req.user._id.toString()).emit("followStatusUpdate", {
-      username: userToFollow.username,
-      action: "follow",
-      isPending: false,
-      isPrivate: false,
-    });
-
-    await invalidateFollowRelatedCaches(req.user.username, req.params.username);
-    res.status(200).json({ message: "User followed successfully" });
   } catch (error) {
+    /*
+     * The duplicate-key branch stays here rather than moving into the service.
+     *
+     * It catches the race where two requests both pass the "already follows" check before
+     * either writes, and the unique index on `{follower, following}` refuses the second. The
+     * service lets that throw — it is a genuine fault from its point of view — and each
+     * caller decides how to phrase it. For HTTP that is a 400.
+     */
     if (error.code === 11000) {
       return res.status(400).json({ message: "Follow request already exists" });
     }

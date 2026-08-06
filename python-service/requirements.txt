@@ -1,0 +1,17 @@
+# Pinned, not floating.
+#
+# This service spends the owners' money on every call, so a surprise minor release changing the
+# tool-call shape or the auth error class is a production incident rather than an inconvenience.
+# Upgrades are a deliberate act with the test suite as the gate.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+# No provider SDKs. Every provider is reached over `httpx` below, because the thing that had to be
+# right was the error mapping — `402` pauses a bot and tells its owner their key died — and four
+# SDKs would mean four exception taxonomies collapsing into one contract, written four times.
+# `httpx` was already here for the test client, so this removed a dependency rather than adding one.
+
+# Test-only. Kept here rather than in a second file because the suite is not optional — it runs
+# with no key and no network, so there is never a reason to install without it.
+pytest==8.3.4
+httpx==0.28.1

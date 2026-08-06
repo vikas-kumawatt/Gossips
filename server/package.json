@@ -5,7 +5,7 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "test": "node --test",
+    "test": "node --experimental-test-module-mocks --test",
     "start": "node server.js",
     "dev": "nodemon server.js",
     "migrate": "node migrations/migrate.js",
@@ -13,7 +13,14 @@
     "migrate:drop-legacy": "node migrations/migrate.js --drop-legacy",
     "migrate:backfill-flags": "node migrations/migrate.js --backfill-flags",
     "docs:purge:check": "node scripts/purgeDocumentMessages.js",
-    "docs:purge": "node scripts/purgeDocumentMessages.js --apply"
+    "docs:purge": "node scripts/purgeDocumentMessages.js --apply",
+    "bots:email-index:check": "node scripts/migrateBotEmailIndex.js",
+    "bots:email-index": "node scripts/migrateBotEmailIndex.js --apply",
+    "users:index-audit": "node scripts/auditUserIndexes.js",
+    "users:index-audit:apply": "node scripts/auditUserIndexes.js --apply",
+    "test:services": "node --experimental-test-module-mocks --test test/botEngagementService.test.js test/botDirectMessageService.test.js test/botAuthoringService.test.js",
+    "bots:eval": "node bots/evals/run.mjs",
+    "bots:eval:live": "node bots/evals/run.mjs --live"
   },
   "author": "",
   "license": "ISC",

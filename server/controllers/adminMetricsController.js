@@ -245,7 +245,9 @@ export const getEngagement = async (req, res) => {
             localField: "_id",
             foreignField: "_id",
             as: "author",
-            pipeline: [{ $project: { username: 1, name: 1, profilePic: 1, isVerified: 1 } }],
+            // `isBot` named explicitly: `$project` does not consult the schema, so the
+            // `select: true` that covers every ordinary query does not reach a pipeline.
+            pipeline: [{ $project: { username: 1, name: 1, profilePic: 1, isVerified: 1, isBot: 1 } }],
           },
         },
         { $unwind: { path: "$author", preserveNullAndEmptyArrays: true } },

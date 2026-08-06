@@ -176,6 +176,11 @@ const SettingsPage = () => {
 
   const renderAccountTab = () => (
     <div className="flex flex-col mt-6 gap-4 items-start mx-2">
+      {/*
+        AI accounts used to have a row here as well. It has one entry point now — the header
+        menu — because two doors to the same screen means one of them is the stale one, and
+        this was the buried door: Settings, then a tab, then a page, then Create.
+      */}
       <div className="flex relative w-full items-center gap-4 mb-4">
         <p className="text-md">Political content</p>
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>

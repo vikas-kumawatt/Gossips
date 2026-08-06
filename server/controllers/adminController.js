@@ -11,6 +11,7 @@ import AppSettings, {
   SETTINGS_KEY,
   normalizeReservedUsernames,
   normalizeBlockedHashtags,
+  normalizeSelfHostedEndpoints,
 } from "../models/AppSettings.js";
 import { getSettings, invalidateSettingsCache } from "../utils/settings.js";
 import { recordAudit } from "../utils/audit.js";
@@ -820,6 +821,14 @@ export const updateSettings = async (req, res) => {
         if (value === null) continue;
       } else if (type === "tagList") {
         value = normalizeBlockedHashtags(raw);
+        if (value === null) continue;
+      } else if (type === "endpointList") {
+        /*
+         * Each URL is validated on the `operator` path — private addresses allowed, because that is
+         * what a local inference endpoint is, but `file://`, credentials and encoded addresses are
+         * refused. Bad entries are dropped rather than saved to fail on every cycle.
+         */
+        value = normalizeSelfHostedEndpoints(raw);
         if (value === null) continue;
       } else if (typeof raw !== "string") {
         continue;

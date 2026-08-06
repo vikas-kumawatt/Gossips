@@ -36,6 +36,10 @@ import PrivacyPage from "./pages/PrivacyPage.jsx";
 import CookiesPage from "./pages/CookiesPage.jsx";
 import AiLabelsPage from "./pages/AiLabelsPage.jsx";
 import ScheduledPostsPage from "./pages/ScheduledPostsPage.jsx";
+import BotsListPage from "./pages/bots/BotsListPage.jsx";
+import BotKeysPage from "./pages/bots/BotKeysPage.jsx";
+import BotCreatePage from "./pages/bots/BotCreatePage.jsx";
+import BotDetailPage from "./pages/bots/BotDetailPage.jsx";
 import AdminLayout from "./pages/admin/AdminLayout.jsx";
 import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
 import AdminUsers from "./pages/admin/AdminUsers.jsx";
@@ -266,6 +270,50 @@ function App() {
                 element={
                   <ProtectedRoute>
                     <SettingsPage />
+                  </ProtectedRoute>
+                }
+              />
+              {/*
+                AI accounts. Four flat routes rather than a nested layout: these pages carry
+                their own back arrow like every other screen in the app, and a persistent
+                sidebar was what made this feature look like the staff panel instead of like
+                Gossips. The hyphen is deliberate — usernames can't contain one, so this path
+                can never shadow a profile.
+              */}
+              <Route
+                path="/ai-bots"
+                element={
+                  <ProtectedRoute>
+                    <BotsListPage />
+                  </ProtectedRoute>
+                }
+              />
+              {/*
+                "keys" and "new" outrank ":id" whatever order they appear in — v6 scores a
+                static segment above a dynamic one — but they are written first anyway, since
+                the reader shouldn't have to know that to see why they aren't bot ids.
+              */}
+              <Route
+                path="/ai-bots/keys"
+                element={
+                  <ProtectedRoute>
+                    <BotKeysPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/ai-bots/new"
+                element={
+                  <ProtectedRoute>
+                    <BotCreatePage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/ai-bots/:id"
+                element={
+                  <ProtectedRoute>
+                    <BotDetailPage />
                   </ProtectedRoute>
                 }
               />

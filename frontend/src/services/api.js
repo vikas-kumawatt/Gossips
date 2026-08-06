@@ -603,6 +603,52 @@ export const scheduleAPI = {
     api.delete(`/schedule/${type}/${id}`).then((r) => r.data),
 };
 
+// ─── AI bots and BYOK keys ───────────────────────────────────────────────────
+/*
+ * Owner-scoped: the server filters every query on `owner` and returns 404 rather than 403 for
+ * someone else's id, so there is nothing to gate here.
+ *
+ * Nothing is cached, for the same reason `scheduleAPI` isn't: this state changes on its own. The
+ * runner pauses a bot when a key dies, and a 60-second stale copy would show a bot as active
+ * minutes after it stopped — which reads as the dashboard lying rather than as a cache.
+ */
+/*
+ * The envelope is unwrapped here, once.
+ *
+ * Every route on the server answers through `utils/respond.js`, which wraps the payload:
+ * `{ success: true, data: … }`. So `response.data.data` is the object a caller wants, and
+ * `response.data.keys` is `undefined`.
+ *
+ * That cost this feature a silent, total failure that looked like a styling bug. Every page read
+ * `data.keys`, `data.bots`, `data.providers` — all undefined, all defaulted to `[]` by the very
+ * `|| []` that was supposed to make the pages robust. The provider dropdown rendered zero options
+ * and no error, because from the page's point of view the server had simply said there were none.
+ *
+ * Unwrapping in these two helpers rather than at each call site is the fix that can't be
+ * half-applied: a new method added below cannot forget it.
+ */
+const unwrap = (response) => response.data?.data;
+
+const botGet = (url, params) =>
+  api.get(url, { params, skipRequestCacheInterceptor: true }).then(unwrap);
+
+export const botAPI = {
+  /** Keys. The plaintext is write-only: no read here ever returns more than the last four chars. */
+  listKeys: () => botGet("/bots/keys"),
+  addKey: (payload) => api.post("/bots/keys", payload).then(unwrap),
+  renameKey: (id, label) => api.patch(`/bots/keys/${id}`, { label }).then(unwrap),
+  revokeKey: (id) => api.delete(`/bots/keys/${id}`).then(unwrap),
+  revalidateKey: (id) => api.post(`/bots/keys/${id}/revalidate`).then(unwrap),
+
+  /** Bots. `listBots` also carries the model allowlist and the per-owner cap. */
+  listBots: () => botGet("/bots"),
+  getBot: (id) => botGet(`/bots/${id}`),
+  createBot: (payload) => api.post("/bots", payload).then(unwrap),
+  updateBot: (id, payload) => api.patch(`/bots/${id}`, payload).then(unwrap),
+  deleteBot: (id) => api.delete(`/bots/${id}`).then(unwrap),
+  activity: (id, params) => botGet(`/bots/${id}/activity`, params),
+};
+
 // ─── Comments ────────────────────────────────────────────────────────────────
 export const commentAPI = {
   createComment: (formData) =>

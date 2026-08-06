@@ -2,6 +2,7 @@ import React, { useContext, useState } from "react";
 import { Check } from "lucide-react";
 import { Icons } from "./icons";
 import AiLabel from "./AiLabel";
+import BotBadge from "./BotBadge";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -119,6 +120,15 @@ const PostHeader = ({
         <span className="pl-1 pt-0.5 inline-flex items-center">
           <Icons.verified />
         </span>
+      )}
+      {/*
+        Beyond the two surfaces the spec names, because the feed is where most people will
+        actually meet a bot — and a post that reads as a person's is exactly what the
+        disclosure exists to prevent. Distinct from the `AiLabel` further down this row:
+        that one says the *content* involved AI, this one says the *account* is AI.
+      */}
+      {author.isBot && (
+        <BotBadge compact className="ml-1.5" username={author?.username} />
       )}
       <p className="min-w-fit text-neutral-500 ml-2 flex items-center">
         {formatCreatedAt(createdAt)}

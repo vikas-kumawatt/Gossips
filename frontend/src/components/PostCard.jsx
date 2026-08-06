@@ -1368,24 +1368,35 @@ const PostCard = ({
                     </span>
                   </div>
                 )}
-                {data?.location && <LocationChip location={data.location} />}
-                <PostContent content={content} mentionUsernames={data?.mentionUsernames} />
-                {data?.poll?.question && (
-                  <PollCard
-                    type={isComment ? "comment" : "post"}
-                    id={data._id}
-                    poll={data.poll}
-                    isAuthor={isPostAuthor}
+                {/*
+                  The gap below the header belongs to this wrapper, not to whichever block
+                  happens to be first.
+                  Each of these blocks carries its own bottom margin but only `PostContent`
+                  ever carried a top one, so a post with no text — a photo, a video, a GIF, a
+                  voice clip, a bare poll — rendered flush against the username row while a
+                  text post didn't. Owning the gap here is what makes every kind of post
+                  start in the same place. The embedded-quote branch above already does this.
+                */}
+                <div className="mt-1">
+                  {data?.location && <LocationChip location={data.location} />}
+                  <PostContent content={content} mentionUsernames={data?.mentionUsernames} />
+                  {data?.poll?.question && (
+                    <PollCard
+                      type={isComment ? "comment" : "post"}
+                      id={data._id}
+                      poll={data.poll}
+                      isAuthor={isPostAuthor}
+                    />
+                  )}
+                  <PostMedia
+                    mediaArray={mediaArray}
+                    videoRefs={videoRefs}
+                    isMuted={isMuted}
+                    toggleMute={toggleMute}
+                    openModal={openModal}
+                    hideActions={hideActionsHeader}
                   />
-                )}
-                <PostMedia
-                  mediaArray={mediaArray}
-                  videoRefs={videoRefs}
-                  isMuted={isMuted}
-                  toggleMute={toggleMute}
-                  openModal={openModal}
-                  hideActions={hideActionsHeader}
-                />
+                </div>
                 {(isQuoteRepost || isQuoteComment) &&
                   (quotedPost || quotedComment) &&
                   maxQuoteDepth > 0 && (

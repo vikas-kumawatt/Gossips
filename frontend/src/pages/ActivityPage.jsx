@@ -253,6 +253,17 @@ const ActivityPage = () => {
       return;
     }
 
+    /*
+     * A stopped bot carries no entity — the reason lives on its persona — so the destination is
+     * the dashboard, where the status, the reason and the key that caused it are all together.
+     * Until this route existed the notification was unclickable, which made it a dead end at
+     * exactly the moment an owner needed to do something.
+     */
+    if (type === "bot_paused") {
+      navigate("/ai-bots");
+      return;
+    }
+
     if (entity && sender?.username) {
       if (entityType === "Comment") {
         // Navigate to the post that contains the comment — we only have the comment id here,
@@ -340,6 +351,14 @@ const ActivityPage = () => {
         return notification.entityType === "Comment"
           ? "Your scheduled reply couldn't be posted"
           : "Your scheduled gossip couldn't be posted";
+      /*
+       * The sender is the bot itself, so its avatar and handle are already on the row and the
+       * text only has to say what happened. Deliberately doesn't name the cause: the reason can
+       * be a provider message about billing, which belongs on the bot's own settings page rather
+       * than in a notification list someone might read over a shoulder.
+       */
+      case "bot_paused":
+        return "stopped and needs your attention";
       default:
         return "";
     }

@@ -24,6 +24,7 @@ import { applyCommentPublishEffects, parseScheduledFor } from "../utils/publishi
 import { resolveReplyThread } from "../utils/replyThreading.js";
 import { uploadMedia } from "../utils/uploadFiles.js";
 import { decorateContent, openPollClock, parseAttachments } from "../utils/attachments.js";
+import { commentOnPost } from "../services/authoring.js";
 
 const AUTHOR_SELECT = "username name bio profilePic isVerified verificationBadge isPrivate";
 
@@ -39,12 +40,18 @@ const LIVE_COMMENT = { isDeleted: { $ne: true }, isScheduled: { $ne: true } };
 // Create comments / replies
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * HTTP adapter over services/authoring.js.
+ *
+ * What remains here is request-shaped: parsing multipart uploads, validating the scheduling
+ * string, and decorating the response. Every rule about *what may be written* — the reply
+ * audience gate, thread flattening, mention indexing, publish effects — moved into the
+ * service so a bot applies the identical set.
+ */
 export const replyOnPost = async (req, res) => {
   try {
     const { content, postId, parentId, whoCanReply, isAiGenerated, scheduledFor } = req.body;
     const userId = req.user._id;
-
-    if (!postId) return res.status(400).json({ error: "Post ID is required" });
 
     const { at: scheduleAt, error: scheduleError } = parseScheduledFor(scheduledFor);
     if (scheduleError) return res.status(400).json({ error: scheduleError, message: scheduleError });
@@ -58,60 +65,32 @@ export const replyOnPost = async (req, res) => {
       return res.status(400).json({ error: attached.error, message: attached.error });
     }
 
-    // Checked after parsing so a poll-only or GIF-only reply is allowed.
-    if (!content?.trim() && !attached.media.length && !attached.poll && !attached.location) {
-      return res.status(400).json({ error: "Comment must have content, media or a poll" });
-    }
-
-    // Enforce the audience setting of whatever is being replied to:
-    // the parent comment if this is a nested reply, otherwise the post.
-    const replyTarget = parentId
-      ? await Comment.findById(parentId).select("author whoCanReply mentions parent").lean()
-      : await Post.findById(postId).select("author whoCanReply mentions").lean();
-    if (parentId && !replyTarget) {
-      return res.status(404).json({ error: "Comment not found" });
-    }
-    if (replyTarget && !(await canUserReplyToTarget(userId, replyTarget))) {
-      return res.status(403).json({
-        success: false,
-        error: replyDeniedMessage(replyTarget.whoCanReply),
-        message: replyDeniedMessage(replyTarget.whoCanReply),
-      });
-    }
-
-    // A reply flattens to two levels just like the nested-comment path: anchor
-    // under the top-level comment, remember the comment answered. Deriving this
-    // from the fetched target (not the raw body) keeps the thread two-deep and
-    // stops a client anchoring under an arbitrary comment.
-    const thread = parentId ? resolveReplyThread(replyTarget, parentId) : { parent: null, replyTo: null };
-
-    const composed = await indexContent(content || "", userId);
-
-    const newComment = {
-      content: content || "",
-      post: postId,
-      author: userId,
-      parent: thread.parent,
-      replyTo: thread.replyTo,
-      whoCanReply: normalizeWhoCanReply(whoCanReply),
-      mentions: composed.mentionIds,
-      hashtags: composed.hashtags,
-      isAiGenerated: parseBooleanFlag(isAiGenerated),
+    const result = await commentOnPost({
+      actorId: userId,
+      postId,
+      parentId,
+      content,
       media: attached.media,
       location: attached.location,
-      // The clock starts when the reply appears, not when it was written.
+      // The poll clock starts when the reply appears, not when it was written.
       poll: attached.poll && !scheduleAt ? openPollClock(attached.poll) : attached.poll,
-      isScheduled: Boolean(scheduleAt),
+      whoCanReply,
+      isAiGenerated: parseBooleanFlag(isAiGenerated),
       scheduledFor: scheduleAt,
-      scheduleStatus: scheduleAt ? "pending" : null,
-    };
+    });
 
-    const comment = await Comment.create(newComment);
+    if (!result.ok) {
+      /*
+       * `error` and `message` both carry the same string, as before. The client reads one or
+       * the other depending on which screen it is on, and dropping either would blank a
+       * message somewhere.
+       */
+      return res
+        .status(result.status)
+        .json({ success: false, error: result.error, message: result.error });
+    }
 
-    // Counters and reply notifications wait until it's actually in the thread.
-    if (!scheduleAt) await applyCommentPublishEffects(comment);
-
-    const populated = await Comment.findById(comment._id)
+    const populated = await Comment.findById(result.comment._id)
       .populate("author", AUTHOR_SELECT)
       .populate({
         path: "replyTo",
@@ -122,7 +101,7 @@ export const replyOnPost = async (req, res) => {
 
     res.status(201).json({
       comment: await decorateContent(populated, userId),
-      scheduled: Boolean(scheduleAt),
+      scheduled: result.scheduled,
     });
   } catch (error) {
     console.error("replyOnPost error:", error);

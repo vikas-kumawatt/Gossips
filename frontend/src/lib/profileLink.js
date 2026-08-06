@@ -35,6 +35,7 @@ const RESERVED_PATHS = new Set([
   "privacy",
   "cookies",
   "ai-labels",
+  "ai-bots",
   "tag",
 ]);
 

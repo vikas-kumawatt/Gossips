@@ -714,35 +714,27 @@ let appSettings = {
  */
 const content = await import("../utils/messageContent.js");
 
+/*
+ * `parseSendPayload` is imported, not sliced.
+ *
+ * It moved out of config/socket.js into utils/messageContent.js when the DM send path was
+ * extracted into a service, and the slice above stopped finding it. Importing the real module
+ * is what should have happened anyway: a text-extracted copy can pass while the shipped
+ * function differs, which is the one thing a harness must never allow.
+ *
+ * `messagingBlockedReason` is still sliced — it remains local to socket.js, where the group
+ * send handler uses it.
+ */
+const { parseSendPayload } = content;
+const MAX_MEDIA_PER_MESSAGE = content.MAX_MEDIA_PER_MESSAGE;
+
 const sendGates = new Function(
   "getSettings",
-  "verifyMedia",
-  "stripMediaToken",
-  "isAllowedGif",
-  "MAX_CONTENT_LENGTH",
-  "MAX_MEDIA_PER_MESSAGE",
-  "MEDIA_TYPES",
-  "CLIENT_MESSAGE_TYPES",
   `${sliceConst("messagingBlockedReason")}
-   ${sliceConst("parseSendPayload")}
-   return {
-     messagingBlockedReason,
-     parseSendPayload,
-     CLIENT_MESSAGE_TYPES,
-     MAX_MEDIA_PER_MESSAGE,
-   };`
-)(
-  async () => appSettings,
-  verifyMedia,
-  stripMediaToken,
-  isAllowedGif,
-  content.MAX_CONTENT_LENGTH,
-  content.MAX_MEDIA_PER_MESSAGE,
-  content.MEDIA_TYPES,
-  content.CLIENT_MESSAGE_TYPES
-);
+   return { messagingBlockedReason };`
+)(async () => appSettings);
 
-const { messagingBlockedReason, parseSendPayload, MAX_MEDIA_PER_MESSAGE } = sendGates;
+const { messagingBlockedReason } = sendGates;
 
 // -- messagingBlockedReason --
 

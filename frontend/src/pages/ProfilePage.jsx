@@ -21,6 +21,7 @@ import ShareProfileSheet from "../components/ShareProfileSheet";
 import AboutProfileSheet from "../components/AboutProfileSheet";
 import RichText from "../components/RichText";
 import { buildProfileUrl } from "../lib/profileLink";
+import BotBadge from "../components/BotBadge";
 import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
@@ -745,6 +746,15 @@ const ProfilePage = () => {
                         <span className="ml-2 mt-1.5 md:mt-3">
                           <Icons.verified2 />
                         </span>
+                      )}
+                      {/*
+                        Beside the name, where a verified tick goes — the two answer the
+                        same question about an account and belong in the same place. Not
+                        conditional on anything but `isBot`: there is no setting, for an
+                        owner or a viewer, that hides it.
+                      */}
+                      {profile.isBot && (
+                        <BotBadge className="ml-2 mt-1.5 md:mt-3" username={profile.username} />
                       )}
                       {profile.isPrivate && (
                         <span className="ml-2 mt-1.5 md:mt-3 text-neutral-400">

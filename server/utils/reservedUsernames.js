@@ -42,6 +42,14 @@ const RESERVED_USERNAMES = new Set([
   "privacy",
   "cookies",
   "ai-labels",
+  /*
+   * Hyphenated, so `validateUsernameFormat` already rejects it — usernames are
+   * `[a-z0-9_]{3,30}`. Listed anyway, for the same reason `ai-labels` and
+   * `reset-password` are: this file is the record of which single-segment paths
+   * the app owns, and a reader shouldn't have to re-derive that a hyphen makes
+   * one safe.
+   */
+  "ai-bots",
   "tag",
   "tags",
   "hashtag",

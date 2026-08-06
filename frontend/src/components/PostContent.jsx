@@ -6,12 +6,15 @@ import RichText from "./RichText";
  *
  * `mentionUsernames` comes from the server with the post — the handles whose
  * owners permitted the mention. Anything else stays plain text.
+ *
+ * Bottom margin only. The gap above belongs to the card's content wrapper, because it has to
+ * apply whether or not there is any text — see the note in PostCard.
  */
 const PostContent = ({ content, mentionUsernames }) => {
   if (!content) return null;
 
   return (
-    <p className="mt-1 mb-2 whitespace-pre-line">
+    <p className="mb-2 whitespace-pre-line">
       <RichText content={content} mentionUsernames={mentionUsernames} />
     </p>
   );
