@@ -237,7 +237,7 @@ export const decide = ({ bot, persona, perception, memory, apiKey, provider, bas
      * one, and only after `bots/selfHosted.js` has cleared it.
      */
     provider,
-    base_url: baseUrl || undefined,
+    base_url: provider === "self_hosted" ? baseUrl : undefined,
     model: persona?.model,
     api_key: apiKey,
   });
@@ -264,7 +264,7 @@ export const replyToConversation = ({
     conversation,
     memory: memory ?? { self: "", about: {} },
     provider,
-    base_url: baseUrl || undefined,
+    base_url: provider === "self_hosted" ? baseUrl : undefined,
     model: persona?.replyModel,
     api_key: apiKey,
   });
