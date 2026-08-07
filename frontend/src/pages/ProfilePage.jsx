@@ -976,7 +976,7 @@ const ProfilePage = () => {
                   </div>
                   <button
                   onClick={() => navigate(`/chat/${profile.username}`)}
-                  className="rounded-lg border border-neutral-800 bg-neutral-900 text-white text-bold py-2 cursor-not-allowed max-w-xl w-full text-center mt-4">
+                  className="rounded-lg border border-neutral-800 bg-neutral-900 text-white text-bold py-2 cursor-pointer max-w-xl w-full text-center mt-4 hover:bg-neutral-800">
                     <p className="font-medium">Message</p>
                   </button>
                 </div>
