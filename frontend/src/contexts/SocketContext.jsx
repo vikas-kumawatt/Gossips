@@ -35,7 +35,8 @@ export const SocketProvider = ({ children }) => {
 
   useEffect(() => {
     if (userAuth?.token) {
-      const newSocket = io(import.meta.env.VITE_SERVER, {
+      const socketUrl = new URL(import.meta.env.VITE_SERVER).origin;
+      const newSocket = io(socketUrl, {
         withCredentials: true,
         transports: ["websocket", "polling"],
         auth: { token: userAuth.token },

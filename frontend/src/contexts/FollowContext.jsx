@@ -43,7 +43,7 @@ export const FollowProvider = ({ children }) => {
 
   useEffect(() => {
     if (userAuth.token) {
-      const socketUrl = import.meta.env.VITE_SERVER || 'http://192.168.5.133:5000';
+      const socketUrl = import.meta.env.VITE_SERVER ? new URL(import.meta.env.VITE_SERVER).origin : 'http://192.168.5.133:5000';
       const newSocket = io(socketUrl, {
         auth: { token: userAuth.token },
         transports: ['websocket', 'polling'],
@@ -67,7 +67,7 @@ export const FollowProvider = ({ children }) => {
         newSocket.disconnect();
       };
     }
-  }, [userAuth.token, userAuth._id, handleFollowUpdate]);
+  }, [userAuth.token, userAuth.id, userAuth._id, handleFollowUpdate]);
 
   return (
     <FollowContext.Provider value={{ followUpdates, handleFollowUpdate }}>
