@@ -8,6 +8,7 @@ const InputBox = ({
   id,
   icon,
   disable = false,
+  autoComplete,
 }) => {
   const [passwordVisible, setPasswordVisible] = useState(false);
 
@@ -22,6 +23,7 @@ const InputBox = ({
         defaultValue={value}
         id={id}
         disabled={disable}
+        autoComplete={autoComplete || (type === "password" ? "current-password" : "on")}
         className="input-box "
       />
       <i className={"fi " + icon + " input-icon"}></i>
