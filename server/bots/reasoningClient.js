@@ -164,12 +164,17 @@ const post = async (path, body) => {
       );
 
     case 422:
-    case 400:
+    case 400: {
+      let message = detail || "the reasoning service rejected the request body";
+      if (payload?.fields && Array.isArray(payload.fields)) {
+        message += ` (fields: ${payload.fields.join(", ")})`;
+      }
       return fail(
         FAILURE_KINDS.BAD_REQUEST,
-        detail || "the reasoning service rejected the request body",
+        message,
         response.status
       );
+    }
 
     /*
      * The model this bot is configured with no longer exists at the provider.
