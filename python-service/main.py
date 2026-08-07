@@ -255,7 +255,10 @@ def _decide(
             failure.detail,
             redact(failure.provider_message),
         )
-        raise HTTPException(status_code=failure.status, detail=failure.detail) from failure
+        raise HTTPException(
+            status_code=failure.status,
+            detail=f"{failure.detail}: {redact(failure.provider_message)}" if failure.provider_message else failure.detail,
+        )
 
     actions, reasoning = _parse_actions(payload)
     elapsed_ms = int((time.monotonic() - started) * 1000)
