@@ -89,8 +89,8 @@ const SettingsPage = () => {
       */}
       {pushSupported && (
         <div className="flex relative items-center gap-4 mb-4 w-full">
-          {/* `Icons.activity` is the bell; there is no `Icons.notification`. */}
-          <Icons.activity className="h-6 w-6" />
+          {/* Using sms (chat bubble) as the message notification icon. */}
+          <Icons.chat2 className="h-7 w-7" />
           <div className="flex-1 min-w-0">
             <p className="text-md">Message notifications</p>
             <p className="text-xs text-neutral-500">
@@ -113,8 +113,8 @@ const SettingsPage = () => {
             }`}
           >
             <span
-              className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform ${
-                pushEnabled ? "translate-x-5" : "translate-x-1"
+              className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform duration-300 ${
+                pushEnabled ? "translate-x-4" : "translate-x-0"
               }`}
             />
           </button>
