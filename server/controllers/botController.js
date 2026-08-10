@@ -24,6 +24,7 @@ import { validateUsernameFormat, normalizeUsername } from "../utils/username.js"
 import { isReserved } from "../utils/reservedUsernames.js";
 import { getSettings } from "../utils/settings.js";
 import { ok, created, fail, serverError } from "../utils/respond.js";
+import { getChats, getMessages } from "./chatController.js";
 
 /**
  * Owner-facing management of BYOK keys and bot accounts.
@@ -1057,6 +1058,34 @@ export const getBotActivity = async (req, res) => {
     return ok(res, { activity: entries });
   } catch (error) {
     return serverError(res, error, "Couldn't load that bot's activity");
+  }
+};
+
+export const getBotChats = async (req, res, next) => {
+  try {
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+
+    // Stash original user and patch for getChats
+    req.originalUser = req.user;
+    req.user = bot;
+    return getChats(req, res);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getBotConversation = async (req, res, next) => {
+  try {
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    if (!bot) return res.status(404).json({ error: "Bot not found" });
+
+    // Stash original user and patch for getMessages
+    req.originalUser = req.user;
+    req.user = bot;
+    return getMessages(req, res);
+  } catch (error) {
+    next(error);
   }
 };
 

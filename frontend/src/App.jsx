@@ -40,6 +40,7 @@ import BotsListPage from "./pages/bots/BotsListPage.jsx";
 import BotKeysPage from "./pages/bots/BotKeysPage.jsx";
 import BotCreatePage from "./pages/bots/BotCreatePage.jsx";
 import BotDetailPage from "./pages/bots/BotDetailPage.jsx";
+import BotConversationPage from "./pages/bots/BotConversationPage.jsx";
 import AdminLayout from "./pages/admin/AdminLayout.jsx";
 import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
 import AdminUsers from "./pages/admin/AdminUsers.jsx";
@@ -314,6 +315,14 @@ function App() {
                 element={
                   <ProtectedRoute>
                     <BotDetailPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/ai-bots/:id/chat/:peerUsername"
+                element={
+                  <ProtectedRoute>
+                    <BotConversationPage />
                   </ProtectedRoute>
                 }
               />

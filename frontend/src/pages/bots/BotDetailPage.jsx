@@ -6,6 +6,8 @@ import { Icons } from "../../components/icons";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import { botAPI } from "../../services/api";
 import BotActivityList from "./BotActivityList";
+import BotDMsList from "./BotDMsList";
+import InPageNavigation from "../../components/InPageNavigation";
 import { canPause, canResume, statusLabel, statusTone, untilLabel } from "./botStatus";
 
 /**
@@ -100,6 +102,11 @@ const BotDetailPage = () => {
   const [original, setOriginal] = useState(null);
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [activeTab, setActiveTab] = useState(0);
+
+  const handleTabChange = useCallback((index) => {
+    setActiveTab(index);
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -314,167 +321,187 @@ const BotDetailPage = () => {
           </div>
         </div>
 
-        <form onSubmit={save}>
-          <Section title="Profile">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">Display name</span>
-              <input type="text" value={form.name} onChange={set("name")} maxLength={50} className={field} />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">Bio</span>
-              <textarea rows={2} value={form.bio} onChange={set("bio")} maxLength={300} className={`${field} resize-none`} />
-            </label>
-            <label className="flex cursor-pointer items-center gap-2.5">
-              <input type="checkbox" checked={form.isPrivate} onChange={set("isPrivate")} className="h-4 w-4 accent-white" />
-              <span className="text-[13px] text-neutral-300">Private account</span>
-            </label>
-            <p className="text-[12px] text-neutral-600">
-              The username can't be changed — renaming goes through the same path a person's does.
-            </p>
-          </Section>
+        <div className="mt-2">
+          <InPageNavigation
+            routes={["Profile", "Activity", "DMs"]}
+            defaultActiveIndex={activeTab}
+            onTabChange={handleTabChange}
+          >
+            {activeTab === 0 && (
+              <>
+                <form onSubmit={save}>
+                  <Section title="Profile">
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">Display name</span>
+                      <input type="text" value={form.name} onChange={set("name")} maxLength={50} className={field} />
+                    </label>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">Bio</span>
+                      <textarea rows={2} value={form.bio} onChange={set("bio")} maxLength={300} className={`${field} resize-none`} />
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-2.5">
+                      <input type="checkbox" checked={form.isPrivate} onChange={set("isPrivate")} className="h-4 w-4 accent-white" />
+                      <span className="text-[13px] text-neutral-300">Private account</span>
+                    </label>
+                    <p className="text-[12px] text-neutral-600">
+                      The username can't be changed — renaming goes through the same path a person's does.
+                    </p>
+                  </Section>
 
-          <Section title="How it behaves">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">Instructions</span>
-              <textarea
-                rows={7}
-                value={form.systemPrompt}
-                onChange={set("systemPrompt")}
-                maxLength={4000}
-                className={`${field} resize-y leading-relaxed`}
-              />
-              <span className="text-[12px] text-neutral-600">
-                {form.systemPrompt.trim().length} / 4000 — at least 20 characters.
-              </span>
-              <span className="text-[12px] leading-relaxed text-neutral-500">
-                Your bot will always admit to being an AI if asked, whatever you write here.
-              </span>
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">Voice</span>
-              <input type="text" value={form.postingStyle} onChange={set("postingStyle")} maxLength={500} className={field} />
-            </label>
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">
-                Interests <span className="text-neutral-600">(comma separated)</span>
-              </span>
-              <input type="text" value={form.interests} onChange={set("interests")} className={field} />
-            </label>
-          </Section>
+                  <Section title="How it behaves">
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">Instructions</span>
+                      <textarea
+                        rows={7}
+                        value={form.systemPrompt}
+                        onChange={set("systemPrompt")}
+                        maxLength={4000}
+                        className={`${field} resize-y leading-relaxed`}
+                      />
+                      <span className="text-[12px] text-neutral-600">
+                        {form.systemPrompt.trim().length} / 4000 — at least 20 characters.
+                      </span>
+                      <span className="text-[12px] leading-relaxed text-neutral-500">
+                        Your bot will always admit to being an AI if asked, whatever you write here.
+                      </span>
+                    </label>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">Voice</span>
+                      <input type="text" value={form.postingStyle} onChange={set("postingStyle")} maxLength={500} className={field} />
+                    </label>
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">
+                        Interests <span className="text-neutral-600">(comma separated)</span>
+                      </span>
+                      <input type="text" value={form.interests} onChange={set("interests")} className={field} />
+                    </label>
+                  </Section>
 
-          <Section title="Pacing">
-            <div className="flex flex-wrap items-end gap-3">
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[13px] text-neutral-400">Awake from</span>
-                <select value={form.startHour} onChange={set("startHour")} className={`${field} cursor-pointer`}>
-                  {HOURS.map((hour) => (
-                    <option key={hour} value={hour}>
-                      {hourLabel(hour)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex flex-col gap-1.5">
-                <span className="text-[13px] text-neutral-400">until</span>
-                <select value={form.endHour} onChange={set("endHour")} className={`${field} cursor-pointer`}>
-                  {HOURS.map((hour) => (
-                    <option key={hour} value={hour}>
-                      {hourLabel(hour)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="flex min-w-[160px] flex-1 flex-col gap-1.5">
-                <span className="text-[13px] text-neutral-400">Timezone</span>
-                <input type="text" value={form.timezone} onChange={set("timezone")} className={field} />
-              </label>
-            </div>
-            {Number(form.endHour) < Number(form.startHour) && (
-              <p className="text-[12px] text-neutral-500">
-                Overnight — awake from {form.startHour}:00 through midnight to {form.endHour}:00.
-              </p>
+                  <Section title="Pacing">
+                    <div className="flex flex-wrap items-end gap-3">
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-[13px] text-neutral-400">Awake from</span>
+                        <select value={form.startHour} onChange={set("startHour")} className={`${field} cursor-pointer`}>
+                          {HOURS.map((hour) => (
+                            <option key={hour} value={hour}>
+                              {hourLabel(hour)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex flex-col gap-1.5">
+                        <span className="text-[13px] text-neutral-400">until</span>
+                        <select value={form.endHour} onChange={set("endHour")} className={`${field} cursor-pointer`}>
+                          {HOURS.map((hour) => (
+                            <option key={hour} value={hour}>
+                              {hourLabel(hour)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="flex min-w-[160px] flex-1 flex-col gap-1.5">
+                        <span className="text-[13px] text-neutral-400">Timezone</span>
+                        <input type="text" value={form.timezone} onChange={set("timezone")} className={field} />
+                      </label>
+                    </div>
+                    {Number(form.endHour) < Number(form.startHour) && (
+                      <p className="text-[12px] text-neutral-500">
+                        Overnight — awake from {form.startHour}:00 through midnight to {form.endHour}:00.
+                      </p>
+                    )}
+                    <label className="flex max-w-[200px] flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">Posts per day</span>
+                      <input type="number" min={0} max={12} value={form.postsPerDay} onChange={set("postsPerDay")} className={field} />
+                    </label>
+                  </Section>
+
+                  <Section title="Model and key">
+                    <label className="flex flex-col gap-1.5">
+                      <span className="text-[13px] text-neutral-400">API key</span>
+                      <select value={form.apiKeyId} onChange={set("apiKeyId")} className={`${field} cursor-pointer`}>
+                        <option value="">No key — this bot won't run</option>
+                        {keys.map((key) => (
+                          <option key={key._id} value={key._id}>
+                            {providers.find((p) => p.id === key.provider)?.label || key.provider} —{" "}
+                            {key.label || "Untitled key"} ••••{key.keyHint}
+                          </option>
+                        ))}
+                      </select>
+                      {!keys.length && (
+                        <Link to="/ai-bots/keys" className="text-[13px] text-blue-400 hover:underline">
+                          You have no working keys — add one
+                        </Link>
+                      )}
+                    </label>
+
+                    {modelMismatch && (
+                      <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+                        <p className="text-[13px] leading-relaxed text-amber-200">
+                          {providerLabel} doesn't serve <span className="font-mono">{form.model}</span>. Pick a
+                          model below before saving — a bot whose provider doesn't have its model stops on its
+                          first turn.
+                        </p>
+                      </div>
+                    )}
+
+                    {modelField("model", "Model")}
+                    {modelField("replyModel", "Model for direct message replies")}
+                  </Section>
+
+                  {/* Sticky, because the form is long enough that a footer button is off-screen while editing. */}
+                  {dirty && (
+                    <div className="sticky bottom-0 flex gap-2 border-t border-neutral-800 bg-neutral-950/95 px-4 py-3 backdrop-blur-md">
+                      <button
+                        type="submit"
+                        disabled={saving}
+                        className="flex-1 cursor-pointer rounded-xl bg-white py-2.5 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:opacity-40"
+                      >
+                        {saving ? "Saving…" : "Save changes"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={saving}
+                        onClick={() => setForm(original)}
+                        className="cursor-pointer rounded-xl border border-neutral-700 px-4 py-2.5 text-sm font-medium transition-colors hover:bg-neutral-800 disabled:opacity-50"
+                      >
+                        Discard
+                      </button>
+                    </div>
+                  )}
+                </form>
+                
+                <div className="px-4 py-5 mt-8 border-t border-neutral-800">
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => setConfirming(true)}
+                    className="w-full cursor-pointer rounded-xl border border-rose-500/30 py-2.5 text-sm font-semibold text-rose-400 transition-colors hover:bg-rose-500/10 disabled:opacity-50"
+                  >
+                    Delete this AI account
+                  </button>
+                </div>
+              </>
             )}
-            <label className="flex max-w-[200px] flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">Posts per day</span>
-              <input type="number" min={0} max={12} value={form.postsPerDay} onChange={set("postsPerDay")} className={field} />
-            </label>
-          </Section>
 
-          <Section title="Model and key">
-            <label className="flex flex-col gap-1.5">
-              <span className="text-[13px] text-neutral-400">API key</span>
-              <select value={form.apiKeyId} onChange={set("apiKeyId")} className={`${field} cursor-pointer`}>
-                <option value="">No key — this bot won't run</option>
-                {keys.map((key) => (
-                  <option key={key._id} value={key._id}>
-                    {providers.find((p) => p.id === key.provider)?.label || key.provider} —{" "}
-                    {key.label || "Untitled key"} ••••{key.keyHint}
-                  </option>
-                ))}
-              </select>
-              {!keys.length && (
-                <Link to="/ai-bots/keys" className="text-[13px] text-blue-400 hover:underline">
-                  You have no working keys — add one
-                </Link>
-              )}
-            </label>
-
-            {modelMismatch && (
-              <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/20 bg-amber-500/10 px-3 py-2.5">
-                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
-                <p className="text-[13px] leading-relaxed text-amber-200">
-                  {providerLabel} doesn't serve <span className="font-mono">{form.model}</span>. Pick a
-                  model below before saving — a bot whose provider doesn't have its model stops on its
-                  first turn.
+            {activeTab === 1 && (
+              <div className="px-4 py-5">
+                <p className="text-[15px] font-semibold text-white">Activity</p>
+                <p className="mt-0.5 text-[13px] text-neutral-500">
+                  Everything it did, and everything it was refused. Newest first.
                 </p>
+                <div className="mt-3">
+                  <BotActivityList botId={id} />
+                </div>
               </div>
             )}
 
-            {modelField("model", "Model")}
-            {modelField("replyModel", "Model for direct message replies")}
-          </Section>
-
-          {/* Sticky, because the form is long enough that a footer button is off-screen while editing. */}
-          {dirty && (
-            <div className="sticky bottom-0 flex gap-2 border-t border-neutral-800 bg-neutral-950/95 px-4 py-3 backdrop-blur-md">
-              <button
-                type="submit"
-                disabled={saving}
-                className="flex-1 cursor-pointer rounded-xl bg-white py-2.5 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:opacity-40"
-              >
-                {saving ? "Saving…" : "Save changes"}
-              </button>
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => setForm(original)}
-                className="cursor-pointer rounded-xl border border-neutral-700 px-4 py-2.5 text-sm font-medium transition-colors hover:bg-neutral-800 disabled:opacity-50"
-              >
-                Discard
-              </button>
-            </div>
-          )}
-        </form>
-
-        <div className="border-b border-neutral-800 px-4 py-5">
-          <p className="text-[15px] font-semibold text-white">Activity</p>
-          <p className="mt-0.5 text-[13px] text-neutral-500">
-            Everything it did, and everything it was refused. Newest first.
-          </p>
-          <div className="mt-3">
-            <BotActivityList botId={id} />
-          </div>
-        </div>
-
-        <div className="px-4 py-5">
-          <button
-            type="button"
-            disabled={saving}
-            onClick={() => setConfirming(true)}
-            className="w-full cursor-pointer rounded-xl border border-rose-500/30 py-2.5 text-sm font-semibold text-rose-400 transition-colors hover:bg-rose-500/10 disabled:opacity-50"
-          >
-            Delete this AI account
-          </button>
+            {activeTab === 2 && (
+              <div className="px-4 py-5">
+                <BotDMsList bot={bot} />
+              </div>
+            )}
+          </InPageNavigation>
         </div>
       </main>
 

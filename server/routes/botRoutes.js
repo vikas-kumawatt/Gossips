@@ -14,6 +14,8 @@ import {
   revokeApiKey,
   updateApiKey,
   updateBot,
+  getBotChats,
+  getBotConversation,
 } from "../controllers/botController.js";
 
 const router = express.Router();
@@ -86,5 +88,7 @@ router.get("/:id/activity", protect, manageLimit, getBotActivity);
 router.get("/:id", protect, manageLimit, getBot);
 router.patch("/:id", protect, requireActiveAccount, manageLimit, updateBot);
 router.delete("/:id", protect, requireActiveAccount, manageLimit, deleteBot);
+router.get("/:id/chats", protect, manageLimit, getBotChats);
+router.get("/:id/chats/:username/messages", protect, manageLimit, getBotConversation);
 
 export default router;
