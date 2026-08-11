@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef } from "react";
 import { toast } from "react-hot-toast";
 import { Icons } from "../../components/icons";
 import { botAPI } from "../../services/api";
@@ -47,17 +47,57 @@ const OUTCOME = {
 const BotActivityList = ({ botId }) => {
   const [loading, setLoading] = useState(true);
   const [rows, setRows] = useState([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [cursor, setCursor] = useState(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [stats, setStats] = useState(null);
+  const observerTarget = useRef(null);
 
   const load = useCallback(async () => {
     try {
       const data = await botAPI.activity(botId, { limit: 50 });
       setRows(data.activity || []);
+      setHasMore(data.hasMore);
+      setCursor(data.pageInfo?.nextCursor || null);
+      if (data.stats) setStats(data.stats);
     } catch {
       toast.error("Couldn't load activity");
     } finally {
       setLoading(false);
     }
   }, [botId]);
+
+  const loadMore = useCallback(async () => {
+    if (!hasMore || loadingMore || !cursor) return;
+    setLoadingMore(true);
+    try {
+      const data = await botAPI.activity(botId, { limit: 50, cursor });
+      setRows((prev) => [...prev, ...(data.activity || [])]);
+      setHasMore(data.hasMore);
+      setCursor(data.pageInfo?.nextCursor || null);
+    } catch {
+      toast.error("Couldn't load more activity");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [botId, cursor, hasMore, loadingMore]);
+
+  useEffect(() => {
+    const target = observerTarget.current;
+    if (!target || !hasMore || loadingMore) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries[0].isIntersecting) {
+          loadMore();
+        }
+      },
+      { rootMargin: "200px" }
+    );
+
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [hasMore, loadingMore, loadMore]);
 
   useEffect(() => {
     load();
@@ -80,12 +120,12 @@ const BotActivityList = ({ botId }) => {
   }
 
   /*
-   * Token counts ride on one row per cycle — repeating them on each action would report a cycle's cost
-   * six times over — so summing the column is the correct total rather than an approximation.
+   * Token counts and decisions reflect the entire history of the bot, fetched once
+   * on the initial load and decoupled from the currently loaded page of rows.
    */
-  const tokensIn = rows.reduce((total, row) => total + (row.usage?.inputTokens || 0), 0);
-  const tokensOut = rows.reduce((total, row) => total + (row.usage?.outputTokens || 0), 0);
-  const cycles = new Set(rows.map((row) => row.cycleId).filter(Boolean)).size;
+  const tokensIn = stats?.tokensIn || 0;
+  const tokensOut = stats?.tokensOut || 0;
+  const cycles = stats?.decisions || 0;
 
   return (
     <div>
@@ -140,6 +180,14 @@ const BotActivityList = ({ botId }) => {
           );
         })}
       </div>
+      {hasMore && !loadingMore && (
+        <div ref={observerTarget} className="h-4 w-full" />
+      )}
+      {loadingMore && (
+        <div className="flex justify-center py-6">
+          <Icons.spinner className="h-5 w-5 animate-spin text-neutral-500" />
+        </div>
+      )}
     </div>
   );
 };

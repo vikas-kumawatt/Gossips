@@ -25,7 +25,12 @@ import { isReserved } from "../utils/reservedUsernames.js";
 import { getSettings } from "../utils/settings.js";
 import { ok, created, fail, serverError } from "../utils/respond.js";
 import { getChats, getMessages } from "./chatController.js";
-
+import {
+  decodeCursor,
+  buildCursorQuery,
+  buildCursorPageInfo,
+  parseCursorLimit,
+} from "../utils/cursorPagination.js";
 /**
  * Owner-facing management of BYOK keys and bot accounts.
  *
@@ -1038,10 +1043,14 @@ export const getBotActivity = async (req, res) => {
       .lean();
     if (!bot) return fail(res, "Bot not found", 404);
 
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
-    const entries = await BotActionLog.find({ bot: bot._id })
+    const { limit, cursor } = req.query;
+    const limitNum = parseCursorLimit(limit, 50);
+    const parsedCursor = decodeCursor(cursor);
+    const cursorQuery = buildCursorQuery(parsedCursor);
+
+    const entries = await BotActionLog.find({ bot: bot._id, ...cursorQuery })
       .sort({ createdAt: -1 })
-      .limit(limit)
+      .limit(limitNum + 1)
       /*
        * `targetKey` alongside `targetId`, and this was a real gap rather than a nicety. A DM
        * conversation is a derived key, not a document, so Phase 6 gave it its own string field —
@@ -1055,7 +1064,29 @@ export const getBotActivity = async (req, res) => {
       .select("action outcome targetType targetId targetKey reason usage cycleId createdAt")
       .lean();
 
-    return ok(res, { activity: entries });
+    const { items, pageInfo } = buildCursorPageInfo(entries, limitNum);
+
+    let stats;
+    if (!cursor) {
+      const statsResult = await BotActionLog.aggregate([
+        { $match: { bot: bot._id } },
+        {
+          $group: {
+            _id: null,
+            tokensIn: { $sum: "$usage.inputTokens" },
+            tokensOut: { $sum: "$usage.outputTokens" },
+          }
+        }
+      ]);
+      const cycles = await BotActionLog.distinct("cycleId", { bot: bot._id, cycleId: { $ne: "" } });
+      stats = {
+        tokensIn: statsResult[0]?.tokensIn || 0,
+        tokensOut: statsResult[0]?.tokensOut || 0,
+        decisions: cycles.length
+      };
+    }
+
+    return ok(res, { activity: items, pageInfo, hasMore: pageInfo.hasNextPage, stats });
   } catch (error) {
     return serverError(res, error, "Couldn't load that bot's activity");
   }

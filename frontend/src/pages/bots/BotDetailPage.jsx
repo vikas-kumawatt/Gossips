@@ -6,7 +6,8 @@ import { Icons } from "../../components/icons";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
 import { botAPI } from "../../services/api";
 import BotActivityList from "./BotActivityList";
-import BotDMsList from "./BotDMsList";
+import BotChatProvider from "../../contexts/BotChatProvider";
+import ChatPage from "../ChatPage";
 import InPageNavigation from "../../components/InPageNavigation";
 import { canPause, canResume, statusLabel, statusTone, untilLabel } from "./botStatus";
 
@@ -303,10 +304,13 @@ const BotDetailPage = () => {
               <span className="rounded-full border border-neutral-700 px-2 py-[1px] text-[11px] text-neutral-400">
                 AI
               </span>
+              <Link
+                to={`/${bot.username}`}
+                className="ml-auto flex cursor-pointer items-center justify-center rounded-lg bg-white px-4 py-1.5 text-[14px] font-semibold text-black transition-opacity hover:opacity-90"
+              >
+                View profile
+              </Link>
             </div>
-            <Link to={`/${bot.username}`} className="text-[13px] text-neutral-500 hover:underline">
-              View profile
-            </Link>
             <p className={`mt-1.5 text-[13px] ${STATUS_COLOUR[statusTone(status)] || STATUS_COLOUR.neutral}`}>
               {statusLabel(status)}
               {status === "active" && bot.persona?.nextRunAt && (
@@ -497,9 +501,14 @@ const BotDetailPage = () => {
             )}
 
             {activeTab === 2 && (
-              <div className="px-4 py-5">
-                <BotDMsList bot={bot} />
-              </div>
+              <BotChatProvider botId={id}>
+                <ChatPage
+                  embedded
+                  readOnly
+                  viewerId={bot._id}
+                  conversationPath={(username) => `/ai-bots/${id}/chat/${username}`}
+                />
+              </BotChatProvider>
             )}
           </InPageNavigation>
         </div>

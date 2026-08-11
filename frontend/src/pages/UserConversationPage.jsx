@@ -69,9 +69,13 @@ const MAX_RECORDING_MS = 120_000;
  * so the group thread renders identical bubbles instead of its own cruder copy.
  */
 
-const UserConversationPage = () => {
+const UserConversationPage = ({
+  readOnly = false,
+  viewerId = null,
+  listPath = "/chat",
+}) => {
   const { userAuth } = useContext(UserContext);
-  const currentUserId = userAuth?._id || userAuth?.id;
+  const currentUserId = viewerId || userAuth?._id || userAuth?.id;
   const { username } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
@@ -268,7 +272,7 @@ const UserConversationPage = () => {
 
       if (error.response?.status === 404) {
         toast.error("User not found");
-        setTimeout(() => navigate("/chat"), 2000);
+        setTimeout(() => navigate(listPath), 2000);
       } else if (error.response?.status === 403) {
         toast.error("You are blocked from messaging this user");
         setIsBlocked(true);
@@ -279,7 +283,7 @@ const UserConversationPage = () => {
         toast.error("Failed to load conversation. Please try again.");
       }
     },
-    [navigate]
+    [navigate, listPath]
   );
 
   // markMessageAsRead replaced by context action
@@ -357,7 +361,7 @@ const UserConversationPage = () => {
          * (which `handleFetchError` turns into "User not found").
          */
         let userData = null;
-        try {
+        if (!readOnly) try {
           /*
            * Uncached, deliberately (#119).
            *
@@ -420,7 +424,7 @@ const UserConversationPage = () => {
          * read "Block" from a stale context, and taking that offer failed. Pushing it
          * in reconciles every other surface from one fetch.
          */
-        syncBlocked({ _id: userData._id, username }, youBlocked);
+        if (!readOnly) syncBlocked({ _id: userData._id, username }, youBlocked);
         /*
          * `relationship.youRestricted`, not `userData.restricted`.
          *
@@ -445,7 +449,7 @@ const UserConversationPage = () => {
 
         // Pinned / status / read receipts need the peer id
         if (userData._id) {
-          try {
+          if (!readOnly) try {
             // Through chatAPI rather than raw axios (CF29): the pinned endpoint
             // is lock-gated now, and the shared client is what attaches the
             // unlock grant — as well as refreshing an expired token on 401,
@@ -455,8 +459,10 @@ const UserConversationPage = () => {
           } catch (pinnedError) {
             console.error("Error fetching pinned messages:", pinnedError);
           }
-          checkUserStatus(userData._id);
-          markConversationAsRead(userData._id, `user_${userData._id}`);
+          if (!readOnly) {
+            checkUserStatus(userData._id);
+            markConversationAsRead(userData._id, `user_${userData._id}`);
+          }
         }
       } catch (error) {
         /*
@@ -493,15 +499,18 @@ const UserConversationPage = () => {
     syncBlocked,
     // Bumped by the PIN prompt once a grant exists, so the load retries.
     unlockAttempt,
+    readOnly,
+    listPath,
   ]);
 
   // Open in-chat search when returning from conversation details (Search action)
   useEffect(() => {
+    if (readOnly) return;
     if (location.state?.openConversationSearch) {
       setShowSearch(true);
       navigate(location.pathname, { replace: true, state: {} });
     }
-  }, [location.state, location.pathname, navigate]);
+  }, [location.state, location.pathname, navigate, readOnly]);
 
   /*
    * The per-chat disappearing-message default, read from the provider (#96).
@@ -513,16 +522,18 @@ const UserConversationPage = () => {
    * writes it.
    */
   useEffect(() => {
+    if (readOnly) return;
     if (!userAuth?.token) return;
     loadPreferences({ bypassCache: false });
-  }, [userAuth?.token, loadPreferences]);
+  }, [userAuth?.token, loadPreferences, readOnly]);
 
   useEffect(() => {
+    if (readOnly) return;
     if (!selectedUser?._id || !preferences.loaded) return;
     const key = `user_${selectedUser._id}`;
     const row = (preferences.disappearingByChat || []).find((x) => x.chatId === key);
     setConversationDisappearingSeconds(row?.seconds ?? null);
-  }, [selectedUser?._id, preferences]);
+  }, [selectedUser?._id, preferences, readOnly]);
 
   // Update isOnline and lastSeen from context
   useEffect(() => {
@@ -569,7 +580,7 @@ const UserConversationPage = () => {
   }, [messages, currentUserId]);
 
   useEffect(() => {
-    if (!newestInboundId || !selectedUser) return;
+    if (readOnly || !newestInboundId || !selectedUser) return;
 
     const markIfVisible = () => {
       if (document.visibilityState !== "visible") return;
@@ -579,7 +590,7 @@ const UserConversationPage = () => {
     markIfVisible();
     document.addEventListener("visibilitychange", markIfVisible);
     return () => document.removeEventListener("visibilitychange", markIfVisible);
-  }, [newestInboundId, selectedUser, markConversationAsRead]);
+  }, [newestInboundId, selectedUser, markConversationAsRead, readOnly]);
 
   /*
    * The typing timer, which is all that's left for this page to tear down.
@@ -1377,6 +1388,7 @@ const UserConversationPage = () => {
   };
 
   const fetchPinnedMessages = async () => {
+    if (readOnly) return;
     try {
       const response = await chatAPI.getPinnedMessages(selectedUser._id);
       setPinnedMessages(response.pinnedMessages || []);
@@ -2056,7 +2068,7 @@ const UserConversationPage = () => {
       <header className="shrink-0 bg-black border-b border-neutral-800 z-10 py-3 px-3 sm:py-4 sm:px-6">
         <div className="flex items-center gap-4">
           <button
-            onClick={() => navigate(-1)}
+            onClick={() => navigate(readOnly ? listPath : -1)}
             className="md:hidden text-neutral-400 hover:text-white transition-colors"
             aria-label="Go back"
           >
@@ -2085,8 +2097,9 @@ const UserConversationPage = () => {
               type="button"
               className="flex-1 min-w-0 text-left cursor-pointer"
               onClick={() =>
-                username && navigate(`/chat/${username}/details`)
+                !readOnly && username && navigate(`/chat/${username}/details`)
               }
+              disabled={readOnly}
               aria-label="Conversation details"
             >
               <h2 className="font-medium text-base truncate">
@@ -2107,7 +2120,7 @@ const UserConversationPage = () => {
               {renderUserStatusIndicator()}</button>
           </div>
 
-          <div className="flex items-center gap-3 shrink-0">
+          {!readOnly && <div className="flex items-center gap-3 shrink-0">
             {/*
               Both of these were empty handlers holding a placeholder comment.
 
@@ -2186,10 +2199,10 @@ const UserConversationPage = () => {
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
-          </div>
+          </div>}
         </div>
 
-        {showSearch && (
+        {!readOnly && showSearch && (
           <div className="mt-3 flex items-center gap-2">
             <input
               type="search"
@@ -2229,7 +2242,7 @@ const UserConversationPage = () => {
         so it scrolled away with the oldest messages the moment you moved —
         a permanently-visible summary that was almost never visible.
       */}
-      {!loading && pinnedMessages.length > 0 && !pinnedBarDismissed && (
+      {!readOnly && !loading && pinnedMessages.length > 0 && !pinnedBarDismissed && (
         <div className="shrink-0 pt-2">{renderPinnedMessagesBar()}</div>
       )}
 
@@ -2354,11 +2367,11 @@ const UserConversationPage = () => {
                 })}
                 onOpenProfile={(name) => navigate(`/${name}`)}
                 indicatorFor={getMessageIndicator}
-                onAddReaction={handleAddReaction}
-                onContextMenu={handleMessageContextMenu}
+                onAddReaction={readOnly ? () => {} : handleAddReaction}
+                onContextMenu={readOnly ? () => {} : handleMessageContextMenu}
                 onJumpToMessage={jumpToMessage}
                 onDismissReactions={dismissReactions}
-                onVote={handleVote}
+                onVote={readOnly ? () => {} : handleVote}
                 onOpenMedia={setBigPreviewMedia}
               />
               {uploadingPreview && (
@@ -2410,7 +2423,11 @@ const UserConversationPage = () => {
       </main>
 
       <div className="shrink-0 bg-black" style={{ paddingBottom: "env(safe-area-inset-bottom)" }}>
-        {blocked ? (
+        {readOnly ? (
+          <div className="border-t border-neutral-800 px-4 py-4 text-center text-sm text-neutral-500">
+            Viewing this AI account's conversation. Sending and chat actions are disabled.
+          </div>
+        ) : blocked ? (
           isUserBlocked(peerIdentity) || isBlocked ? (
             // You blocked them — Instagram-style bar with Unblock / Delete.
             <div className="bg-black border-t border-neutral-800 px-4 pt-3 pb-4">
@@ -2479,7 +2496,7 @@ const UserConversationPage = () => {
         )}
       </div>
 
-      {showForwardModal && renderForwardModal()}
+      {!readOnly && showForwardModal && renderForwardModal()}
 
       {/*
         The lightbox, as a dialog (#155).
@@ -2562,9 +2579,9 @@ const UserConversationPage = () => {
           </div>
         </div>
       )}
-      {contextMenu && renderMessageContextMenu()}
+      {!readOnly && contextMenu && renderMessageContextMenu()}
 
-      {pendingMessageAction?.kind === "unsend" && (
+      {!readOnly && pendingMessageAction?.kind === "unsend" && (
         <ConfirmDialog
           title="Unsend this message?"
           confirmLabel="Unsend"
@@ -2580,7 +2597,7 @@ const UserConversationPage = () => {
         </ConfirmDialog>
       )}
 
-      {pendingMessageAction?.kind === "delete" && (
+      {!readOnly && pendingMessageAction?.kind === "delete" && (
         <ConfirmDialog
           title="Delete this message for you?"
           confirmLabel="Delete"
@@ -2595,7 +2612,7 @@ const UserConversationPage = () => {
         </ConfirmDialog>
       )}
 
-      {deleteChatOpen && (
+      {!readOnly && deleteChatOpen && (
         <ConfirmDialog
           title="Delete this conversation?"
           confirmLabel="Delete"

@@ -40,7 +40,7 @@ import BotsListPage from "./pages/bots/BotsListPage.jsx";
 import BotKeysPage from "./pages/bots/BotKeysPage.jsx";
 import BotCreatePage from "./pages/bots/BotCreatePage.jsx";
 import BotDetailPage from "./pages/bots/BotDetailPage.jsx";
-import BotConversationPage from "./pages/bots/BotConversationPage.jsx";
+import BotChatProvider from "./contexts/BotChatProvider.jsx";
 import AdminLayout from "./pages/admin/AdminLayout.jsx";
 import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
 import AdminUsers from "./pages/admin/AdminUsers.jsx";
@@ -75,6 +75,24 @@ import HashtagPage from "./pages/HashtagPage";
 function LegacyGroupRedirect() {
   const { groupId } = useParams();
   return <Navigate to={`/chat/group/${groupId}`} replace />;
+}
+
+/**
+ * Read-only wrapper: renders the shared UserConversationPage as the bot owner
+ * inspecting one of the bot's threads. BotChatProvider supplies the data;
+ * readOnly disables every mutation surface.
+ */
+function BotConversationRoute() {
+  const { id } = useParams();
+  return (
+    <BotChatProvider botId={id}>
+      <UserConversationPage
+        readOnly
+        viewerId={id}
+        listPath={`/ai-bots/${id}`}
+      />
+    </BotChatProvider>
+  );
 }
 
 function App() {
@@ -319,10 +337,10 @@ function App() {
                 }
               />
               <Route
-                path="/ai-bots/:id/chat/:peerUsername"
+                path="/ai-bots/:id/chat/:username"
                 element={
                   <ProtectedRoute>
-                    <BotConversationPage />
+                    <BotConversationRoute />
                   </ProtectedRoute>
                 }
               />

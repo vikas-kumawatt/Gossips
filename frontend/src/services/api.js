@@ -647,7 +647,7 @@ export const botAPI = {
   updateBot: (id, payload) => api.patch(`/bots/${id}`, payload).then(unwrap),
   deleteBot: (id) => api.delete(`/bots/${id}`).then(unwrap),
   activity: (id, params) => botGet(`/bots/${id}/activity`, params),
-  getChats: (id) => api.get(`/bots/${id}/chats`, { skipRequestCacheInterceptor: true }).then((r) => r.data),
+  getChats: (id, params) => api.get(`/bots/${id}/chats`, { params, skipRequestCacheInterceptor: true }).then((r) => r.data),
   getConversation: (id, username, params) => api.get(`/bots/${id}/chats/${username}/messages`, { params, skipRequestCacheInterceptor: true }).then((r) => r.data),
 };
 

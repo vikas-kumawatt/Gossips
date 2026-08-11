@@ -154,7 +154,12 @@ const DEFAULT_BUILT_IN_TABS = [
   { id: "archived", label: "Archived" },
 ];
 
-const ChatPage = ({ embedded = false }) => {
+const ChatPage = ({
+  embedded = false,
+  readOnly = false,
+  viewerId = null,
+  conversationPath = null,
+}) => {
   const { userAuth } = useContext(UserContext);
   const {
     conversations: chats,
@@ -373,6 +378,11 @@ const ChatPage = ({ embedded = false }) => {
 
   useEffect(() => {
     const query = debouncedSearchQuery.trim();
+    if (readOnly) {
+      setFilteredUsers([]);
+      setSearchLoading(false);
+      return undefined;
+    }
     if (!query) {
       setFilteredUsers([]);
       setSearchLoading(false);
@@ -401,7 +411,7 @@ const ChatPage = ({ embedded = false }) => {
     return () => {
       cancelled = true;
     };
-  }, [debouncedSearchQuery]);
+  }, [debouncedSearchQuery, readOnly]);
 
   const handleSearchChange = (e) => {
     setSearchQuery(e.target.value);
@@ -419,6 +429,7 @@ const ChatPage = ({ embedded = false }) => {
   // fetchUserById removed - unused
 
   const handleUserSelect = (user) => {
+    if (readOnly) return;
     navigate(`/chat/${user.username}`);
   };
 
@@ -432,6 +443,7 @@ const ChatPage = ({ embedded = false }) => {
    * embedded layout if the search box is scrolled out of the DOM.
    */
   const handleStartConversation = () => {
+    if (readOnly) return;
     searchInputRef.current?.focus();
   };
 
@@ -537,7 +549,7 @@ const ChatPage = ({ embedded = false }) => {
      * `deletedFor`, and the list showed its text regardless: a message you had
      * deliberately hidden went on being the preview at the top of your chat list.
      */
-    const myId = String(userAuth?.id || userAuth?._id || "");
+    const myId = String(viewerId || userAuth?.id || userAuth?._id || "");
     if (
       myId &&
       Array.isArray(message.deletedFor) &&
@@ -1123,7 +1135,22 @@ const ChatPage = ({ embedded = false }) => {
    * Props for a conversation row: long-press handlers, the click that has to know
    * whether it was a long press, and the keyboard equivalents.
    */
-  const chatRowProps = (item, onOpen) => ({
+  const chatRowProps = (item, onOpen) => {
+    if (readOnly) {
+      return {
+        onClick: onOpen,
+        onKeyDown: (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            onOpen();
+          }
+        },
+        role: "button",
+        tabIndex: 0,
+      };
+    }
+
+    return {
     ...chatLongPress.handlers,
     onPointerDown: (event) => {
       pressedItemRef.current = item;
@@ -1164,7 +1191,8 @@ const ChatPage = ({ embedded = false }) => {
       chatLongPress.handlers.onContextMenu?.(event);
       openChatMenu(event, item);
     },
-  });
+    };
+  };
 
   const runToggleAction = async (item, stateKey) => {
     // Read and unread aren't a flag any more, they're the read watermark, so
@@ -1321,7 +1349,7 @@ const ChatPage = ({ embedded = false }) => {
     const isOnline = onlineUsers.has(chat.user._id.toString());
     const unreadCount = item.unreadCount || 0;
 
-    const myId = String(userAuth?.id || userAuth?._id || "");
+    const myId = String(viewerId || userAuth?.id || userAuth?._id || "");
     const latestMsg = chat.latestMessage;
     const senderId = String(latestMsg?.sender?._id || latestMsg?.sender || "");
     const isSentByMe = myId && senderId && senderId === myId;
@@ -1376,12 +1404,12 @@ const ChatPage = ({ embedded = false }) => {
         setIsPinModalOpen(true);
         return;
       }
-      if (unreadCount > 0) {
+      if (!readOnly && unreadCount > 0) {
         clearChatUnread(item.id).catch((err) =>
           console.error("Failed to mark chat read:", err)
         );
       }
-      navigate(`/chat/${chat.user.username}`);
+      navigate(conversationPath ? conversationPath(chat.user.username) : `/chat/${chat.user.username}`);
     };
 
     return (
@@ -1447,7 +1475,7 @@ const ChatPage = ({ embedded = false }) => {
                     {unreadCount > 99 ? "99+" : unreadCount}
                   </span>
                 )}
-                <ChatRowMenuButton item={item} onOpen={openChatMenu} />
+                {!readOnly && <ChatRowMenuButton item={item} onOpen={openChatMenu} />}
               </div>
             </div>
           </div>
@@ -1464,7 +1492,7 @@ const ChatPage = ({ embedded = false }) => {
       content: "No messages yet",
     };
 
-    const myId = String(userAuth?.id || userAuth?._id || "");
+    const myId = String(viewerId || userAuth?.id || userAuth?._id || "");
     const groupSenderId = String(lastMessage?.sender?._id || lastMessage?.sender || "");
     const isSentByMe = myId && groupSenderId && groupSenderId === myId;
 
@@ -1504,7 +1532,7 @@ const ChatPage = ({ embedded = false }) => {
         setIsPinModalOpen(true);
         return;
       }
-      if (unreadCount > 0) {
+      if (!readOnly && unreadCount > 0) {
         clearChatUnread(item.id).catch((err) =>
           console.error("Failed to mark chat read:", err)
         );
@@ -1558,7 +1586,7 @@ const ChatPage = ({ embedded = false }) => {
                     {unreadCount > 99 ? "99+" : unreadCount}
                   </span>
                 )}
-                <ChatRowMenuButton item={item} onOpen={openChatMenu} />
+                {!readOnly && <ChatRowMenuButton item={item} onOpen={openChatMenu} />}
               </div>
             </div>
           </div>
@@ -1626,8 +1654,8 @@ const ChatPage = ({ embedded = false }) => {
         title: "No groups yet",
         description: "Create a group to start chatting with multiple people.",
         icon: <Users className="w-12 h-12 text-neutral-400" strokeWidth={1.8} />,
-        actionLabel: "Create a Group",
-        action: () => navigate("/create-group"),
+        actionLabel: readOnly ? null : "Create a Group",
+        action: readOnly ? null : () => navigate("/create-group"),
         actionIcon: <Users className="w-5 h-5" strokeWidth={2} />,
       };
     }
@@ -1676,6 +1704,14 @@ const ChatPage = ({ embedded = false }) => {
       };
     }
 
+    if (readOnly) {
+      return {
+        title: "No conversations",
+        description: "This AI account has no conversations to show yet.",
+        icon: <MessageCircle className="w-12 h-12 text-neutral-400" strokeWidth={1.8} />,
+      };
+    }
+
     return {
       title: "Start a conversation",
       description:
@@ -1685,7 +1721,7 @@ const ChatPage = ({ embedded = false }) => {
       action: handleStartConversation,
       actionIcon: <Icons.search className="w-5 h-5" strokeColor="#404040" />,
     };
-  }, [activeFilter, navigate, sortedCustomCategories]);
+  }, [activeFilter, navigate, readOnly, sortedCustomCategories]);
 
   const renderEmptyState = () => {
     const config = getEmptyStateConfig();
@@ -1711,6 +1747,7 @@ const ChatPage = ({ embedded = false }) => {
 
   const openTabMenu = (event, tabItem, isFixed = false) => {
     event.preventDefault();
+    if (readOnly) return;
     const rect = event.currentTarget?.getBoundingClientRect?.();
     setTabMenu({
       category: tabItem,
@@ -1721,6 +1758,7 @@ const ChatPage = ({ embedded = false }) => {
   };
 
   const handleCategoryLongPressStart = (event, tabItem, isFixed = false) => {
+    if (readOnly) return;
     if (tabLongPressTimerRef.current) clearTimeout(tabLongPressTimerRef.current);
     const touch = event.touches?.[0];
     const rect = event.currentTarget?.getBoundingClientRect?.();
@@ -1795,12 +1833,14 @@ const ChatPage = ({ embedded = false }) => {
   );
 
   const handleCategoryDragStart = (event, categoryId) => {
+    if (readOnly) return;
     setDraggingCategoryId(categoryId);
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.setData("text/plain", categoryId);
   };
 
   const handleCategoryDragOver = (event, categoryId) => {
+    if (readOnly) return;
     event.preventDefault();
     if (dragOverCategoryId !== categoryId) {
       setDragOverCategoryId(categoryId);
@@ -1809,6 +1849,7 @@ const ChatPage = ({ embedded = false }) => {
   };
 
   const handleCategoryDrop = async (event, categoryId) => {
+    if (readOnly) return;
     event.preventDefault();
     const sourceCategoryId = event.dataTransfer.getData("text/plain") || draggingCategoryId;
     await reorderCategoriesByIds(sourceCategoryId, categoryId);
@@ -1995,14 +2036,16 @@ const ChatPage = ({ embedded = false }) => {
               {category.name}
             </button>
           ))}
-          <button
-            type="button"
-            onClick={() => setIsCategoryModalOpen(true)}
-            className="w-9 h-9 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center shrink-0 hover:border-neutral-600 cursor-pointer"
-            title="Create category"
-          >
-            <Icons.plus className="w-4 h-4" />
-          </button>
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={() => setIsCategoryModalOpen(true)}
+              className="w-9 h-9 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center shrink-0 hover:border-neutral-600 cursor-pointer"
+              title="Create category"
+            >
+              <Icons.plus className="w-4 h-4" />
+            </button>
+          )}
         </div>
         <ResponsiveMenu
           open={isFilterDropdownOpen}
@@ -2069,6 +2112,7 @@ const ChatPage = ({ embedded = false }) => {
               </div>
             )}
 
+            {!readOnly && (
             <div className="bg-neutral-950 border border-neutral-800 rounded-lg mt-2 overflow-hidden">
               <div className="p-4 border-b border-neutral-800 flex items-center">
                 <Icons.search className="w-5 h-5 mr-2 " strokeColor="#404040" />
@@ -2100,6 +2144,13 @@ const ChatPage = ({ embedded = false }) => {
                 </div>
               )}
             </div>
+            )}
+
+            {readOnly && matchingChats.length === 0 && (
+              <div className="mt-4 rounded-lg border border-neutral-800 p-4 text-center text-neutral-400">
+                No conversations found matching "{searchQuery}"
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -2157,7 +2208,7 @@ const ChatPage = ({ embedded = false }) => {
       </main>
 
       <CreatePost isOpen={isCreateModalOpen} onClose={closeCreateModal} />
-      {isCategoryModalOpen && (
+      {!readOnly && isCategoryModalOpen && (
         <ResponsiveSheet title="New list" onClose={closeCategorySheet}>
           <div className="p-5">
         {/* Says what will happen, because it isn't obvious that naming a list here
@@ -2199,7 +2250,7 @@ const ChatPage = ({ embedded = false }) => {
       )}
       {/* Guarded outside the menu too: JSX children are evaluated eagerly, so
           the rows below would dereference a null tabMenu while it's closed. */}
-      {tabMenu?.category && (
+      {!readOnly && tabMenu?.category && (
       <ResponsiveMenu
         open={Boolean(tabMenu?.category)}
         onClose={() => setTabMenu(null)}
@@ -2248,7 +2299,7 @@ const ChatPage = ({ embedded = false }) => {
         </div>
       </ResponsiveMenu>
       )}
-      {activeMenuItem && (
+      {!readOnly && activeMenuItem && (
       <ResponsiveMenu
         open={Boolean(activeMenuItem)}
         onClose={() => setChatMenu(null)}
@@ -2449,7 +2500,7 @@ const ChatPage = ({ embedded = false }) => {
         separate sheet also gives it a title and a back-out, and means creating a list
         from here can hand the chat over to the naming sheet.
       */}
-      {listSheetItem && (
+      {!readOnly && listSheetItem && (
         <ResponsiveSheet
           title={listSheetItem.categoryId ? "Change list" : "Add to list"}
           onClose={() => setListSheetItem(null)}
@@ -2500,7 +2551,7 @@ const ChatPage = ({ embedded = false }) => {
           </div>
         </ResponsiveSheet>
       )}
-      {isPinModalOpen && (
+      {!readOnly && isPinModalOpen && (
         <ResponsiveSheet title="Chat lock" onClose={closePinModal}>
           <div className="p-5">
             <h3 className="text-lg font-semibold mb-3">
@@ -2593,7 +2644,7 @@ const ChatPage = ({ embedded = false }) => {
           </div>
         </ResponsiveSheet>
       )}
-      {deleteTarget && (
+      {!readOnly && deleteTarget && (
         <ConfirmDialog
           title={`Delete your chat with ${
             deleteTarget.data?.user?.name || deleteTarget.data?.user?.username
@@ -2608,7 +2659,7 @@ const ChatPage = ({ embedded = false }) => {
         </ConfirmDialog>
       )}
 
-      {categoryToDelete && (
+      {!readOnly && categoryToDelete && (
         <ConfirmDialog
           title={`Delete the "${categoryToDelete.name}" list?`}
           confirmLabel="Delete"
