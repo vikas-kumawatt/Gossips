@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "//build": "The smoke test is chained on purpose: a chunk split once passed `vite build`, deployed, and white-screened every visitor. Exit code 0 from the bundler says the files were written, not that they run. Drop `&& npm run verify:build` to un-gate deploys.",
+    "build": "vite build && npm run verify:build",
+    "verify:build": "node scripts/smoke-build.mjs",
     "lint": "eslint .",
     "preview": "vite preview"
   },
@@ -43,6 +45,7 @@
     "eslint-plugin-react-hooks": "^5.1.0",
     "eslint-plugin-react-refresh": "^0.4.19",
     "globals": "^15.15.0",
+    "jsdom": "^30.0.1",
     "prettier": "^3.5.2",
     "prettier-plugin-tailwindcss": "^0.6.11",
     "vite": "^6.2.0",

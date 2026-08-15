@@ -4,3 +4,5 @@ node_modules/
 
 # Firebase service account private keys
 *-firebase-adminsdk-*.json
+
+.claude

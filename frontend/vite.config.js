@@ -68,59 +68,35 @@ export default defineConfig({
          * code, so a returning visitor re-downloads only the small entry chunk after a deploy
          * instead of two megabytes.
          *
-         * ── Why a curated list rather than one `vendor` chunk ───────────────
+         * ── One vendor chunk, and why not a per-package split ───────────────
          *
-         * `if (id.includes("node_modules")) return "vendor"` is the usual one-liner and it
-         * would produce a single ~1.5 MB chunk — under the limit today, and back here in a few
-         * months. Naming the heavy packages keeps each one bounded on its own.
+         * The first attempt at this named each heavy package — `react`, `firebase`, `emoji`,
+         * `motion`, `qr` and so on — to keep every chunk small. It built cleanly, deployed,
+         * and white-screened on load:
+         *
+         *   Uncaught TypeError: Cannot read properties of undefined (reading 'memo')
+         *
+         * A package in `vendor` was calling `React.memo(...)` while evaluating, with `React`
+         * still undefined. The emitted chunk graph showed why: it contained `react -> qr`,
+         * which is nonsense as a dependency and is the fingerprint of rollup's CommonJS
+         * interop helpers being scattered. Several of these packages are CJS, so `React` does
+         * not arrive by a plain ESM import — it comes through a generated proxy module, and
+         * once those proxies and the real module land in different chunks, whether `React` is
+         * initialised by the time a consumer's top-level code runs is down to the order the
+         * browser happens to evaluate the chunks in. There was no import cycle to find; the
+         * split itself was the fault.
+         *
+         * So: every dependency in one chunk. Rollup then orders them within it, which it has
+         * always been able to do correctly, and no consumer can be evaluated before React.
+         * This is the same rule Vite's own retired `splitVendorChunkPlugin` followed.
+         *
+         * It is less tidy than eight named chunks and it is the one that works. If a single
+         * vendor chunk ever approaches the limit again, the answer is `React.lazy` on the
+         * routes that pull the weight — not another attempt to slice the dependency graph by
+         * hand.
          */
         manualChunks(id) {
-          if (!id.includes("node_modules")) return undefined;
-
-          /*
-           * The last segment, because a nested dependency's path contains `node_modules`
-           * more than once and the first match would attribute it to its parent.
-           */
-          const path = id.split("node_modules/").pop();
-          const scoped = path.startsWith("@");
-          const pkg = path.split("/").slice(0, scoped ? 2 : 1).join("/");
-
-          /*
-           * React and everything that reaches into its internals stay in one chunk.
-           *
-           * Not a size decision. Splitting `react` from `react-dom` from the router puts
-           * their module initialisation in separate chunks whose evaluation order rollup
-           * decides, and the failure mode is a blank page with "Cannot access before
-           * initialization" — at runtime, in production, not at build time.
-           */
-          if (
-            pkg === "react" ||
-            pkg === "react-dom" ||
-            pkg === "scheduler" ||
-            pkg === "react-router" ||
-            pkg === "react-router-dom"
-          ) {
-            return "react";
-          }
-
-          // Firebase is the single largest dependency, and it is used for two things:
-          // push notifications and Google sign-in.
-          if (pkg === "firebase" || pkg.startsWith("@firebase")) return "firebase";
-
-          // Each of these is heavy and reached from one screen. Named individually so a
-          // future `React.lazy` on that screen drops the chunk from the initial load without
-          // any further config.
-          if (pkg === "emoji-picker-react") return "emoji";
-          if (pkg === "swiper") return "swiper";
-          if (pkg === "jsqr" || pkg === "qrcode.react" || pkg === "qrcode-generator") return "qr";
-          if (pkg === "framer-motion" || pkg === "motion-dom" || pkg === "motion-utils") {
-            return "motion";
-          }
-          if (pkg === "socket.io-client" || pkg === "engine.io-client" || pkg === "socket.io-parser") {
-            return "socket";
-          }
-
-          return "vendor";
+          return id.includes("node_modules") ? "vendor" : undefined;
         },
       },
     },
