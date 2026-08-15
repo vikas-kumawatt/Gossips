@@ -57,6 +57,28 @@ const UserAuthForm = ({ type }) => {
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const forgotPasswordFormRef = useRef(null);
 
+  /*
+   * Hand an unfinished signup to the OTP screen.
+   *
+   * `data` carries no token: signup now answers with a verification ticket and
+   * the account does not exist until the emailed code is entered.
+   */
+  const goVerifyEmail = (data) => {
+    navigate("/verify-email", {
+      state: {
+        verificationToken: data.verificationToken,
+        email: data.email,
+        codeLength: data.codeLength,
+        expiresInSeconds: data.expiresInSeconds,
+        resendAfterSeconds: data.resendAfterSeconds,
+        // Carried through so the hard navigation below still happens on the
+        // far side of verification.
+        addingAccount: isAddingAccount,
+        from: redirectAfterAuth,
+      },
+    });
+  };
+
   const userAuthThroughServer = async (serverRoute, formData) => {
     setLoading(true);
     try {
@@ -65,6 +87,17 @@ const UserAuthForm = ({ type }) => {
         formData,
         { withCredentials: true }
       );
+
+      /*
+       * No token in this response, by design — the account exists but has not
+       * proved it owns its address. Nothing may be persisted here: `persistUser`
+       * would write a user with no token, which is how the session layer spells
+       * "signed out" and would clear the account currently signed in.
+       */
+      if (data.requiresVerification) {
+        goVerifyEmail(data);
+        return;
+      }
 
       // Also records the account in this device's switcher list.
       persistUser(data);

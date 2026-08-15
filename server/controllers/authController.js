@@ -4,8 +4,11 @@ import fs from "fs";
 import nodemailer from "nodemailer";
 
 import admin from "firebase-admin";
+import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
+import PendingSignup from "../models/PendingSignup.js";
 import User from "../models/User.js";
 import UserSession from "../models/UserSession.js";
 import UserSettings from "../models/UserSettings.js";
@@ -13,6 +16,13 @@ import { sendWelcomeNotification } from "./notificationController.js";
 import { DEFAULT_AVATAR_URL } from "../utils/constants.js";
 import { countryUpdate } from "../utils/geo.js";
 import { generateAvailableUsername } from "../utils/username.js";
+import {
+  OTP_LENGTH,
+  OTP_RE,
+  generateOtp,
+  otpMatches,
+  hashOtp as hashOtpWith,
+} from "../utils/otp.js";
 import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
 
 if (!process.env.BREVO_EMAIL || !process.env.BREVO_SMTP_KEY || !process.env.SMTP_USER) {
@@ -300,9 +310,349 @@ const EMAIL_RE = /^\w+([\.-]?\w+)*@\w+([\.-]?\w+)*(\.\w{2,3})+$/;
 const PASSWORD_RE = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/;
 const PASSWORD_MSG =
   "Password must be 6–20 characters and contain at least one digit, one uppercase, and one lowercase letter";
+// ── Email verification (signup OTP) ──────────────────────────────────────────
+/*
+ * No account exists until the code is entered. The submitted name, email and
+ * password live in `PendingSignup` — read the comment at the top of that model
+ * before changing anything here, because the reason it is not a `User` row with
+ * a flag on it is a security property, not a storage preference.
+ */
+
+const OTP_TTL_MS = 10 * 60 * 1000;
+/** Wrong guesses allowed per code, enforced atomically in `claimAttempt`. */
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
+const OTP_MAX_SENDS = 5;
+/*
+ * Outstanding attempts allowed for one address at a time.
+ *
+ * There has to be a cap — rows are keyed on email but not unique, so without one
+ * an address is an unbounded write target. It is deliberately generous relative
+ * to `signupLimit` (5/hour/IP), which is the real brake; this is here so that
+ * many IPs cannot do together what one cannot do alone.
+ */
+const MAX_PENDING_PER_EMAIL = 5;
+/*
+ * Matches `maxlength` on `User.name` and `PendingSignup.name`. Checked in the
+ * handler so an over-long name is a 400 the user can act on rather than a
+ * ValidationError surfacing as a 500.
+ */
+const MAX_NAME_LENGTH = 200;
+/*
+ * Must match `BCRYPT_COST` in models/User.js. Not imported from there because it
+ * isn't exported, and exporting it to be read here would suggest the two are free
+ * to diverge — they are not: this hash is written straight into `User.password`,
+ * so a different cost would silently produce accounts hashed unlike every other.
+ */
+const SIGNUP_BCRYPT_COST = 10;
+/*
+ * Comfortably longer than a pending row can live. Each resend pushes the row's
+ * expiry out another ten minutes, so someone who leaves it late four times over
+ * can stretch one signup to about fifty — and the ticket dying first would leave
+ * them staring at a live code the page has forgotten how to submit.
+ */
+const VERIFICATION_TICKET_EXPIRY = "90m";
+
+/*
+ * Bound to `JWT_SECRET` here so `utils/otp.js` stays pure and testable — that
+ * file cannot read the environment without becoming as untestable as this one.
+ * Rotating the secret therefore invalidates every live code as well as every
+ * live token, which is the correct behaviour for a rotation and worth knowing.
+ */
+const hashOtp = (pendingId, code) => hashOtpWith(process.env.JWT_SECRET, pendingId, code);
+
+/**
+ * The ticket that identifies a signup in progress.
+ *
+ * It is not a session and must never become one — see `isAccessToken` in config/jwt.js,
+ * which is what stops it authenticating a protected route or a socket. All it names is a
+ * `PendingSignup` row; on its own it grants nothing, because finishing still requires the
+ * code that was mailed.
+ *
+ * `sid` and not `id`: every other token in this app carries a *user* id under `id`, and
+ * these two kinds of token must not be confusable by any handler that reads a claim
+ * without checking `typ` first.
+ */
+const createVerificationTicket = (pendingId, email) =>
+  jwt.sign({ sid: String(pendingId), typ: "verify", email }, process.env.JWT_SECRET, {
+    expiresIn: VERIFICATION_TICKET_EXPIRY,
+  });
+
+const readVerificationTicket = (token) => {
+  if (typeof token !== "string" || !token) return null;
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+    // An access or refresh token presented here must not be usable as a ticket,
+    // which is the mirror image of the bug `isAccessToken` fixes.
+    if (decoded.typ !== "verify") return null;
+    if (typeof decoded.email !== "string") return null;
+    /*
+     * `sid` goes straight into an `_id` filter, and a value that isn't an ObjectId
+     * makes Mongoose throw a CastError rather than simply not match — which would
+     * surface as a 500 from the verify endpoint instead of "that code expired".
+     * Only reachable by someone who can mint tokens, but the same shape check the
+     * account routes apply to ids costs a line here too.
+     */
+    if (!/^[a-f\d]{24}$/i.test(String(decoded.sid))) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+};
+
+const otpEmailHtml = (code) => `
+  <div style="margin:0;padding:0;background-color:#fafafa;">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#fafafa;padding:40px 16px;">
+      <tr>
+        <td align="center">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:460px;">
+
+            <tr>
+              <td align="center" style="padding-bottom:20px;">
+                <img
+                  src="${process.env.FRONTEND_URL}/images/logo-light.png"
+                  alt="Gossips"
+                  width="52"
+                  height="52"
+                  style="display:block;margin:0 auto 10px;border-radius:12px;"
+                />
+                <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:#1a1a1a;letter-spacing:-0.3px;">Gossips</div>
+              </td>
+            </tr>
+
+            <tr>
+              <td style="background:#ffffff;border:1px solid #dbdbdb;border-radius:4px;padding:36px 32px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0">
+
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;font-weight:600;color:#1a1a1a;padding-bottom:14px;">
+                      Confirm your email
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:14px;color:#737373;line-height:1.75;padding-bottom:24px;">
+                      Enter this code in <strong style="color:#1a1a1a;">Gossips</strong> to finish creating your account.
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td align="center" style="padding-bottom:24px;">
+                      <div style="display:inline-block;background:#fafafa;border:1px solid #efefef;border-radius:10px;padding:18px 28px;font-family:'SF Mono',Menlo,Consolas,monospace;font-size:32px;font-weight:700;color:#1a1a1a;letter-spacing:10px;">${code}</div>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="padding-bottom:18px;">
+                      <div style="height:1px;background:#efefef;"></div>
+                    </td>
+                  </tr>
+
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;color:#8e8e8e;line-height:1.7;">
+                      This code expires in <strong style="color:#737373;">10 minutes</strong>. If you didn't try to sign up, you can ignore this email — no account has been created, and none will be without this code.
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+
+            <tr>
+              <td align="center" style="padding-top:20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:12px;color:#a8a8a8;line-height:1.6;">
+                &copy; ${new Date().getFullYear()} Gossips &middot; All rights reserved
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </div>
+`;
+
+const sendOtpEmail = (email, code) =>
+  transporter.sendMail({
+    from: process.env.BREVO_EMAIL,
+    to: email,
+    subject: `${code} is your Gossips verification code`,
+    html: otpEmailHtml(code),
+  });
+
+/** The response body that sends a client to the OTP screen. */
+const verificationPending = (pending) => ({
+  requiresVerification: true,
+  verificationToken: createVerificationTicket(pending._id, pending.email),
+  email: pending.email,
+  codeLength: OTP_LENGTH,
+  expiresInSeconds: OTP_TTL_MS / 1000,
+  resendAfterSeconds: OTP_RESEND_COOLDOWN_MS / 1000,
+});
+
+/**
+ * Take one guess off a pending signup's budget, atomically.
+ *
+ * The filter is the check. Reading `attempts` and then comparing it would leave the
+ * gate wide under concurrency — six parallel guesses all read 4, all decide they are
+ * under the limit, and the budget becomes "five plus however many requests fit in one
+ * round trip". Here the fifth `$inc` is the last one the filter admits, whatever the
+ * concurrency.
+ *
+ * @returns {Promise<{row: object, attemptsLeft: number}|null>} null when the budget is spent.
+ */
+const claimAttempt = async (pendingId) => {
+  const row = await PendingSignup.findOneAndUpdate(
+    { _id: pendingId, attempts: { $lt: OTP_MAX_ATTEMPTS } },
+    { $inc: { attempts: 1 } },
+    { new: true },
+  );
+  if (!row) return null;
+  return { row, attemptsLeft: Math.max(0, OTP_MAX_ATTEMPTS - row.attempts) };
+};
+
+/**
+ * Replace a pending signup's code and mail the new one.
+ *
+ * Throttling is reported rather than thrown so the caller can decide; `sendOtpEmail`
+ * still throws, because a code that was never delivered is a failure and not a state.
+ *
+ * @returns {Promise<{ok: true} | {ok: false, reason: "cooldown"|"exhausted", retryAfter?: number}>}
+ */
+const reissueOtp = async (pending) => {
+  const sinceLast = Date.now() - new Date(pending.lastSentAt).getTime();
+  if (sinceLast < OTP_RESEND_COOLDOWN_MS) {
+    return {
+      ok: false,
+      reason: "cooldown",
+      retryAfter: Math.ceil((OTP_RESEND_COOLDOWN_MS - sinceLast) / 1000),
+    };
+  }
+  if (pending.resendCount >= OTP_MAX_SENDS) {
+    return { ok: false, reason: "exhausted" };
+  }
+
+  const code = generateOtp();
+
+  /*
+   * The cooldown is re-checked in the filter, so two clicks that arrive together
+   * produce one email rather than two.
+   *
+   * Note what is *not* here: `attempts` is not reset. Resetting it reads as the
+   * obvious thing — the budget belongs to the code, and this is a new code — but
+   * it makes the guess budget `OTP_MAX_ATTEMPTS × OTP_MAX_SENDS` rather than
+   * `OTP_MAX_ATTEMPTS`, and it is the attacker who decides when to resend. Five
+   * guesses is the budget for the row, and the row is what an attacker has to
+   * keep paying `signupLimit` to replace.
+   */
+  const updated = await PendingSignup.findOneAndUpdate(
+    {
+      _id: pending._id,
+      lastSentAt: { $lte: new Date(Date.now() - OTP_RESEND_COOLDOWN_MS) },
+      resendCount: { $lt: OTP_MAX_SENDS },
+    },
+    {
+      $set: {
+        codeHash: hashOtp(pending._id, code),
+        lastSentAt: new Date(),
+        expiresAt: new Date(Date.now() + OTP_TTL_MS),
+      },
+      $inc: { resendCount: 1 },
+    },
+    { new: true },
+  );
+
+  if (!updated) {
+    // Lost the race, or the row expired between the read and here. Either way a
+    // code is already in flight and asking again immediately is the wrong answer.
+    return { ok: false, reason: "cooldown", retryAfter: 1 };
+  }
+
+  await sendOtpEmail(updated.email, code);
+  return { ok: true };
+};
+
+/**
+ * Begin a signup: store the credentials, mail a code, hand back the row.
+ *
+ * Shared by the two ways in — a brand-new address, and a Google-only account
+ * setting its first password — because they differ in one field (`user`) and
+ * must not differ in anything else. The takeover this feature exists to prevent
+ * was, in the end, one of those two paths quietly skipping the code.
+ *
+ * @param {string|null} [args.user] account to attach the password to on success;
+ *        null means "create one".
+ * @returns {Promise<{ok: true, row: object} | {ok: false, status: number, error: string}>}
+ */
+const startPendingSignup = async ({ name, email, password, user = null }) => {
+  const address = String(email).toLowerCase();
+
+  /*
+   * Bound the codes in flight for one address — each is somebody's inbox getting
+   * mail they may not have asked for.
+   *
+   * The oldest is evicted rather than the newest rejected, and that direction is
+   * the whole point. Rejecting caps the address, which means five requests from
+   * one IP lock the real owner out of registering entirely for ten minutes and
+   * keep doing so for as long as anyone cares to pay for it — trading the squat
+   * this design removed for a cheaper one. Evicting holds the same ceiling
+   * without ever telling a genuine signup no, and it makes the count advisory,
+   * so the read-then-write below cannot fail in a way that matters: overshoot by
+   * a request or two and the next call trims it back.
+   */
+  const live = await PendingSignup.find({ email: address, expiresAt: { $gt: new Date() } })
+    .sort({ createdAt: 1 })
+    .select("_id")
+    .lean();
+  const excess = live.length - (MAX_PENDING_PER_EMAIL - 1);
+  if (excess > 0) {
+    await PendingSignup.deleteMany({ _id: { $in: live.slice(0, excess).map((r) => r._id) } });
+  }
+
+  /*
+   * Hashed now, and stored nowhere else.
+   *
+   * The row lives for ten minutes holding a password for an account that may not
+   * exist yet. People reuse passwords, so keeping it in plaintext for those ten
+   * minutes would be a credential leak for other sites even though nothing here
+   * could be signed into.
+   */
+  const passwordHash = await bcrypt.hash(password, SIGNUP_BCRYPT_COST);
+  const code = generateOtp();
+
+  // The id is minted here rather than read back from the insert, because the
+  // code's HMAC is bound to it — a two-step create-then-save would leave a row
+  // holding a placeholder hash if the second write failed.
+  const _id = new mongoose.Types.ObjectId();
+
+  const row = await PendingSignup.create({
+    _id,
+    user,
+    name,
+    email: address,
+    passwordHash,
+    codeHash: hashOtp(_id, code),
+    expiresAt: new Date(Date.now() + OTP_TTL_MS),
+    resendCount: 1,
+  });
+
+  try {
+    await sendOtpEmail(address, code);
+  } catch (error) {
+    // The mail didn't go, so drop the row rather than leave it holding a code
+    // nobody received and a slot nobody can use.
+    console.error("startPendingSignup: verification email failed:", error?.code ?? error?.name);
+    await PendingSignup.deleteOne({ _id: row._id });
+    return {
+      ok: false,
+      status: 502,
+      error: "Couldn't send the verification email. Please try again.",
+    };
+  }
+
+  return { ok: true, row };
+};
 
 // ── Auth handlers ─────────────────────────────────────────────────────────────
-
 export const signupUser = async (req, res) => {
   try {
     const { name, email, password } = req.body;
@@ -326,34 +676,59 @@ export const signupUser = async (req, res) => {
       "+googleId +password",
     );
 
-    // Google-linked account adding a password for the first time
     if (existingUser) {
+      /*
+       * A Google-linked account setting a password for the first time.
+       *
+       * This branch used to write the password straight onto the account and
+       * return a session — an unauthenticated takeover of any Google-only user
+       * whose address you could guess, in one request. The justification was
+       * that Google had already proved the address, which is true and beside
+       * the point: it says the *account owner* controls that mailbox, and says
+       * nothing at all about who is sending this POST.
+       *
+       * So it goes through the same code as any other signup. The difference is
+       * only that the pending row names an existing account to attach to
+       * (`user`) rather than an account to create, and the code proves the
+       * sender can read mail at an address the account already holds.
+       */
       if (existingUser.googleId && !existingUser.password) {
         if (!password || !PASSWORD_RE.test(password)) {
           return res.status(400).json({ message: PASSWORD_MSG });
         }
-        existingUser.password = password; // pre-save hook hashes it
-        existingUser.name = name || existingUser.name;
-        await existingUser.save();
 
-        const token = await issueAuthTokens(existingUser._id, res, {
-          deviceId: requestDeviceId(req),
-        });
-        return res.status(200).json({
-          message: "Account updated successfully",
-          id: existingUser._id,
-          name: existingUser.name,
+        const pending = await startPendingSignup({
+          name: name || existingUser.name || existingUser.username,
           email: existingUser.email,
-          username: existingUser.username,
-          profilePic: existingUser.profilePic,
-          token,
+          password,
+          user: existingUser._id,
+        });
+        if (!pending.ok) return res.status(pending.status).json({ error: pending.error });
+
+        return res.status(200).json({
+          message: "Verification code sent",
+          ...verificationPending(pending.row),
         });
       }
+
+      /*
+       * An account already owns this address, so there is nothing to verify and
+       * nothing here may touch it. Unchanged from before OTP: this endpoint has
+       * never been able to modify an existing password-holding account, and the
+       * whole point of keeping pending signups out of `users` is that it still
+       * can't.
+       */
       return res.status(400).json({ message: "User already exists" });
     }
 
     if (!name || !email || !password) {
       return res.status(400).json({ message: "Please fill in all fields" });
+    }
+    if (typeof name !== "string" || name.length > MAX_NAME_LENGTH) {
+      // Checked here rather than left to the schema: a `maxlength` violation
+      // arrives as a ValidationError and would surface as a 500 "Server error"
+      // on a field the user can see and fix.
+      return res.status(400).json({ message: "That name is too long" });
     }
     if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ message: "Invalid email" });
@@ -362,35 +737,17 @@ export const signupUser = async (req, res) => {
       return res.status(400).json({ message: PASSWORD_MSG });
     }
 
-    const username = await generateUniqueUsername(email.split("@")[0]);
+    const pending = await startPendingSignup({ name, email, password });
+    if (!pending.ok) return res.status(pending.status).json({ error: pending.error });
 
-    const newUser = await User.create({
-      name,
-      email,
-      password, // pre-save hook hashes it
-      username,
-      profilePic: DEFAULT_AVATAR_URL,
-    });
-
-    // Provision default settings row (1:1 with user)
-    await UserSettings.create({ user: newUser._id });
-
-    await sendWelcomeNotification(newUser._id);
-
-    recordSignInCountry(req, newUser._id);
-
-    const token = await issueAuthTokens(newUser._id, res, {
-      deviceId: requestDeviceId(req),
-    });
+    /*
+     * No account, no settings row, no session — only a ticket naming the pending
+     * row. Everything is created in `verifyOtp`, once the code proves that
+     * whoever submitted this address can read mail sent to it.
+     */
     return res.status(201).json({
-      message: "User registered successfully",
-      id: newUser._id,
-      name: newUser.name,
-      email: newUser.email,
-      username: newUser.username,
-      profilePic: newUser.profilePic,
-      role: newUser.role,
-      token,
+      message: "Verification code sent",
+      ...verificationPending(pending.row),
     });
   } catch (error) {
     console.error("signupUser error:", error);
@@ -448,6 +805,18 @@ export const loginUser = async (req, res) => {
       return res.status(400).json({ error: "Invalid credentials" });
     }
 
+    /*
+     * No email-verification gate here, and that is a property of the design
+     * rather than an omission.
+     *
+     * A row in `users` only exists once its code was entered, so "signed up but
+     * unverified" is not a state this query can return — an abandoned signup
+     * lives in `PendingSignup` and is found by nothing above, which is why the
+     * answer to it is the same "User not found. Please register." it has always
+     * been. Had pending signups been kept as unverified `User` rows, this is
+     * exactly where the gate would have had to go, and forgetting it would have
+     * made the whole verification screen decorative.
+     */
     recordSignInCountry(req, user._id);
 
     const token = await issueAuthTokens(user._id, res, {
@@ -481,6 +850,29 @@ export const googleLogin = async (req, res) => {
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     let { email, name, picture } = decodedToken;
 
+    /*
+     * Google says it verified this address, not merely that it issued a token.
+     *
+     * `verifyIdToken` proves the token came from *our Firebase project* — it says
+     * nothing about who owns the mailbox in the `email` claim. The lookup below
+     * then attaches this identity to whatever account holds that address, so a
+     * token from any other provider enabled on the project, present or future,
+     * carrying an arbitrary claimed email would be an account takeover.
+     *
+     * That was survivable while nothing depended on it. It isn't now: this path
+     * is the one exception to "no session without a proved address", and an
+     * exception has to actually check the thing it claims. The web client uses
+     * `GoogleAuthProvider` only, so this rejects nothing that works today.
+     */
+    if (!decodedToken.email_verified) {
+      return res.status(403).json({
+        error: "Your Google account's email address isn't verified.",
+      });
+    }
+    if (typeof email !== "string" || !email) {
+      return res.status(400).json({ error: "Google authentication failed" });
+    }
+
     if (picture) {
       picture = picture.replace("s96-c", "s1024-c");
     }
@@ -505,6 +897,10 @@ export const googleLogin = async (req, res) => {
         googleId: decodedToken.uid,
         username: await generateUniqueUsername(email.split("@")[0]),
         profilePic: picture || DEFAULT_AVATAR_URL,
+        // Google verified the address as a condition of issuing the token we
+        // just checked. Leaving this false would make the account look pending
+        // to every check added from here on.
+        isEmailVerified: true,
       });
       await UserSettings.create({ user: user._id });
     } else {
@@ -515,11 +911,21 @@ export const googleLogin = async (req, res) => {
           $set: {
             googleId: decodedToken.uid,
             profilePic: picture || user.profilePic,
+            // Google has now proved the address, whatever the row said before.
+            isEmailVerified: true,
           },
         },
       );
       user.profilePic = picture || user.profilePic;
     }
+
+    /*
+     * Any email signup still in flight for this address is moot — the account it
+     * would have created now exists, and its code would only ever produce a
+     * "that email is already registered" a few minutes from now. Dropping the
+     * rows also returns the address's share of `MAX_PENDING_PER_EMAIL`.
+     */
+    await PendingSignup.deleteMany({ email: user.email });
 
     recordSignInCountry(req, user._id);
 
@@ -546,6 +952,278 @@ export const googleLogin = async (req, res) => {
   } catch (error) {
     console.error("googleLogin error:", error);
     res.status(500).json({ error: "Google authentication failed" });
+  }
+};
+/**
+ * POST /auth/verify-otp — spend the emailed code, create the account, sign in.
+ *
+ * This is the only place a `User` is created by the email/password flow, which is
+ * the point: until the code is entered there is nothing to attack, and every check
+ * that would otherwise be spread across signup, login, refresh and the socket
+ * handshake collapses into the few below.
+ */
+export const verifyOtp = async (req, res) => {
+  try {
+    const { token, code } = req.body;
+
+    const ticket = readVerificationTicket(token);
+    if (!ticket) {
+      return res.status(401).json({
+        error: "This verification session has expired. Please sign up again.",
+        expired: true,
+      });
+    }
+
+    const submitted = typeof code === "string" ? code.trim() : "";
+    if (!OTP_RE.test(submitted)) {
+      return res.status(400).json({ error: `Enter the ${OTP_LENGTH}-digit code` });
+    }
+
+    /*
+     * Take the guess off the budget *before* looking at the code, and let the
+     * update's own filter be the limit check. Reading `attempts` and comparing it
+     * here would leave the gate open under concurrency: parallel guesses all read
+     * the same value, all decide they are under the limit, and the budget becomes
+     * "five, plus however many requests fit in one round trip".
+     */
+    const claim = await claimAttempt(ticket.sid);
+    if (!claim) {
+      /*
+       * Either the budget is spent or the row is gone — expired, already used, or
+       * never existed because `sid` was invented. One answer for all of them: this
+       * endpoint should not report whether a given pending signup exists.
+       */
+      const stillThere = await PendingSignup.exists({ _id: ticket.sid });
+      return stillThere
+        ? res.status(429).json({
+            error: "Too many incorrect codes. Request a new one.",
+            locked: true,
+          })
+        : res.status(410).json({
+            error: "That code has expired. Request a new one.",
+            codeExpired: true,
+          });
+    }
+
+    const pending = claim.row;
+
+    /*
+     * Expiry is checked here as well as by the TTL index. Mongo's TTL monitor runs
+     * about once a minute, so between the deadline and the sweep the row is still
+     * readable — and a code that works for up to a minute past its stated life has
+     * a longer life than the one stated.
+     *
+     * The email is checked against the ticket too. They are written together and
+     * neither is mutable today, so this can't currently diverge; it costs a
+     * comparison and it is what keeps the ticket bound to one address if an
+     * "edit your email" affordance is ever added to the OTP screen.
+     */
+    if (pending.expiresAt <= new Date() || pending.email !== ticket.email) {
+      return res.status(410).json({
+        error: "That code has expired. Request a new one.",
+        codeExpired: true,
+      });
+    }
+
+    if (!otpMatches(pending.codeHash, hashOtp(pending._id, submitted))) {
+      const left = claim.attemptsLeft;
+      return res.status(400).json({
+        error: left
+          ? `That code isn't right. ${left} attempt${left === 1 ? "" : "s"} left.`
+          : "Too many incorrect codes. Request a new one.",
+        attemptsLeft: left,
+        locked: left === 0,
+      });
+    }
+
+    /*
+     * Correct. Spend the row first: it is what makes this code single-use, and
+     * doing it before the account is created means a double-submitted code
+     * produces one account and one "expired" rather than a duplicate-key 500.
+     */
+    const spent = await PendingSignup.findOneAndDelete({ _id: pending._id });
+    if (!spent) {
+      return res.status(410).json({
+        error: "That code has already been used.",
+        codeExpired: true,
+      });
+    }
+
+    // Whatever happens below, every other code in flight for this address is
+    // moot — the address is about to be settled one way or the other.
+    await PendingSignup.deleteMany({ email: pending.email });
+
+    let user;
+
+    if (pending.user) {
+      /*
+       * Attaching a first password to an account that already exists — the
+       * Google-only case. The account is looked up again rather than trusted
+       * from the row: ten minutes have passed, and it may since have been
+       * deleted, or have gained a password by another route, in which case this
+       * must not overwrite it.
+       */
+      user = await User.findOne({ _id: pending.user, ...HUMAN_ACCOUNT }).select("+password");
+      if (!user || ["deleted", "deactivated"].includes(user.accountStatus)) {
+        return res.status(410).json({
+          error: "That account is no longer available.",
+          expired: true,
+        });
+      }
+      if (user.password) {
+        return res.status(409).json({
+          error: "That account already has a password. Please log in.",
+          alreadyVerified: true,
+        });
+      }
+
+      await User.updateOne(
+        { _id: user._id, password: { $exists: false } },
+        { $set: { password: pending.passwordHash, name: pending.name, isEmailVerified: true } },
+      );
+    } else {
+      /*
+       * Somebody may have taken the address in the ten minutes this was pending —
+       * through Google, or through a sibling pending signup that verified first.
+       * Checked here *and* caught below, because between the two there is a race
+       * that only the unique index can settle.
+       */
+      const taken = await User.findOne({ email: pending.email, ...HUMAN_ACCOUNT }).select("_id");
+      if (taken) {
+        return res.status(409).json({
+          error: "That email is already registered. Please log in.",
+          alreadyVerified: true,
+        });
+      }
+
+      try {
+        user = await User.create({
+          name: pending.name,
+          email: pending.email,
+          username: await generateUniqueUsername(pending.email.split("@")[0]),
+          profilePic: DEFAULT_AVATAR_URL,
+          isEmailVerified: true,
+        });
+      } catch (error) {
+        if (error?.code === 11000) {
+          return res.status(409).json({
+            error: "That email is already registered. Please log in.",
+            alreadyVerified: true,
+          });
+        }
+        throw error;
+      }
+
+      /*
+       * The password and the settings row go on after the account, and both are
+       * inside the rollback.
+       *
+       * The password is a second write deliberately: it is already bcrypted — it
+       * was hashed at signup so it never sat in the pending row in plaintext —
+       * and `User`'s pre-save hook hashes any modified `password`. Passing it to
+       * `create` would hash the hash, and the account could never be logged
+       * into. Teaching the hook to recognise an already-hashed value is the
+       * tempting alternative and a worse one: it makes every future save guess
+       * at its input. `updateOne` is query middleware, so the hook doesn't run.
+       *
+       * If either write fails the account is removed rather than left behind.
+       * The pending row is already spent by this point, so a survivor would be
+       * an account its owner cannot sign into, cannot verify again (the code is
+       * gone), and cannot re-register (the address is taken) — discoverable only
+       * by guessing to try a password they were just told didn't work.
+       */
+      try {
+        await User.updateOne({ _id: user._id }, { $set: { password: pending.passwordHash } });
+        await UserSettings.create({ user: user._id });
+      } catch (error) {
+        await Promise.all([
+          User.deleteOne({ _id: user._id }),
+          UserSettings.deleteOne({ user: user._id }),
+        ]);
+        throw error;
+      }
+
+      /*
+       * Not awaited. The signup is complete and the session is about to be
+       * issued; a greeting that fails to send is not a reason to fail all of
+       * that and leave the account in the unreachable state described above.
+       */
+      sendWelcomeNotification(user._id).catch((error) =>
+        console.error("verifyOtp: welcome notification failed:", error),
+      );
+    }
+
+    recordSignInCountry(req, user._id);
+
+    const accessToken = await issueAuthTokens(user._id, res, {
+      deviceId: requestDeviceId(req),
+    });
+
+    return res.status(201).json({
+      message: "Email verified",
+      id: user._id,
+      name: pending.name,
+      email: user.email,
+      username: user.username,
+      profilePic: user.profilePic,
+      role: user.role,
+      token: accessToken,
+    });
+  } catch (error) {
+    console.error("verifyOtp error:", error);
+    return res.status(500).json({ error: "Server error" });
+  }
+};
+
+/**
+ * POST /auth/resend-otp — mail a fresh code for a signup already in progress.
+ *
+ * Requires the ticket, so it cannot mail codes to addresses the caller hasn't just
+ * submitted and isn't a spam vector on its own. The per-row cooldown and send cap in
+ * `reissueOtp` are what stop somebody holding a valid ticket from making it one.
+ */
+export const resendOtp = async (req, res) => {
+  try {
+    const ticket = readVerificationTicket(req.body?.token);
+    if (!ticket) {
+      return res.status(401).json({
+        error: "This verification session has expired. Please sign up again.",
+        expired: true,
+      });
+    }
+
+    const pending = await PendingSignup.findOne({ _id: ticket.sid });
+    if (!pending || pending.expiresAt <= new Date() || pending.email !== ticket.email) {
+      return res.status(410).json({
+        error: "This signup has expired. Please sign up again.",
+        expired: true,
+      });
+    }
+
+    const sent = await reissueOtp(pending);
+    if (!sent.ok) {
+      if (sent.reason === "cooldown") {
+        return res.status(429).json({
+          error: `Please wait ${sent.retryAfter}s before asking for another code.`,
+          retryAfter: sent.retryAfter,
+        });
+      }
+      return res.status(429).json({
+        error: "Too many codes requested. Please sign up again in a little while.",
+        exhausted: true,
+      });
+    }
+
+    return res.status(200).json({
+      message: "A new code is on its way",
+      codeLength: OTP_LENGTH,
+      expiresInSeconds: OTP_TTL_MS / 1000,
+      resendAfterSeconds: OTP_RESEND_COOLDOWN_MS / 1000,
+    });
+  } catch (error) {
+    // Log the shape, not the body — a mail transport error can echo the address.
+    console.error("resendOtp error:", error?.code ?? error?.name);
+    return res.status(500).json({ error: "Failed to send a new code" });
   }
 };
 

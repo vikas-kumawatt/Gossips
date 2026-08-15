@@ -123,6 +123,15 @@ const userSchema = new Schema(
 
     phoneNumber:      { type: String, sparse: true, index: true },
     isPhoneVerified:  { type: Boolean, default: false },
+    /*
+     * True for every account created after signup OTP shipped: a row only exists
+     * here once its code has been entered. See models/PendingSignup.js for why
+     * there is no such thing as an unverified `User`.
+     *
+     * Still `false` on accounts that predate the feature, where nothing ever
+     * wrote it — so the flag is *not* a safe thing to gate on today, and nothing
+     * does. Anything that starts reading it needs those rows backfilled first.
+     */
     isEmailVerified:  { type: Boolean, default: false },
 
     // ── Verification & visibility ─────────────────────────────

@@ -1,6 +1,6 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
-import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
+import { JWT_VERIFY_OPTIONS, isAccessToken } from "../config/jwt.js";
 
 // Attaches req.user if a valid Bearer token is present; otherwise continues unauthenticated.
 export const optionalProtect = async (req, res, next) => {
@@ -10,7 +10,7 @@ export const optionalProtect = async (req, res, next) => {
       const token = authHeader.split(" ")[1];
       try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
-        if (decoded.typ !== "refresh") {
+        if (isAccessToken(decoded)) {
           const user = await User.findById(decoded.id).select("-password");
           if (user) req.user = user;
         }
@@ -43,10 +43,11 @@ export const protect = async (req, res, next) => {
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
     }
 
-    // A refresh token must not authenticate ordinary requests — it outlives
-    // suspensions and forced sign-outs by days. Tokens issued before the `typ`
-    // claim existed have no `typ`, so only an explicit "refresh" is rejected.
-    if (decoded.typ === "refresh") {
+    // Only an access token authenticates an ordinary request. A refresh token
+    // outlives suspensions and forced sign-outs by days; an email-verification
+    // ticket belongs to an account that has not proved it owns its address.
+    // See `isAccessToken` for why this is an allow-list.
+    if (!isAccessToken(decoded)) {
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
     }
 

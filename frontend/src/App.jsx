@@ -20,6 +20,7 @@ import PostPage from "./pages/PostPage.jsx";
 import SavedPostsPage from "./pages/SavedPostsPage.jsx";
 import SettingsPage from "./pages/SettingsPage.jsx";
 import ResetPassword from "./pages/ResetPassword.jsx";
+import VerifyOtpPage from "./pages/VerifyOtpPage.jsx";
 import LikedPostsPage from "./pages/LikedPostsPage.jsx";
 import ChatPage from "./pages/ChatPage.jsx";
 import UserConversationPage from "./pages/UserConversationPage.jsx";
@@ -207,6 +208,10 @@ function App() {
               />
               <Route path="signup" element={<UserAuthForm type="signup" />} />
               <Route path="login" element={<UserAuthForm type="login" />} />
+              {/* Not a ProtectedRoute — the whole point is that there is no
+                  session yet. It guards itself: without a verification ticket
+                  in navigation state or sessionStorage it redirects to signup. */}
+              <Route path="verify-email" element={<VerifyOtpPage />} />
               {/* Before the ":profileId" catch-all, and "tag" is on the
                   reserved-username list so it can never be a real profile. */}
               <Route

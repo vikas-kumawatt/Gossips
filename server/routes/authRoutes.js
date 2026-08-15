@@ -2,6 +2,8 @@ import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import {
   signupUser,
+  verifyOtp,
+  resendOtp,
   loginUser,
   googleLogin,
   forgotPassword,
@@ -63,7 +65,42 @@ const forgotPasswordLimit = rateLimit({
   legacyHeaders: false,
 });
 
+/*
+ * The real budget lives on the `PendingSignup` row: five wrong codes for the life
+ * of that row, whatever it is resent, plus five sends. These are the per-IP
+ * budgets on top, and they exist for a different attacker — one holding many
+ * tickets rather than hammering one.
+ *
+ * Deliberately loose enough not to punish a real person. Someone mistyping a code
+ * on a phone and then asking for a new one uses maybe six requests; the row's own
+ * counters stop them long before these do.
+ */
+const otpVerifyLimit = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: { error: "Too many attempts, please try again later" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const otpResendLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many codes requested, please try again later" },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 router.post("/signup", signupLimit, requireRegistrationsOpen, signupUser);
+/*
+ * Not behind `requireRegistrationsOpen`. Closing signups should stop new ones
+ * starting, not strand the people already holding a code — and the account this
+ * finishes was created while registrations were open.
+ */
+// `sameOriginOnly` because verify-otp sets the session cookies. Signup and login
+// predate that guard; new cookie-setting routes get it.
+router.post("/verify-otp", sameOriginOnly, otpVerifyLimit, verifyOtp);
+router.post("/resend-otp", sameOriginOnly, otpResendLimit, resendOtp);
 router.post("/login", loginLimit, loginUser);
 router.post("/googlelogin", loginLimit, googleLogin);
 router.post("/forgot-password", forgotPasswordLimit, forgotPassword);
