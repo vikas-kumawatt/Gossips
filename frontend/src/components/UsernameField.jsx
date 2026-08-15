@@ -24,12 +24,28 @@ import {
  * Availability is checked while you type, but that answer is only a hint: the
  * name can go in the seconds before you submit, so the server checks again and
  * the unique index has the last word.
+ *
+ * ── Renaming a bot ──────────────────────────────────────────────────────────
+ *
+ * `botId` points the whole thing at one of your AI accounts instead of at you.
+ * The same component and the same three endpoints, because a bot's handle is a
+ * handle: it can be squatted, it appears in mentions and links, and renaming it
+ * repeatedly is exactly the impersonation move the quota exists to slow down. A
+ * separate simpler control for bots would have been a way to skip all of that.
+ *
+ * Only the wording changes, and `onRenamed` replaces the `userAuth` write —
+ * there is no session to keep in step when the account being renamed isn't the
+ * one signed in.
+ *
+ * @param {string}   [botId]     rename this AI account rather than yourself
+ * @param {Function} [onRenamed] called with the new handle; owns the aftermath
  */
 
 const DEBOUNCE_MS = 400;
 
-const UsernameField = () => {
+const UsernameField = ({ botId = null, onRenamed = null }) => {
   const { userAuth, setUserAuth } = useContext(UserContext);
+  const isBot = Boolean(botId);
 
   const [status, setStatus] = useState(null);
   const [value, setValue] = useState("");
@@ -44,7 +60,7 @@ const UsernameField = () => {
   useEffect(() => {
     let cancelled = false;
     userAPI
-      .getUsernameStatus()
+      .getUsernameStatus(botId)
       .then((data) => {
         if (cancelled) return;
         setStatus(data);
@@ -58,9 +74,11 @@ const UsernameField = () => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [botId]);
 
-  const current = status?.username || userAuth?.username || "";
+  // No `userAuth` fallback for a bot — that would show *your* handle in a field
+  // that renames something else, which is the one mistake here that writes.
+  const current = status?.username || (isBot ? "" : userAuth?.username) || "";
   const changed = Boolean(status) && value !== current;
   const formatError = changed ? validateUsernameFormat(value) : null;
   const locked = Boolean(status) && status.remaining <= 0;
@@ -85,7 +103,7 @@ const UsernameField = () => {
 
     const timer = setTimeout(() => {
       userAPI
-        .checkUsername(value, controller.signal)
+        .checkUsername(value, controller.signal, botId)
         .then((data) => {
           if (controller.signal.aborted) return;
           setCheck(data);
@@ -105,7 +123,7 @@ const UsernameField = () => {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [value, changed, formatError, locked]);
+  }, [value, changed, formatError, locked, botId]);
 
   const handleChange = (event) => {
     // Normalising as you type rather than rejecting keystrokes: handles are
@@ -117,7 +135,7 @@ const UsernameField = () => {
   const handleConfirm = async () => {
     setSaving(true);
     try {
-      const result = await userAPI.changeUsername(value);
+      const result = await userAPI.changeUsername(value, botId);
 
       setStatus({
         username: result.username,
@@ -133,9 +151,16 @@ const UsernameField = () => {
       setCheck(null);
       setConfirming(false);
 
-      // Keeps the header, the "Edit profile" link and every /:username route
-      // pointing at the account rather than at a name it no longer has.
-      setUserAuth({ ...userAuth, username: result.username });
+      if (isBot) {
+        // Nothing of yours moved, so the session is left alone. The caller owns
+        // the aftermath — the bot page has a header and a "View profile" link
+        // still pointing at the old handle.
+        onRenamed?.(result.username);
+      } else {
+        // Keeps the header, the "Edit profile" link and every /:username route
+        // pointing at the account rather than at a name it no longer has.
+        setUserAuth({ ...userAuth, username: result.username });
+      }
       toast.success("Username updated");
     } catch (error) {
       setConfirming(false);
@@ -147,7 +172,7 @@ const UsernameField = () => {
 
   const hint = (() => {
     if (locked)
-      return `You've used all ${status.limit} changes for now. You can change it again ${
+      return `${isBot ? "This bot has" : "You've"} used all ${status.limit} changes for now. It can change again ${
         untilLabel(status.nextAllowedAt) || "soon"
       }.`;
     if (formatError) return formatError;
@@ -205,7 +230,7 @@ const UsernameField = () => {
       {status?.changeCount > 0 && (
         <p className="mt-1 text-xs text-neutral-500">
           Changed {status.changeCount} time{status.changeCount === 1 ? "" : "s"}. Anyone can
-          see this on your profile.
+          see this on {isBot ? "its" : "your"} profile.
         </p>
       )}
 
@@ -244,12 +269,13 @@ const UsernameField = () => {
             working.
           </span>
           <span className="mt-2 block">
-            You can go back to it for the next {status?.windowDays || 14} days — nobody else
-            can take it in the meantime.
+            {isBot ? "It" : "You"} can go back to it for the next {status?.windowDays || 14}{" "}
+            days — nobody else can take it in the meantime.
           </span>
           {status?.remaining === 1 && (
             <span className="mt-2 block">
-              This is your last change for this {status.windowDays}-day window.
+              This is {isBot ? "its" : "your"} last change for this {status.windowDays}-day
+              window.
             </span>
           )}
         </ConfirmDialog>

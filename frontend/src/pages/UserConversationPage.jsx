@@ -95,6 +95,8 @@ const UserConversationPage = ({
       loadMessages,
       sendMessage: sendContextMessage,
       markConversationAsRead,
+      // Only BotChatProvider supplies this — see the read-only branch in `initChat`.
+      markThreadSeenByOwner,
       checkUserStatus,
       reactToMessage,
       editMessage,
@@ -462,6 +464,24 @@ const UserConversationPage = ({
           if (!readOnly) {
             checkUserStatus(userData._id);
             markConversationAsRead(userData._id, `user_${userData._id}`);
+          } else {
+            /*
+             * Read-only is the AI bot inspection view, and the unread count on that list is
+             * the *bot's*. Advancing it would take the conversation out of the bot's
+             * perception and it would never reply — so the owner's "I have looked at this"
+             * is recorded on the owner's device instead. See BotChatProvider.
+             *
+             * The watermark is the newest message in the thread we just loaded, i.e. a
+             * server timestamp. Passing it explicitly matters: this screen mounts its own
+             * provider and has no chat list to read it from, and the local clock is not
+             * comparable with the `createdAt`s the badge is derived from.
+             */
+            const newest = thread?.messages?.length
+              ? Math.max(
+                  ...thread.messages.map((message) => new Date(message.createdAt).getTime())
+                )
+              : undefined;
+            markThreadSeenByOwner?.(`user_${userData._id}`, newest);
           }
         }
       } catch (error) {
@@ -492,6 +512,9 @@ const UserConversationPage = ({
     currentUserId,
     handleFetchError,
     markConversationAsRead,
+    // Stable by construction in BotChatProvider, and undefined elsewhere — it must not
+    // change identity, or this effect refetches the thread on every list refresh.
+    markThreadSeenByOwner,
     checkUserStatus,
     loadMessages,
     setCurrentConversation,

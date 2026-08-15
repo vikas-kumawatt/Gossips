@@ -3,9 +3,12 @@ import Message from "../models/Message.js";
 import Follow from "../models/Follow.js";
 import Like from "../models/Like.js";
 import Repost from "../models/Repost.js";
+import Saved from "../models/Saved.js";
+import NotInterested from "../models/NotInterested.js";
 import Notification from "../models/Notification.js";
 import ConversationRead from "../models/ConversationRead.js";
 import User from "../models/User.js";
+import UserRelation from "../models/UserRelation.js";
 import { ACTIVE_ACCOUNT, blockedIdSet } from "../utils/chatAccess.js";
 import { participantsOfConversation } from "../utils/conversationActivity.js";
 import { canUserReplyToTarget } from "../utils/replyPermission.js";
@@ -38,9 +41,11 @@ import {
  * them, because those are the rules about what may be *seen* rather than about presentation.
  * A bot seeing something it shouldn't is the failure that matters here.
  *
- * The known differences, stated so nobody has to rediscover them: a bot sees no reposts, no
- * suggested accounts it doesn't follow, and no NotInterested filtering. All three are absences
- * of features a bot has no use for.
+ * The known differences, stated so nobody has to rediscover them: a bot sees no reposts, and no
+ * cursor pagination or tabs. It *does* see accounts it doesn't follow (`discoverAuthorIds`), and
+ * it does filter its own mutes and dismissals (`hiddenByBot`) — both were once absent on the
+ * grounds that a bot had no use for them, and both became necessary the moment `mute_user` and
+ * `not_interested_post` were actions a bot could take.
  */
 
 /** Posts newer than this are ignored, so a bot doesn't react to something a second old. */
@@ -48,6 +53,9 @@ const MIN_POST_AGE_MS = 60 * 1000;
 
 /** How far back a cycle looks. Older than this and it isn't news. */
 const FEED_WINDOW_MS = 48 * 60 * 60 * 1000;
+
+/** Ceiling on the `$nin` the discovery sweep sends. See `discoverAuthorIds`. */
+const MAX_EXCLUDED_AUTHORS = 300;
 
 const idsOf = (rows, field) => rows.map((row) => row[field]).filter(Boolean);
 
@@ -59,7 +67,7 @@ const idsOf = (rows, field) => rows.map((row) => row[field]).filter(Boolean);
  * hold an accepted follow edge to a private account if that account approved it, so no
  * separate visibility check is needed for them.
  */
-const visibleAuthorIds = async (botId) => {
+const visibleAuthorIds = async (botId, mutedIds = new Set()) => {
   const edges = await Follow.find({ follower: botId, status: "accepted" })
     .select("following")
     .lean();
@@ -67,18 +75,207 @@ const visibleAuthorIds = async (botId) => {
   if (!followingIds.length) return [];
 
   const blocked = await blockedIdSet(botId, followingIds);
-  return followingIds.filter((id) => !blocked.has(String(id)));
+  return followingIds.filter((id) => !blocked.has(String(id)) && !mutedIds.has(String(id)));
+};
+
+/**
+ * What this bot has chosen not to see: accounts it muted, posts it dismissed.
+ *
+ * The human feed applies both (`getHomeFeed`), and a bot's never did — which was defensible
+ * only while a bot had no way to mute or dismiss anything. Now that both are actions, leaving
+ * them out would make them visibly inert: the muted account's posts keep arriving, the
+ * dismissed post comes back next cycle, and the model has spent capped daily actions to change
+ * nothing it can perceive.
+ *
+ * Dismissed posts are capped rather than unbounded — a bot that has dismissed a thousand things
+ * should not send a thousand ids in a `$nin` on every cycle. Newest first, because the feed
+ * window is 48 hours and an older dismissal cannot match anything in it anyway.
+ */
+const DISMISSED_LOOKBACK = 200;
+
+const hiddenByBot = async (botId) => {
+  const [mutes, dismissed] = await Promise.all([
+    UserRelation.find({ from: botId, kind: "mute" }).select("to").lean(),
+    NotInterested.find({ user: botId })
+      .sort({ createdAt: -1 })
+      .limit(DISMISSED_LOOKBACK)
+      .select("post")
+      .lean(),
+  ]);
+
+  return {
+    mutedIds: new Set(idsOf(mutes, "to").map(String)),
+    postIds: idsOf(dismissed, "post"),
+  };
+};
+
+/**
+ * Recent public posts from accounts the bot doesn't follow.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ *
+ * The follow feed is "posts by accounts I follow", and for a bot that follows nobody that is
+ * structurally, permanently empty. Nothing in the cycle could fix it either: `follow_user`
+ * may only name an account drawn from the perception, and the perception was built from the
+ * follow graph, so a bot with no follows had no way to acquire any. It would run every twenty
+ * minutes for ever and log "nothing to react to" every time, while a platform full of posts it
+ * could have engaged with sat one query away.
+ *
+ * ── A blend, not a fallback ─────────────────────────────────────────────────
+ *
+ * This was briefly only consulted when the follow feed came back empty, on the theory that an
+ * established bot should read its own graph. That was wrong in the way that matters: a bot
+ * following three quiet accounts has a feed that is *technically* non-empty and practically
+ * useless, and it would never see anything else again. A person scrolling a social app is not
+ * restricted to the people they follow, and there is no reason a persona should be.
+ *
+ * So follows come first and public posts fill the remainder up to the cap. Following someone
+ * still changes what the bot sees — their posts take the top slots — but it is never the only
+ * thing it sees.
+ *
+ * ── What it may show ────────────────────────────────────────────────────────
+ *
+ * Public accounts only. A private account's posts are visible to its approved followers, and
+ * the follow-graph query got that for free — an accepted edge to a private account *is* the
+ * approval. Nothing here has that guarantee, so `isPrivate` is excluded outright rather than
+ * reasoned about. Blocks are applied in both directions, the bot's own posts are excluded
+ * (they arrive as `own_recent_posts`), and other bots are excluded so two of them can't
+ * discover each other and talk in a loop no person is part of.
+ *
+ * @param {Array} [excludeIds] authors already covered by the follow feed, so the top-up
+ *        doesn't spend its slots re-fetching posts the bot is about to be shown anyway.
+ */
+const discoverAuthorIds = async (botId, excludeIds = []) => {
+  const now = Date.now();
+
+  /*
+   * Authors are resolved from recent posts rather than by picking accounts and then looking
+   * for their posts. Selecting active public users first would mostly return people who
+   * haven't posted in weeks, and the window filter would then throw the work away.
+   */
+  /*
+   * Bounded, because this goes into a `$nin`. A bot following two thousand accounts would
+   * otherwise send two thousand ids on every cycle against an unindexed sort. Truncating only
+   * costs the occasional already-seen author in the top-up, which the de-duplication below
+   * handles anyway.
+   */
+  const excluded = [botId, ...excludeIds].filter(Boolean).slice(0, MAX_EXCLUDED_AUTHORS);
+
+  /*
+   * Sampled, not simply the newest.
+   *
+   * `sort({createdAt: -1}).limit(120)` is the same 120 posts for every bot on the platform,
+   * every cycle — so all of them converge on the same content, and, worse, anyone can
+   * guarantee placement in every bot's perception by posting 120 times in a burst. The design
+   * rests on "a bot can only act on what it was shown"; handing an attacker deterministic
+   * control of what it is shown undermines that from the other end.
+   *
+   * `$sample` after the window match gives each bot a different slice of the same eligible
+   * pool. It reads the matched set rather than an index, which is why the window filter comes
+   * first and the sample size is small.
+   */
+  const recent = await Post.aggregate([
+    {
+      $match: {
+        author: { $nin: excluded },
+        isDeleted: { $ne: true },
+        isDraft: { $ne: true },
+        isScheduled: { $ne: true },
+        createdAt: {
+          $gte: new Date(now - FEED_WINDOW_MS),
+          $lte: new Date(now - MIN_POST_AGE_MS),
+        },
+      },
+    },
+    // Wider than the post cap: these collapse to far fewer distinct authors, and the
+    // eligibility filter below removes more again.
+    { $sample: { size: SECTION_CAPS.feedPosts * 10 } },
+    { $project: { author: 1 } },
+  ]);
+
+  const candidateIds = [...new Set(idsOf(recent, "author").map(String))];
+  if (!candidateIds.length) return [];
+
+  const eligible = await User.find({
+    _id: { $in: candidateIds },
+    ...ACTIVE_ACCOUNT,
+    isPrivate: { $ne: true },
+    isBot: { $ne: true },
+  })
+    .select("_id")
+    .lean();
+
+  const eligibleIds = idsOf(eligible, "_id");
+  if (!eligibleIds.length) return [];
+
+  const blocked = await blockedIdSet(botId, eligibleIds);
+  return eligibleIds.filter((id) => !blocked.has(String(id)));
 };
 
 /**
  * The feed slice, with this bot's own prior engagement attached.
  *
- * `alreadyLiked` and `alreadyReposted` matter more than they look: both actions are *toggles*,
- * so offering the model a post it has already liked means offering it the chance to silently
- * un-like it. Marking them lets the validator and the prompt exclude them instead.
+ * The `already*` flags matter more than they look. Like, repost and save are all *toggles*, so
+ * offering the model a post it has already liked is offering it the chance to silently un-like
+ * it — and an un-like reads to the author as a retraction. Marking them lets the validator
+ * refuse the undo and lets the prompt not suggest it in the first place.
+ *
+ * `alreadyDismissed` is not a toggle guard — `not_interested` is an idempotent upsert — but it
+ * is still worth carrying: re-dismissing something already dismissed is a wasted action out of
+ * a capped daily budget.
+ *
+ * @param {number} [limit] how many posts to take. Defaults to the section cap; the blend in
+ *        `buildPerception` passes the remaining room so follows and discovery share it.
  */
-const loadFeed = async (botId, authorIds) => {
-  if (!authorIds.length) return [];
+/**
+ * What the bot's relationship already is with each account it is about to be shown.
+ *
+ * Two queries for the whole audience rather than per person. Without this the model has no
+ * idea whether it already follows an author, and every one of the new relationship actions
+ * becomes a coin flip: `follow_user` on someone already followed is a wasted action out of a
+ * capped daily budget, `unfollow_user` on a stranger is nonsense, and `mute_user` on someone
+ * already muted is a loop a stateless model will repeat every cycle forever.
+ *
+ * Blocked accounts should not be reachable at all — the feed and conversation loaders filter
+ * them — so `blocked` here is a belt-and-braces marker rather than the enforcement.
+ *
+ * @returns {Promise<Map<string, {following: boolean, requested: boolean, muted: boolean, blocked: boolean}>>}
+ */
+const loadRelationships = async (botId, userIds) => {
+  const ids = [...new Set(userIds.map(String))].filter(Boolean);
+  if (!ids.length) return new Map();
+
+  const [edges, relations] = await Promise.all([
+    Follow.find({ follower: botId, following: { $in: ids } })
+      .select("following status")
+      .lean(),
+    UserRelation.find({ from: botId, to: { $in: ids }, kind: { $in: ["mute", "block"] } })
+      .select("to kind")
+      .lean(),
+  ]);
+
+  const map = new Map(
+    ids.map((id) => [id, { following: false, requested: false, muted: false, blocked: false }])
+  );
+
+  for (const edge of edges) {
+    const entry = map.get(String(edge.following));
+    if (!entry) continue;
+    if (edge.status === "accepted") entry.following = true;
+    if (edge.status === "pending") entry.requested = true;
+  }
+  for (const relation of relations) {
+    const entry = map.get(String(relation.to));
+    if (!entry) continue;
+    if (relation.kind === "mute") entry.muted = true;
+    if (relation.kind === "block") entry.blocked = true;
+  }
+
+  return map;
+};
+
+const loadFeed = async (botId, authorIds, limit = SECTION_CAPS.feedPosts, exclude = {}) => {
+  if (!authorIds.length || limit <= 0) return [];
 
   const now = Date.now();
   const posts = await Post.find({
@@ -86,6 +283,16 @@ const loadFeed = async (botId, authorIds) => {
     isDeleted: { $ne: true },
     isDraft: { $ne: true },
     isScheduled: { $ne: true },
+    /*
+     * Posts the bot has already dismissed, hidden the way the human feed hides them.
+     *
+     * `getHomeFeed` has always done this and a bot's feed never did, which did not matter while
+     * a bot had no way to dismiss anything. It does now, and without this `not_interested_post`
+     * would be an action that visibly changes nothing: the same post comes back next cycle
+     * carrying `already_dismissed`, and the bot has spent a slot in its daily budget to be
+     * shown it again.
+     */
+    ...(exclude.postIds?.length ? { _id: { $nin: exclude.postIds } } : {}),
     createdAt: {
       $gte: new Date(now - FEED_WINDOW_MS),
       // A post seconds old is one the author may still be editing or deleting.
@@ -93,7 +300,7 @@ const loadFeed = async (botId, authorIds) => {
     },
   })
     .sort({ createdAt: -1 })
-    .limit(SECTION_CAPS.feedPosts)
+    .limit(limit)
     .select("content media poll quotedPost quotedComment counts createdAt author whoCanReply mentions")
     .populate("author", "username name bio isBot")
     .lean();
@@ -101,16 +308,24 @@ const loadFeed = async (botId, authorIds) => {
   if (!posts.length) return [];
 
   const postIds = posts.map((post) => post._id);
-  const [likes, reposts] = await Promise.all([
+  const [likes, reposts, saves, dismissed] = await Promise.all([
     Like.find({ user: botId, targetType: "Post", target: { $in: postIds } })
       .select("target")
       .lean(),
     Repost.find({ user: botId, targetType: "Post", target: { $in: postIds } })
       .select("target")
       .lean(),
+    Saved.find({ user: botId, post: { $in: postIds } })
+      .select("post")
+      .lean(),
+    NotInterested.find({ user: botId, post: { $in: postIds } })
+      .select("post")
+      .lean(),
   ]);
   const liked = new Set(likes.map((row) => String(row.target)));
   const reposted = new Set(reposts.map((row) => String(row.target)));
+  const saved = new Set(saves.map((row) => String(row.post)));
+  const notInterested = new Set(dismissed.map((row) => String(row.post)));
 
   /*
    * `canUserReplyToTarget` per post, capped by `SECTION_CAPS.feedPosts`.
@@ -127,6 +342,8 @@ const loadFeed = async (botId, authorIds) => {
     ...post,
     alreadyLiked: liked.has(String(post._id)),
     alreadyReposted: reposted.has(String(post._id)),
+    alreadySaved: saved.has(String(post._id)),
+    alreadyDismissed: notInterested.has(String(post._id)),
     canReply: replyable[index],
   }));
 };
@@ -222,6 +439,8 @@ const loadFollowRequests = async (botId) => {
   // With the bio: deciding whether to accept a follow is exactly the case where who
   // someone claims to be is the question being asked.
   return pending
+    // No relationship map: by definition the bot does not follow someone whose request to
+    // follow *it* is still pending, and the bio is what the decision turns on here.
     .map((edge) => shapeActor(edge.follower, { withBio: true }))
     .filter((actor) => actor.id);
 };
@@ -271,27 +490,93 @@ const loadOwnRecent = async (botId) => {
 export const buildPerception = async (bot) => {
   const botId = bot?._id ?? bot;
 
-  const authorIds = await visibleAuthorIds(botId);
+  // What the bot has chosen not to see, applied to both halves of the feed below.
+  const hidden = await hiddenByBot(botId);
+  const authorIds = await visibleAuthorIds(botId, hidden.mutedIds);
 
-  const [feed, conversations, followRequests, notifications, ownRecent] = await Promise.all([
-    loadFeed(botId, authorIds),
-    loadConversations(botId),
-    loadFollowRequests(botId),
-    loadNotifications(botId),
-    loadOwnRecent(botId),
-  ]);
+  const [followedFeed, conversations, followRequests, notifications, ownRecent] =
+    await Promise.all([
+      loadFeed(botId, authorIds, SECTION_CAPS.feedPosts, hidden),
+      loadConversations(botId),
+      loadFollowRequests(botId),
+      loadNotifications(botId),
+      loadOwnRecent(botId),
+    ]);
+
+  /*
+   * Public posts fill whatever room the follow feed left — see `discoverAuthorIds`.
+   *
+   * Sequential rather than part of the `Promise.all` above, because how many to ask for
+   * depends on what the follow feed returned. A bot whose follows already filled the cap pays
+   * nothing for this.
+   *
+   * The authors already in the feed are excluded so the top-up doesn't spend its slots on
+   * posts the bot is being shown anyway. `collectAllowedTargets` derives from the shaped
+   * perception, so discovered posts become legal like/comment/save targets and their authors
+   * legal `follow_user` targets with no change to the validator.
+   */
+  const feed = [...followedFeed];
+  let discovered = 0;
+  const room = SECTION_CAPS.feedPosts - feed.length;
+  if (room > 0) {
+    const seenAuthors = [...new Set(followedFeed.map((post) => String(post.author?._id ?? post.author)))];
+    // Muted accounts are excluded from discovery too, or muting someone the bot doesn't follow
+    // would do nothing at all — which is most of the accounts it can now see.
+    const discoveryIds = await discoverAuthorIds(botId, [
+      ...authorIds,
+      ...seenAuthors,
+      ...hidden.mutedIds,
+    ]);
+    if (discoveryIds.length) {
+      const extra = await loadFeed(botId, discoveryIds, room, hidden);
+      // Marked per post rather than for the batch: a blended feed has both kinds in it, and
+      // "you don't follow this person" is exactly the context that makes `follow_user` a
+      // sensible thing for the model to consider on that post and not on the one above it.
+      for (const post of extra) feed.push({ ...post, fromDiscovery: true });
+      discovered = extra.length;
+    }
+  }
+
+  /*
+   * Relationship state for everyone the bot is about to be shown.
+   *
+   * Without it the model is guessing: it cannot tell whether it already follows the author of
+   * a post, and `follow_user` on someone already followed is a wasted action out of a capped
+   * daily budget — while `unfollow_user` on a stranger is nonsense. Muting and blocking are
+   * carried for the same reason, and because re-muting someone is the kind of loop a model
+   * with no memory of its own state will happily repeat every cycle.
+   */
+  const audience = [
+    ...feed.map((post) => post.author?._id ?? post.author),
+    // `peer`, not `with`. `with` is the *shaped* name — `shapeConversation` renames it — and
+    // reading it here silently dropped every DM peer from the relationship lookup, which made
+    // `unfollow_user` permanently refuse anyone the bot only knew through messages.
+    ...conversations.map((conversation) => conversation.peer?._id ?? conversation.peer),
+  ].filter(Boolean);
+  const relationships = await loadRelationships(botId, audience);
 
   const assembled = {
     notice: PERCEPTION_NOTICE,
     now: new Date().toISOString(),
-    feed_posts: feed.map(shapeFeedPost),
-    conversations: conversations.map((conversation) => shapeConversation(conversation, botId)),
+    feed_posts: feed.map((post) => shapeFeedPost(post, relationships)),
+    conversations: conversations.map((conversation) =>
+      shapeConversation(conversation, botId, relationships)
+    ),
     follow_requests: followRequests,
     notifications,
     own_recent_posts: ownRecent,
   };
 
   const { perception, tokens, dropped } = applyBudget(assembled);
+
+  /*
+   * Marked after the budget, not before. `applyBudget` can sacrifice `feed_posts` entirely,
+   * and saying where posts came from when there are none is noise. Absent when the follow feed
+   * filled the cap on its own, so an established bot's payload is unchanged.
+   */
+  if (discovered && perception.feed_posts?.length) {
+    perception.feed_includes_accounts_you_dont_follow = true;
+  }
 
   return {
     perception,

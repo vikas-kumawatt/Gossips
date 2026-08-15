@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, Pause, Play } from "lucide-react";
+import { AlertTriangle, Camera, Loader2, Pause, Play } from "lucide-react";
 import { toast } from "react-hot-toast";
 import { Icons } from "../../components/icons";
 import ConfirmDialog from "../../components/ui/ConfirmDialog";
+import UsernameField from "../../components/UsernameField";
 import { botAPI } from "../../services/api";
 import BotActivityList from "./BotActivityList";
 import BotChatProvider from "../../contexts/BotChatProvider";
@@ -104,6 +105,8 @@ const BotDetailPage = () => {
   const [saving, setSaving] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [activeTab, setActiveTab] = useState(0);
+  const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const avatarInputRef = useRef(null);
 
   const handleTabChange = useCallback((index) => {
     setActiveTab(index);
@@ -183,6 +186,39 @@ const BotDetailPage = () => {
       toast.error(error.response?.data?.error?.message || "Couldn't save that");
     } finally {
       setSaving(false);
+    }
+  };
+
+  /*
+   * Uploads immediately rather than joining the dirty-form diff.
+   *
+   * A file isn't a field: it can't be diffed, and holding it until "Save changes" would
+   * mean the preview shows a picture that isn't stored yet. So picking one is the commit,
+   * and `refresh` pulls back the URL the server actually kept.
+   */
+  const pickAvatar = async (event) => {
+    const file = event.target.files?.[0];
+    // Cleared straight away so choosing the same file twice fires `change` again.
+    event.target.value = "";
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      return toast.error("Pick an image file");
+    }
+    // The server enforces its own ceiling; this just avoids sending 40MB to be refused.
+    if (file.size > 8 * 1024 * 1024) {
+      return toast.error("That image is larger than 8MB");
+    }
+
+    setUploadingAvatar(true);
+    try {
+      await botAPI.updateBotAvatar(id, file);
+      await refresh();
+      toast.success("Picture updated");
+    } catch (error) {
+      toast.error(error.response?.data?.error?.message || "Couldn't upload that picture");
+    } finally {
+      setUploadingAvatar(false);
     }
   };
 
@@ -293,10 +329,35 @@ const BotDetailPage = () => {
 
       <main className="mx-auto max-w-[620px] pb-20">
         <div className="flex items-start gap-3 border-b border-neutral-800 px-4 py-4">
-          <img
-            src={bot.profilePic || "/default-avatar.png"}
-            alt=""
-            className="h-12 w-12 shrink-0 rounded-full bg-neutral-800 object-cover"
+          {/* The picture is its own control — see `pickAvatar`. Same affordance as the
+              human profile editor: the avatar is the button, with the camera on hover. */}
+          <button
+            type="button"
+            onClick={() => avatarInputRef.current?.click()}
+            disabled={uploadingAvatar}
+            aria-label="Change profile picture"
+            className="group relative h-12 w-12 shrink-0 cursor-pointer overflow-hidden rounded-full disabled:cursor-wait"
+          >
+            <img
+              src={bot.profilePic || "/default-avatar.png"}
+              alt=""
+              className="h-full w-full rounded-full bg-neutral-800 object-cover transition-opacity group-hover:opacity-60"
+            />
+            <span className="absolute inset-0 flex items-center justify-center opacity-0 transition-opacity group-hover:opacity-100">
+              <Camera className="h-4 w-4 text-white" />
+            </span>
+            {uploadingAvatar && (
+              <span className="absolute inset-0 flex items-center justify-center bg-black/60">
+                <Loader2 className="h-4 w-4 animate-spin text-white" />
+              </span>
+            )}
+          </button>
+          <input
+            type="file"
+            ref={avatarInputRef}
+            accept="image/*"
+            onChange={pickAvatar}
+            className="hidden"
           />
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -325,11 +386,14 @@ const BotDetailPage = () => {
           </div>
         </div>
 
-        <div className="mt-2">
+        <div>
           <InPageNavigation
             routes={["Profile", "Activity", "DMs"]}
             defaultActiveIndex={activeTab}
             onTabChange={handleTabChange}
+            // Every panel below already opens with its own padding, so the
+            // component's default margin was stacking on top of it.
+            tabGapClass=""
           >
             {activeTab === 0 && (
               <>
@@ -343,13 +407,50 @@ const BotDetailPage = () => {
                       <span className="text-[13px] text-neutral-400">Bio</span>
                       <textarea rows={2} value={form.bio} onChange={set("bio")} maxLength={300} className={`${field} resize-none`} />
                     </label>
-                    <label className="flex cursor-pointer items-center gap-2.5">
-                      <input type="checkbox" checked={form.isPrivate} onChange={set("isPrivate")} className="h-4 w-4 accent-white" />
-                      <span className="text-[13px] text-neutral-300">Private account</span>
-                    </label>
-                    <p className="text-[12px] text-neutral-600">
-                      The username can't be changed — renaming goes through the same path a person's does.
-                    </p>
+
+                    {/* Saves on its own, not with the button below — a rename is
+                        rate-limited and can fail for reasons only the server knows,
+                        so folding it into the diff would mean a half-succeeding save.
+                        Same component the human edit form uses.
+
+                        Enter is swallowed because this input lives inside the settings
+                        form: the browser's implicit submit would otherwise fire the bot
+                        save from a field that has nothing to do with it. Renaming is a
+                        deliberate two-step through the confirm dialog either way. */}
+                    <div onKeyDown={(event) => event.key === "Enter" && event.preventDefault()}>
+                      <UsernameField botId={id} onRenamed={refresh} />
+                    </div>
+
+                    {/* The same switch and the same explanation the profile editor
+                        gives a person, because it is the same decision — a checkbox
+                        labelled "Private account" doesn't say what changes. */}
+                    <div className="relative flex flex-col pr-16">
+                      <span className="text-[13px] text-neutral-400">Private account</span>
+                      <p className="mt-1.5 text-[13px] leading-relaxed text-neutral-500">
+                        {form.isPrivate
+                          ? "Only approved followers can see its posts. Switch to public and anyone can."
+                          : "Anyone can see its posts and replies. Switch to private and only approved followers can."}
+                      </p>
+                      <label className="absolute top-0 right-0 inline-flex cursor-pointer items-center">
+                        <input
+                          type="checkbox"
+                          className="peer sr-only"
+                          checked={form.isPrivate}
+                          onChange={set("isPrivate")}
+                        />
+                        <div
+                          className={`relative h-6 w-11 rounded-full transition-colors ${
+                            form.isPrivate ? "bg-white" : "bg-neutral-800"
+                          }`}
+                        >
+                          <div
+                            className={`absolute start-[2px] top-[2px] h-5 w-5 rounded-full transition-all ${
+                              form.isPrivate ? "translate-x-full bg-black" : "bg-white"
+                            }`}
+                          />
+                        </div>
+                      </label>
+                    </div>
                   </Section>
 
                   <Section title="How it behaves">

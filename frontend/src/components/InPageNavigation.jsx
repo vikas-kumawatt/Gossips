@@ -5,12 +5,18 @@ export let activeTabLineRef;
 // eslint-disable-next-line react-refresh/only-export-components
 export let activeTabRef;
 
+/**
+ * @param {string} [tabGapClass] the space between the tab bar and the panel below it.
+ *        Defaults to what every existing caller already had, so this is opt-in: a page
+ *        whose panel brings its own top padding can pass "" and stop paying twice.
+ */
 const InPageNavigation = ({
   routes,
   defaultHidden = [],
   defaultActiveIndex = 0,
   children,
   onTabChange,
+  tabGapClass = "mb-4",
 }) => {
   activeTabLineRef = useRef();
   activeTabRef = useRef();
@@ -77,7 +83,9 @@ const InPageNavigation = ({
  
   return (
     <div className="w-full">
-      <div className="relative mb-4 border-b border-neutral-700 flex flex-nowrap overflow-x-hidden">
+      <div
+        className={`relative ${tabGapClass} border-b border-neutral-700 flex flex-nowrap overflow-x-hidden`}
+      >
         {routes.map((route, i) => (
           <button
             ref={el => tabsRef.current[i] = el}

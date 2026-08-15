@@ -1,3 +1,4 @@
+import fs from "fs";
 import mongoose from "mongoose";
 import User from "../models/User.js";
 import UserSettings from "../models/UserSettings.js";
@@ -9,6 +10,7 @@ import BotPersona, {
 } from "../models/BotPersona.js";
 import BotMemory from "../models/BotMemory.js";
 import BotActionLog from "../models/BotActionLog.js";
+import { deleteFromCloudinary, uploadToCloudinary } from "../config/cloudinary.js";
 import { encryptSecret, keyFingerprint, keyHint } from "../utils/keyVault.js";
 import { checkProviderKey } from "../utils/providerKeyCheck.js";
 import {
@@ -20,6 +22,7 @@ import {
   providerOf,
 } from "../bots/providers.js";
 import { ENDPOINT_SOURCE, assertSafeEndpoint, checkEndpointShape } from "../bots/selfHosted.js";
+import { DEFAULT_AVATAR_URL } from "../utils/constants.js";
 import { validateUsernameFormat, normalizeUsername } from "../utils/username.js";
 import { isReserved } from "../utils/reservedUsernames.js";
 import { getSettings } from "../utils/settings.js";
@@ -812,20 +815,32 @@ export const updateBot = async (req, res) => {
     const userUpdates = {};
     if (typeof body.name === "string") userUpdates.name = body.name.trim().slice(0, 50);
     if (typeof body.bio === "string") userUpdates.bio = body.bio.trim().slice(0, 300);
-    if (typeof body.profilePic === "string") userUpdates.profilePic = body.profilePic;
     if (typeof body.isPrivate === "boolean") userUpdates.isPrivate = body.isPrivate;
 
     /*
-     * The username is deliberately not editable here.
+     * The picture is not settable here either, for the same reason as the username below.
      *
-     * Humans rename through `userController`, which enforces a change quota, holds the old
-     * handle, and records history — all of it there to make impersonation by rename
-     * traceable. A second rename path that skipped it would be a hole, and duplicating it
-     * would be the wrong abstraction. Renaming a bot can go through the same route as a
-     * human's when there's a reason to want it.
+     * This used to take any string and write it straight to `profilePic`, which meant an
+     * owner could point a bot's avatar at an arbitrary URL — and it bypassed everything
+     * `POST /bots/:id/avatar` does: the image-only mimetype check, the tighter rate limit,
+     * and deleting the file the bot was using. One path, or the three checks on it are
+     * optional.
+     */
+    if (body.profilePic !== undefined) {
+      return fail(res, "Upload the picture through the avatar endpoint, not here", 400);
+    }
+
+    /*
+     * The username is still not editable *here*, and that hasn't changed now that bots can
+     * be renamed.
+     *
+     * `PATCH /user/username` does it, for a bot exactly as for a person: the change quota,
+     * the fourteen-day hold on the old handle, and the history entry are what make
+     * impersonation by rename traceable, and they live there. A second path through this
+     * handler would be a second place to forget them. See `renameTarget` in userController.
      */
     if (body.username !== undefined && normalizeUsername(body.username) !== bot.username) {
-      return fail(res, "A bot's username can't be changed here", 400);
+      return fail(res, "Rename through the username endpoint, not here", 400);
     }
 
     /*
@@ -990,6 +1005,79 @@ export const updateBot = async (req, res) => {
  * `isBot: true` and no persona: the runner would find it, fail to load a persona, and log a
  * failure every tick forever.
  */
+/**
+ * POST /bots/:id/avatar — replace a bot's profile picture.
+ *
+ * Its own endpoint rather than a field on the `PATCH`, because a file forces the whole
+ * request to be multipart and the patch is a JSON diff of about fifteen fields. Folding
+ * them together would mean every save — a one-word bio edit — going out as `FormData`, and
+ * the diffing on the client, which is what keeps `systemPrompt` from being rewritten on
+ * every save, would have to be rebuilt around it.
+ */
+export const updateBotAvatar = async (req, res) => {
+  /*
+   * Multer has already written the upload to disk by the time this runs, and only
+   * `uploadToCloudinary` unlinks it. Every path that returns before reaching it has to
+   * clean up, or a rejected 50MB file sits in `uploads/` for ever.
+   */
+  const discard = () => {
+    if (req.file?.path) {
+      fs.unlink(req.file.path, (error) => {
+        if (error) console.error("updateBotAvatar: temp file cleanup failed:", error.message);
+      });
+    }
+  };
+
+  try {
+    if (!req.file) return fail(res, "No image was uploaded");
+    if (!isId(req.params.id)) {
+      discard();
+      return fail(res, "Bot not found", 404);
+    }
+
+    /*
+     * Multer's media filter admits video and audio too — it is shared with posts and chat
+     * attachments, where that is correct. An avatar is an image, and without this check
+     * `resource_type: "auto"` would happily store an mp4 and every `<img>` in the app
+     * would render a broken box.
+     */
+    if (!req.file.mimetype?.startsWith("image/")) {
+      discard();
+      return fail(res, "That file isn't an image");
+    }
+
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true })
+      .select("profilePic")
+      .lean();
+    if (!bot) {
+      discard();
+      return fail(res, "Bot not found", 404);
+    }
+
+    const uploaded = await uploadToCloudinary(req.file.path, "avatars");
+
+    await User.updateOne({ _id: req.params.id }, { $set: { profilePic: uploaded.secure_url } });
+
+    /*
+     * Best effort, and after the write. The previous file is orphaned once nothing points
+     * at it, but failing the request over a failed cleanup would leave the owner thinking
+     * the upload didn't work when it did. `deleteFromCloudinary` ignores anything it
+     * didn't upload, so the seeded default avatar is safely a no-op.
+     */
+    if (bot.profilePic && bot.profilePic !== DEFAULT_AVATAR_URL) {
+      deleteFromCloudinary(bot.profilePic).catch(() => {});
+    }
+
+    return ok(res, { profilePic: uploaded.secure_url });
+  } catch (error) {
+    // Covers a throw before `uploadToCloudinary` took ownership of the file; it unlinks on
+    // both its own success and failure, so a double unlink is at worst a logged ENOENT.
+    discard();
+    // The third argument is what the owner is shown, not a log tag.
+    return serverError(res, error, "Couldn't update that picture");
+  }
+};
+
 export const deleteBot = async (req, res) => {
   try {
     if (!isId(req.params.id)) return fail(res, "Bot not found", 404);
@@ -1100,6 +1188,18 @@ export const getBotChats = async (req, res, next) => {
     // Stash original user and patch for getChats
     req.originalUser = req.user;
     req.user = bot;
+    /*
+     * No socket on this screen, so presence has to ride along with the list — see the
+     * `includePresence` block in `getChats`.
+     *
+     * Both viewers, and both have to allow it. The bot is the account in the conversation,
+     * so the peer's privacy choice was made about it; the owner is the human who will
+     * actually read the screen. Gating on the bot alone would turn this into a laundering
+     * route — someone who blocked the owner, or who limits last-seen to their followers,
+     * would become readable to them the moment their bot got a DM.
+     */
+    req.includePresence = true;
+    req.presenceViewers = [bot._id, req.originalUser._id];
     return getChats(req, res);
   } catch (error) {
     next(error);
@@ -1114,6 +1214,10 @@ export const getBotConversation = async (req, res, next) => {
     // Stash original user and patch for getMessages
     req.originalUser = req.user;
     req.user = bot;
+    // As above: the inspection view has no socket, so the peer's presence — and its AI
+    // badge — have to arrive with the thread or not at all. Both viewers must allow it.
+    req.includePresence = true;
+    req.presenceViewers = [bot._id, req.originalUser._id];
     return getMessages(req, res);
   } catch (error) {
     next(error);

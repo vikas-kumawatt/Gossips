@@ -2,6 +2,7 @@ import express from "express";
 import { rateLimit } from "express-rate-limit";
 import { protect } from "../middleware/authMiddleware.js";
 import { requireActiveAccount } from "../middleware/featureGate.js";
+import upload from "../config/multerConfig.js";
 import {
   addApiKey,
   createBot,
@@ -14,6 +15,7 @@ import {
   revokeApiKey,
   updateApiKey,
   updateBot,
+  updateBotAvatar,
   getBotChats,
   getBotConversation,
 } from "../controllers/botController.js";
@@ -52,6 +54,15 @@ const createLimit = rateLimit({
   message: { error: "Too many bots created. Try again in a while." },
 });
 
+/** Avatar uploads. Each one stores a file, so it gets a tighter budget than an edit. */
+const avatarLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many image uploads. Try again in a while." },
+});
+
 /** Ordinary reads and edits. Loose, but not unbounded. */
 const manageLimit = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -87,6 +98,19 @@ router.post("/", protect, requireActiveAccount, createLimit, createBot);
 router.get("/:id/activity", protect, manageLimit, getBotActivity);
 router.get("/:id", protect, manageLimit, getBot);
 router.patch("/:id", protect, requireActiveAccount, manageLimit, updateBot);
+/*
+ * Its own route because it's multipart — see `updateBotAvatar`. `avatarLimit` rather than
+ * `manageLimit`: this one writes a file to Cloudinary, so it is the only bot endpoint where
+ * a loop costs storage rather than a few milliseconds.
+ */
+router.post(
+  "/:id/avatar",
+  protect,
+  requireActiveAccount,
+  avatarLimit,
+  upload.single("profilePic"),
+  updateBotAvatar
+);
 router.delete("/:id", protect, requireActiveAccount, manageLimit, deleteBot);
 router.get("/:id/chats", protect, manageLimit, getBotChats);
 router.get("/:id/chats/:username/messages", protect, manageLimit, getBotConversation);

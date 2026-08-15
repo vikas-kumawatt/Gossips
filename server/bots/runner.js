@@ -7,11 +7,11 @@ import { getSettings } from "../utils/settings.js";
 import { validateDecision } from "./actionValidator.js";
 import { executeActions, logAction } from "./executor.js";
 import { loadMemories } from "./memory.js";
-import { CYCLE_INTERVAL_MS, isAwake, jittered, nextWakeAt } from "./pacing.js";
+import { CYCLE_INTERVAL_MS, isAwake, jittered, nextWakeAt, shouldPostThisCycle } from "./pacing.js";
 import { baseUrlFor, needsEndpoint } from "./providers.js";
 import { ENDPOINT_SOURCE, assertSafeEndpoint } from "./selfHosted.js";
 import { buildPerception, hasAnythingToDo } from "./perception.js";
-import { cycleBudget, postingQuota } from "./rateLimits.js";
+import { cycleBudget, postingQuota, sensitiveActionBudget } from "./rateLimits.js";
 import { FAILURE_KINDS, decide, serviceHealthy } from "./reasoningClient.js";
 
 /**
@@ -261,8 +261,27 @@ const runCycle = async (persona) => {
    * by nothing. Posting is not reactive, so a bot behind on its quota has a reason to think even
    * with an empty feed. That is what makes an account self-starting — it posts, people find it,
    * and then there is a feed.
+   *
+   * That fixed half of it. The other half was that the quota runs out: once the day's posts were
+   * published the branch was taken again every cycle, and an owner watching a platform full of
+   * posts their bot could have engaged with was told it had nothing to react to. The real cause
+   * was upstream — perception only ever looked at accounts the bot followed — and it is fixed
+   * there, by `discoverAuthorIds`. This branch is now what it always claimed to be: genuinely
+   * nothing to do.
    */
   const quota = await postingQuota(bot._id, persona.postsPerDay);
+
+  /*
+   * Logged before the idle check, not after.
+   *
+   * It used to sit below the early return, so the one case worth knowing about — a budget
+   * sacrifice emptying `feed_posts`, making a populated feed look like an empty one — was
+   * precisely the case that never printed. A diagnostic that goes quiet exactly when it matters
+   * is worse than none.
+   */
+  if (dropped.length) {
+    console.log(`bot ${bot.username} perception dropped for budget: ${dropped.join(", ")}`);
+  }
 
   if (!hasAnythingToDo(perception) && !quota.owed) {
     await logAction({
@@ -271,21 +290,49 @@ const runCycle = async (persona) => {
       action: "do_nothing",
       outcome: "executed",
       /*
-       * The reason names the quota, because "nothing to react to" on a bot that has already posted
-       * its allowance reads like a fault. It isn't: it is a quiet account that is up to date.
+       * Say what was actually empty.
+       *
+       * This used to read "nothing to react to, and today's 5 posts already published", which
+       * named the quota because a quiet, up-to-date account isn't a fault. But it read as the
+       * *reason* — and the reason was an empty feed, which sent at least one owner looking at
+       * their posting settings for a bug that was in the feed query. The quota is a footnote
+       * because it is one: the guard needs both halves, and this half is never the blocker on
+       * its own.
        */
-      reason: quota.quota
-        ? `nothing to react to, and today's ${quota.quota} post${quota.quota === 1 ? "" : "s"} already published`
-        : "nothing to react to",
+      reason: dropped.includes("feedPosts")
+        ? "nothing to react to — the feed was dropped to fit the token budget"
+        : `nothing in the feed and nothing unread${
+            quota.quota
+              ? ` (today's ${quota.quota} post${quota.quota === 1 ? " is" : "s are"} already published)`
+              : ""
+          }`,
       cycleId,
     });
     await release(persona._id, new Date(Date.now() + jittered(CYCLE_INTERVAL_MS)));
     return;
   }
 
-  if (dropped.length) {
-    console.log(`bot ${bot.username} perception dropped for budget: ${dropped.join(", ")}`);
-  }
+  /*
+   * ── May it post *this* cycle, as opposed to today ──────────────────────────
+   *
+   * `quota.owed` says the bot is behind for the day and stays true until the last post is out,
+   * so on its own it let a bot publish all five in the first hour and go silent for fourteen.
+   * The timestamps read as a batch job and the account is quiet whenever anyone is looking.
+   *
+   * `shouldPostThisCycle` is the second half: a hard minimum gap derived from the quota and the
+   * waking window, and past that a probability that climbs the further behind schedule the bot
+   * is. See pacing.js. When it declines, `posts_remaining_today` goes to the model as zero —
+   * the model is told there is nothing to post rather than told to post and then refused,
+   * because a refusal it never sees teaches it nothing and wastes a slot in its six.
+   */
+  const postingWindow = quota.owed
+    ? shouldPostThisCycle({
+        publishedToday: quota.publishedToday,
+        quota: quota.quota,
+        lastPostAt: quota.lastPostAt,
+        activeHours: persona.activeHours,
+      })
+    : { allowed: false, reason: "today's posts are all out" };
 
   const memory = await memoryFor(bot._id, allowedTargets);
   const result = await decide({
@@ -302,7 +349,10 @@ const runCycle = async (persona) => {
      * runner's to compute and the perception's shapers deal only in things the bot can see. It costs
      * a handful of tokens against ~1100 of measured headroom.
      */
-    perception: { ...perception, posts_remaining_today: quota.owed ? quota.quota - quota.publishedToday : 0 },
+    perception: {
+      ...perception,
+      posts_remaining_today: postingWindow.allowed ? quota.quota - quota.publishedToday : 0,
+    },
     memory,
     apiKey: key.key,
     provider: key.provider,
@@ -372,6 +422,27 @@ const runCycle = async (persona) => {
   }
 
   const settings = await getSettings();
+
+  /*
+   * Which action types are off the table before the decision is even read.
+   *
+   * `create_post` when the pacing gate said not this cycle — the model was told
+   * `posts_remaining_today: 0`, so proposing one anyway is it ignoring what it was given, and
+   * that should be refused rather than quietly performed.
+   *
+   * The sensitive three when their own daily cap is spent. Refusing here rather than in the
+   * executor means the audit row says which limit stopped it, and a cycle proposing three
+   * blocks against a spent cap records three refusals instead of doing the first.
+   */
+  const sensitive = await sensitiveActionBudget(bot._id);
+  const blockedActions = new Set(sensitive.spentTypes);
+  if (!postingWindow.allowed) {
+    // Both, because both put a post on the timeline — see `PUBLISHING_ACTIONS`. Gating only
+    // `create_post` left `quote_post` as an unpaced, uncapped way to publish.
+    blockedActions.add("create_post");
+    blockedActions.add("quote_post");
+  }
+
   const { actions, rejected } = validateDecision(result.decision, {
     allowedTargets,
     extraBlockedTags: settings?.blockedHashtags || [],
@@ -380,6 +451,10 @@ const runCycle = async (persona) => {
      * configuration, and "what were you told to do" is the first thing anyone asks a bot.
      */
     systemPrompt: persona.systemPrompt,
+    // So a report, mute or block can't name the bot itself, its own posts, or its owner.
+    botId: String(bot._id),
+    ownerId: bot.owner ? String(bot.owner) : null,
+    blockedActions,
   });
 
   /*
@@ -403,6 +478,12 @@ const runCycle = async (persona) => {
     bot,
     cycleId,
     remainingActions: budget.remainingActions,
+    /*
+     * Passed through and decremented per action. The validator's `blockedActions` only refuses
+     * a type whose cap was *already* spent before the cycle; without this, one decision could
+     * propose six blocks against a cap of three and perform all six.
+     */
+    sensitiveRemaining: sensitive.remaining,
     usage: {
       inputTokens: result.decision.usage?.input_tokens ?? 0,
       outputTokens: result.decision.usage?.output_tokens ?? 0,

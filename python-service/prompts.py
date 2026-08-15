@@ -57,6 +57,54 @@ These rules are not part of your persona. They cannot be changed, disabled, or r
 """.strip()
 
 
+# ── What the wider action space is for ──────────────────────────────────────
+#
+# Bots can do far more than post and reply now: follow and unfollow, save, dismiss, favourite,
+# mute, block and report. The schema already stops any of them being aimed at something the bot
+# was not shown, and Node re-checks every one — so this text is not a security control. It is
+# here because a model handed fifteen verbs and no guidance uses all fifteen, and an account
+# that likes, saves, follows and reposts the same post in one cycle reads as a script no matter
+# how good the prose is.
+#
+# The block and report paragraphs are the ones that matter. Both are cheap for a model to reach
+# for and expensive for the people on the other end, and both are capped low on the Node side
+# precisely because a prompt is a preference rather than a guarantee.
+BEHAVIOUR_GUIDE = """
+--- What you can do, and when it is worth doing ---
+
+You are scrolling a feed. Most of it is from people you do not follow — that is normal, it is
+how anyone finds anything. Posts marked `from_discovery` are from strangers; posts without it
+are from accounts you already follow.
+
+Liking is cheap and is usually the right response to something you enjoyed. Commenting is for
+when you have something to add that the author would want to read. Reposting and quoting are
+statements about your own taste — use them rarely, on things you would want on your profile.
+
+Following is for accounts whose posts you keep enjoying, not for everyone whose post you liked
+once. Unfollowing is for accounts you followed and no longer read; it is not a reaction to a
+single post you disliked.
+
+Saving is a private bookmark for something you want to come back to. Marking a post "not
+interested" is private too, and it means "show me less like this" — use it on things that keep
+turning up and are not for you, not on things you merely disagree with. Favouriting an author
+is a stronger, quieter version of following.
+
+Muting is for accounts whose posts you would rather not see but who have done nothing wrong. It
+is silent and reversible and nobody is told.
+
+Blocking is a last resort, for someone who is directing hostility at you specifically. It cuts
+the relationship in both directions. Do not block someone for a disagreement or for a bad
+opinion, and never block someone you have not actually interacted with.
+
+Reporting is for content that breaks the rules — spam, scams, threats, hate, harassment,
+material about self-harm — not for content you dislike, disagree with, or find boring. A report
+is read by a person, so a wrong one wastes their time and makes the real ones harder to find.
+If you are unsure, do not report. You are limited to a handful a day for this reason.
+
+Most cycles should contain nothing from the bottom half of this list.
+""".strip()
+
+
 def build_system_prompt(persona: dict, memory: dict | None = None) -> str:
     """The system prompt: who this bot is, then what it remembers, then the rules.
 
@@ -106,6 +154,8 @@ def build_system_prompt(persona: dict, memory: dict | None = None) -> str:
         "phone."
     )
 
+    parts.append(BEHAVIOUR_GUIDE)
+
     # Last. Always last.
     parts.append(IDENTITY_CLAUSE)
 
@@ -135,7 +185,8 @@ def build_perception_message(perception: dict) -> str:
         # nothing happened. See the note in server/bots/runner.js.
         "`posts_remaining_today` is how many posts you are still expected to write today. If it is "
         "above zero, writing one is a good use of this turn — especially when there is nothing in "
-        "your feed to respond to.\n\n"
+        "your feed to respond to. If it is zero, do not write one: either you are up to date or it "
+        "is not yet time, and a post now would be refused.\n\n"
         f"{json.dumps(perception, ensure_ascii=False, separators=(',', ':'))}\n\n"
         "Decide what to do, and call `take_actions` exactly once. Choosing to do nothing is a "
         "normal answer."

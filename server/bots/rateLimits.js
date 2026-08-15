@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import BotActionLog from "../models/BotActionLog.js";
 import { getSettings } from "../utils/settings.js";
 
@@ -77,7 +78,39 @@ export const COUNTED_ACTIONS = [
   "send_dm",
   "reply_dm",
   "create_post",
+  "unfollow_user",
+  "save_post",
+  "not_interested_post",
+  "favourite_author",
+  "mute_user",
+  "block_user",
+  "report_content",
 ];
+
+/**
+ * Per-day caps on the three actions that land on somebody else, over and above the general
+ * budget.
+ *
+ * `actionsPerDay` is sixty, and it is sized for likes and comments — a busy, plausible person.
+ * Sixty *blocks* is not a plausible anything, and sixty reports is a denial-of-service attack
+ * on whoever reads the moderation queue. So these three get their own budget, and it is small
+ * enough that hitting it is a signal in itself: a persona that wants to report five things in
+ * a day has either found something real or is badly prompted, and either way the owner should
+ * be the one to look at the sixth.
+ *
+ * Muting is the mildest — nobody is told, nothing is destroyed — so it gets the most room.
+ * Blocking is last because it deletes follow edges in both directions and unblocking does not
+ * bring them back.
+ *
+ * Not admin-configurable, unlike the general limits. These are a safety floor rather than a
+ * tuning knob, and a settings screen that can raise them is a settings screen that will be
+ * used to raise them.
+ */
+export const SENSITIVE_ACTION_LIMITS = {
+  report_content: 5,
+  mute_user: 10,
+  block_user: 3,
+};
 
 /**
  * Merge the admin-configured limits over the defaults.
@@ -131,6 +164,51 @@ export const countDmReplies = async (botId, since) =>
   });
 
 /**
+ * How much of each sensitive action's daily allowance this bot has left.
+ *
+ * One grouped count rather than three queries. Returned as a *remaining* count per type, not
+ * as a spent/not-spent flag, and that distinction is the fix for a real hole: a flag can only
+ * answer "already used up", so a single cycle proposing six blocks against a cap of three
+ * passed all six — six different targets, so not duplicates, and nothing counted them as they
+ * went. The executor now decrements this map as it works, the same way it does the general
+ * budget.
+ *
+ * The validator still gets the fully-spent types up front (see `spentTypes`), because refusing
+ * there produces a better audit row and stops the model wasting a slot in its six.
+ *
+ * `outcome: "executed"` only: a refused block blocked nobody and must not count, or a bot that
+ * proposes the same bad action repeatedly would lock itself out of the good ones.
+ *
+ * @returns {Promise<{remaining: Map<string, number>, spentTypes: Set<string>}>}
+ */
+export const sensitiveActionBudget = async (botId, now = Date.now()) => {
+  const types = Object.keys(SENSITIVE_ACTION_LIMITS);
+  const rows = await BotActionLog.aggregate([
+    {
+      $match: {
+        bot: typeof botId === "string" ? new mongoose.Types.ObjectId(botId) : botId,
+        action: { $in: types },
+        outcome: "executed",
+        createdAt: { $gte: new Date(now - DAY_MS) },
+      },
+    },
+    { $group: { _id: "$action", count: { $sum: 1 } } },
+  ]);
+
+  const used = new Map(rows.map((row) => [row._id, row.count]));
+  const remaining = new Map();
+  const spentTypes = new Set();
+
+  for (const type of types) {
+    const left = Math.max(0, SENSITIVE_ACTION_LIMITS[type] - (used.get(type) || 0));
+    remaining.set(type, left);
+    if (left === 0) spentTypes.add(type);
+  }
+
+  return { remaining, spentTypes };
+};
+
+/**
  * Posts this bot has published in the last day.
  *
  * Not a cap — the opposite. `postsPerDay` is the owner's instruction to *do* something, and this is
@@ -144,7 +222,7 @@ export const countDmReplies = async (botId, since) =>
 export const countPostsPublished = async (botId, since) =>
   BotActionLog.countDocuments({
     bot: botId,
-    action: "create_post",
+    action: { $in: PUBLISHING_ACTIONS },
     outcome: "executed",
     createdAt: { $gte: since },
   });
@@ -157,13 +235,47 @@ export const countPostsPublished = async (botId, since) =>
  *
  * @returns {Promise<{owed: boolean, publishedToday: number, quota: number}>}
  */
+/**
+ * Actions that put a post on a timeline, and therefore spend the daily posting quota.
+ *
+ * `quote_post` is here because it *is* a post — `executor.js` routes it through `createPost`
+ * and it appears on the profile like any other. It was counted as neither: the quota query
+ * asked for `create_post` alone, so a bot could publish unlimited quotes at whatever rhythm it
+ * liked, which is exactly the batch-job cadence `pacing.js` exists to prevent.
+ */
+const PUBLISHING_ACTIONS = ["create_post", "quote_post"];
+
 export const postingQuota = async (botId, postsPerDay) => {
   const quota = Number.isFinite(postsPerDay) ? Math.max(0, postsPerDay) : 0;
   // Zero means "never posts", and then there is nothing to count.
-  if (quota === 0) return { owed: false, publishedToday: 0, quota };
+  if (quota === 0) return { owed: false, publishedToday: 0, quota, lastPostAt: null };
 
-  const publishedToday = await countPostsPublished(botId, new Date(Date.now() - DAY_MS));
-  return { owed: publishedToday < quota, publishedToday, quota };
+  const since = new Date(Date.now() - DAY_MS);
+  const [publishedToday, latest] = await Promise.all([
+    countPostsPublished(botId, since),
+    /*
+     * When the last one went out, for the minimum-gap half of `shouldPostThisCycle`. Read from
+     * the action log rather than from `Post` because that is where the *quota* is counted from
+     * too — a post the bot deleted still spent its slot, and the two numbers disagreeing would
+     * let a bot that deletes its own posts publish without limit.
+     */
+    BotActionLog.findOne({
+      bot: botId,
+      action: { $in: PUBLISHING_ACTIONS },
+      outcome: "executed",
+      createdAt: { $gte: since },
+    })
+      .sort({ createdAt: -1 })
+      .select("createdAt")
+      .lean(),
+  ]);
+
+  return {
+    owed: publishedToday < quota,
+    publishedToday,
+    quota,
+    lastPostAt: latest?.createdAt ?? null,
+  };
 };
 
 /**

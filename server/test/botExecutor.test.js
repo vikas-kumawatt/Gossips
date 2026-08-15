@@ -53,6 +53,33 @@ mock.module("../services/engagement.js", {
     likePost: record("likePost"),
     repostPost: record("repostPost"),
     followUser: record("followUser"),
+    unfollowUser: record("unfollowUser"),
+  },
+});
+
+/*
+ * The wider action space, mocked at the same boundary as the original three.
+ *
+ * Every one of these has to be listed even though most of the tests below don't use them: a
+ * partial module mock is a *missing export* at load time, not a missing function at call time,
+ * so an omission fails the whole file with a SyntaxError naming the service rather than the
+ * test. Which is also the useful property — add an action to the executor and forget it here,
+ * and this file says so immediately.
+ */
+mock.module("../services/curation.js", {
+  namedExports: {
+    savePost: record("savePost"),
+    setNotInterested: record("setNotInterested"),
+    favouriteAuthor: record("favouriteAuthor"),
+    undoNotInterested: record("undoNotInterested"),
+  },
+});
+
+mock.module("../services/moderation.js", {
+  namedExports: {
+    muteUser: record("muteUser"),
+    blockUser: record("blockUser"),
+    reportContent: record("reportContent"),
   },
 });
 
@@ -74,6 +101,11 @@ mock.module("../utils/conversationActivity.js", {
       calls.push({ name: "participantsOfConversation", args: key });
       return participants;
     },
+    /*
+     * Unused here, but `models/Message.js` imports it and the moderation service pulls that
+     * model into this test's graph. Same missing-export trap as above.
+     */
+    touchConversationActivity: async () => {},
   },
 });
 

@@ -42,6 +42,58 @@ ACTION_TYPES = [
     "reply_dm",
     "create_post",
     "do_nothing",
+    # Added when bots stopped being able only to post and reply. `unfollow_user` ends a
+    # relationship; the next three are private to the bot's own account; the last three land
+    # on somebody else and carry their own low daily caps on the Node side.
+    "unfollow_user",
+    "save_post",
+    "not_interested_post",
+    "favourite_author",
+    "mute_user",
+    "block_user",
+    "report_content",
+]
+
+# The reasons a bot may give for a report, mirroring `BOT_REPORT_REASONS` in
+# server/bots/actionValidator.js. These are *subcategory* ids, not category ids: the report
+# form requires a specific reason, and letting the model pick the category alone meant Node
+# defaulting the subcategory — a guess presented to a moderator as a finding. Subcategory ids
+# are unique across the table, so one field carries both halves.
+#
+# Excluded: everything under impersonation, underage, intellectual property and nudity, which
+# turn on facts a model cannot have; `manipulated_media`, `brand_impersonation` and
+# `counterfeit_goods` for the same reason; and `something_else`, which needs free-text details
+# this action does not accept.
+REPORT_REASONS = [
+    "unwanted_commercial",
+    "bots_fake_engagement",
+    "repetitive_posting",
+    "malicious_links",
+    "slurs",
+    "hate_symbols",
+    "dehumanising_speech",
+    "targeted_group_attack",
+    "violent_threats",
+    "graphic_violence",
+    "terrorism_extremism",
+    "animal_abuse",
+    "targeted_harassment",
+    "unwanted_contact",
+    "threats_to_share",
+    "doxxing",
+    "health_misinformation",
+    "election_misinformation",
+    "other_misinformation",
+    "phishing",
+    "fake_giveaway",
+    "investment_scam",
+    "romance_scam",
+    "drugs",
+    "weapons",
+    "endangered_wildlife",
+    "suicide_self_injury",
+    "eating_disorder",
+    "encouraging_self_harm",
 ]
 
 # Generated text ceiling. Matches the moderation rules on the Node side; a shorter cap here
@@ -93,14 +145,29 @@ ACTION_TOOL = {
                             "type": "string",
                             "description": (
                                 "The post acted on. Required for like_post, comment_post, "
-                                "repost_post and quote_post. Must be an id you were shown."
+                                "repost_post, quote_post, save_post and "
+                                "not_interested_post, and for report_content when you are "
+                                "reporting a post. Must be an id you were shown."
                             ),
                         },
                         "user_id": {
                             "type": "string",
                             "description": (
                                 "The person acted on. Required for view_profile, follow_user, "
-                                "send_follow_request and send_dm. Must be an id you were shown."
+                                "send_follow_request, send_dm, unfollow_user, "
+                                "favourite_author, mute_user and block_user, and for "
+                                "report_content when you are reporting an account rather "
+                                "than one post. Must be an id you were shown."
+                            ),
+                        },
+                        "reason": {
+                            "type": "string",
+                            "enum": REPORT_REASONS,
+                            "description": (
+                                "Why you are reporting, as specifically as you can. "
+                                "Required for report_content and used for nothing else. "
+                                "Give exactly one post_id or one user_id alongside it, "
+                                "never both."
                             ),
                         },
                         "conversation_id": {
@@ -156,4 +223,14 @@ REQUIRED_ARGS = {
     "send_dm": ("user_id", "text"),
     "reply_dm": ("conversation_id", "text"),
     "create_post": ("text",),
+    "unfollow_user": ("user_id",),
+    "save_post": ("post_id",),
+    "not_interested_post": ("post_id",),
+    "favourite_author": ("user_id",),
+    "mute_user": ("user_id",),
+    "block_user": ("user_id",),
+    # Only `reason` is *required*: which of post_id / user_id accompanies it is the model's
+    # choice, and Node refuses both-or-neither. Requiring one here would force a shape the
+    # schema cannot express without the union that produces malformed tool calls.
+    "report_content": ("reason",),
 }

@@ -16,7 +16,13 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from providers import DEFAULT_PROVIDER, PROVIDER_IDS, PROVIDERS, model_allowed
-from tools import ACTION_TYPES, MAX_ACTIONS_PER_CYCLE, MAX_TEXT_LENGTH, REQUIRED_ARGS
+from tools import (
+    ACTION_TYPES,
+    MAX_ACTIONS_PER_CYCLE,
+    MAX_TEXT_LENGTH,
+    REPORT_REASONS,
+    REQUIRED_ARGS,
+)
 
 # ── The model check ──────────────────────────────────────────────────────────
 #
@@ -152,6 +158,11 @@ class Action(BaseModel):
     user_id: str | None = Field(default=None, max_length=64)
     conversation_id: str | None = Field(default=None, max_length=128)
     text: str | None = Field(default=None, max_length=MAX_TEXT_LENGTH)
+    # A report category, and only ever one of `REPORT_REASONS`. Constrained here as well as in
+    # the tool schema because the schema is the provider's to honour and this is ours: a model
+    # that returns a category nobody recognises should be a dropped action, not a report Node
+    # has to refuse and record against the bot.
+    reason: Literal[tuple(REPORT_REASONS)] | None = None  # type: ignore[valid-type]
 
     @model_validator(mode="after")
     def _require_args(self) -> "Action":
@@ -159,6 +170,15 @@ class Action(BaseModel):
             value = getattr(self, arg, None)
             if not value or not str(value).strip():
                 raise ValueError(f"{self.type} requires {arg}")
+
+        # A report names exactly one subject. The flat schema cannot say "one of these two",
+        # so it is said here — Node refuses both-or-neither too, but dropping it at this end
+        # saves the round trip and keeps the rejection out of the bot's audit log.
+        if self.type == "report_content":
+            named = [bool(self.post_id), bool(self.user_id)]
+            if sum(named) != 1:
+                raise ValueError("report_content needs exactly one of post_id or user_id")
+
         return self
 
 

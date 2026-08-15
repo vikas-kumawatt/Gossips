@@ -51,6 +51,7 @@ import {
   privacyOf,
   resolveGroupSend,
   resolveReplyTo,
+  visiblePresence,
 } from "../utils/chatAccess.js";
 import { pollFor } from "../utils/pollView.js";
 import { sendPushNotification } from "../utils/pushNotifications.js";
@@ -742,27 +743,16 @@ export const initializeSocket = (server) => {
           return;
         }
 
-        const privacy = await privacyOf(userId);
-        const [maySeeOnline, maySeeLastSeen] = await Promise.all([
-          audienceAllows(socket.userId, userId, privacy.whoCanSeeOnlineStatus),
-          audienceAllows(socket.userId, userId, privacy.whoCanSeeLastSeen),
-        ]);
-
-        if (!maySeeOnline && !maySeeLastSeen) {
-          socket.emit("userStatus", hidden);
-          return;
-        }
-
-        const online = await isUserOnline(userId);
-        let lastSeen = null;
-        if (maySeeLastSeen) {
-          if (online) lastSeen = new Date();
-          else {
-            const user = await User.findById(userId).select("lastActiveAt").lean();
-            lastSeen = user?.lastActiveAt ?? null;
-          }
-        }
-        socket.emit("userStatus", { userId, isOnline: maySeeOnline && online, lastSeen });
+        /*
+         * The rules moved to `visiblePresence` when the bot DM inspection view needed the
+         * same answer over REST — it has no socket. One implementation, because two copies
+         * of a privacy check is how one of them ends up wrong.
+         */
+        socket.emit("userStatus", {
+          userId,
+          // One viewer here: the person holding the socket is the only one who sees this.
+          ...(await visiblePresence([socket.userId], userId, isUserOnline)),
+        });
       } catch (error) {
         console.error("Error getting user status:", error);
       }

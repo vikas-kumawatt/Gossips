@@ -234,3 +234,59 @@ export const followUser = async ({ actorId, targetId }) => {
   await invalidateProfileCaches(actor?.username, target.username);
   return { ok: true, pending: false, isPrivate: false };
 };
+
+/**
+ * Stop following someone, or withdraw a request that hasn't been answered.
+ *
+ * One function for both, because the *edge* is the same row and which one this was is only
+ * knowable after deleting it — the controller has always worked this way and the returned
+ * `wasPending` is how the caller phrases the result.
+ *
+ * @returns `{ ok, wasPending }`
+ *
+ * No block check, deliberately, and this is the one place that asymmetry is correct: someone
+ * who has blocked you is someone you must still be able to stop following. `followUser` gates
+ * on blocks because it creates a relationship; this ends one.
+ */
+export const unfollowUser = async ({ actorId, targetId }) => {
+  if (!mongoose.isValidObjectId(targetId)) {
+    return { ok: false, status: 404, error: "User not found" };
+  }
+
+  const [actor, target] = await Promise.all([
+    User.findById(actorId).select("username").lean(),
+    User.findById(targetId).select("_id username").lean(),
+  ]);
+
+  if (!target) return { ok: false, status: 404, error: "User not found" };
+  if (idOf(target._id) === idOf(actorId)) {
+    return { ok: false, status: 400, error: "You cannot unfollow yourself" };
+  }
+
+  /*
+   * Status-agnostic, as the controller was: this deletes a `pending` row too, which is what
+   * makes "cancel request" the same operation. The deleted document is the only record of
+   * which it was, so the counter adjustment below has to read it rather than re-query.
+   */
+  const edge = await Follow.findOneAndDelete({ follower: actorId, following: target._id });
+  if (!edge) return { ok: false, status: 400, error: "You are not following this user" };
+
+  // Only an accepted edge was ever counted. Decrementing for a withdrawn request would
+  // take both accounts' totals below what they actually are.
+  if (edge.status === "accepted") {
+    await Promise.all([
+      User.updateOne({ _id: actorId }, { $inc: { "counts.following": -1 } }),
+      User.updateOne({ _id: target._id }, { $inc: { "counts.followers": -1 } }),
+    ]);
+  }
+
+  // No notification, matching the controller — and matching every other product: being
+  // unfollowed is not something anyone is told about.
+  getIO().to(idOf(actorId)).emit("followStatusUpdate", {
+    username: target.username,
+    action: edge.status === "pending" ? "cancel-request" : "unfollow",
+  });
+
+  await invalidateProfileCaches(actor?.username, target.username);
+  return { ok: true, wasPending: edge.status === "pending" };
+};

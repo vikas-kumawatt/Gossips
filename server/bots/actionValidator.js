@@ -56,7 +56,90 @@ export const REQUIRED_ARGS = {
   send_dm: ["user_id", "text"],
   reply_dm: ["conversation_id", "text"],
   create_post: ["text"],
+  unfollow_user: ["user_id"],
+  save_post: ["post_id"],
+  not_interested_post: ["post_id"],
+  favourite_author: ["user_id"],
+  mute_user: ["user_id"],
+  block_user: ["user_id"],
+  /*
+   * `reason` rather than `text`, and deliberately not free prose. It is a *subcategory* id
+   * from `BOT_REPORT_REASONS` below, which maps it back to its category — a report the
+   * moderation queue cannot categorise is a report nobody triages, and a category without its
+   * subcategory is one the report endpoint refuses outright.
+   */
+  report_content: ["reason"],
 };
+
+/**
+ * The reasons a bot may give for a report, and what each resolves to.
+ *
+ * ── Why the model names a *subcategory* ─────────────────────────────────────
+ *
+ * The first attempt let it choose a bare category — `spam`, `hate` — and every report failed
+ * with a 400 nobody would have noticed for weeks: `validateReportReason` requires a
+ * subcategory for every category that has one, and all of these do. The only category without
+ * subcategories is `something_else`, which needs free-text details instead and is excluded for
+ * exactly that reason.
+ *
+ * Defaulting the subcategory per category would have made the call succeed and put a guess in
+ * front of a moderator — "spam" reported as `repetitive_posting` when it was a phishing link.
+ * A queue that is wrong in a specific-looking way is worse than one that is vague. So the model
+ * names the specific reason and the category is derived from it; subcategory ids are unique
+ * across the table, so one field carries both.
+ *
+ * ── What is excluded, and why ───────────────────────────────────────────────
+ *
+ * Whole categories: `impersonation`, `underage` and `ip` turn on facts a model cannot have —
+ * whether an account is pretending to be a real person it has never met, how old someone is,
+ * who owns a piece of work. `nudity` goes too: its subcategories include the most serious
+ * report this platform accepts, and a bot judging that from clipped text is not a decision
+ * anyone should want automated.
+ *
+ * Individual reasons: `manipulated_media` and `brand_impersonation` need to recognise an image
+ * or a brand, and `counterfeit_goods` needs to know what the real product costs. All three are
+ * guesses dressed as findings.
+ *
+ * Even what remains is stamped `reporterIsBot` so a moderator can weigh it accordingly.
+ */
+export const BOT_REPORT_REASONS = new Map([
+  ["unwanted_commercial", "spam"],
+  ["bots_fake_engagement", "spam"],
+  ["repetitive_posting", "spam"],
+  ["malicious_links", "spam"],
+
+  ["slurs", "hate"],
+  ["hate_symbols", "hate"],
+  ["dehumanising_speech", "hate"],
+  ["targeted_group_attack", "hate"],
+
+  ["violent_threats", "violence"],
+  ["graphic_violence", "violence"],
+  ["terrorism_extremism", "violence"],
+  ["animal_abuse", "violence"],
+
+  ["targeted_harassment", "bullying"],
+  ["unwanted_contact", "bullying"],
+  ["threats_to_share", "bullying"],
+  ["doxxing", "bullying"],
+
+  ["health_misinformation", "false_info"],
+  ["election_misinformation", "false_info"],
+  ["other_misinformation", "false_info"],
+
+  ["phishing", "scam"],
+  ["fake_giveaway", "scam"],
+  ["investment_scam", "scam"],
+  ["romance_scam", "scam"],
+
+  ["drugs", "illegal"],
+  ["weapons", "illegal"],
+  ["endangered_wildlife", "illegal"],
+
+  ["suicide_self_injury", "self_harm"],
+  ["eating_disorder", "self_harm"],
+  ["encouraging_self_harm", "self_harm"],
+]);
 
 /** Mirrors `MAX_ACTIONS_PER_CYCLE` in python-service/tools.py. */
 export const MAX_ACTIONS_PER_CYCLE = 6;
@@ -81,6 +164,24 @@ const TARGET_OF = {
   comment_post: { field: "post_id", kind: "posts", type: "Post" },
   quote_post: { field: "post_id", kind: "posts", type: "Post" },
   reply_dm: { field: "conversation_id", kind: "conversations", type: "Conversation" },
+  unfollow_user: { field: "user_id", kind: "users", type: "User" },
+  favourite_author: { field: "user_id", kind: "users", type: "User" },
+  mute_user: { field: "user_id", kind: "users", type: "User" },
+  block_user: { field: "user_id", kind: "users", type: "User" },
+  save_post: { field: "post_id", kind: "posts", type: "Post" },
+  not_interested_post: { field: "post_id", kind: "posts", type: "Post" },
+  /*
+   * A report names either a post or a user, so its target is resolved separately below rather
+   * than through this table — see the `report_content` block in `validateAction`. Putting it
+   * here would mean picking one of the two fields up front, and the whole point is that the
+   * model chooses which kind of thing it is reporting.
+   */
+};
+
+/** The two kinds of thing a bot may report, and where each is drawn from. */
+const REPORTABLE = {
+  post: { field: "post_id", kind: "posts", type: "Post" },
+  user: { field: "user_id", kind: "users", type: "User" },
 };
 
 const asString = (value) => (typeof value === "string" ? value.trim() : "");
@@ -91,7 +192,8 @@ const asString = (value) => (typeof value === "string" ? value.trim() : "");
  * @returns {{ok: true, action: object} | {ok: false, action: object, reason: string}}
  */
 const validateAction = (raw, context) => {
-  const { allowedTargets, extraBlockedTags, systemPrompt, maxTextLength } = context;
+  const { allowedTargets, extraBlockedTags, systemPrompt, maxTextLength, botId, ownerId } =
+    context;
 
   if (!raw || typeof raw !== "object") {
     return { ok: false, action: { type: "unknown" }, reason: "not an object" };
@@ -141,13 +243,78 @@ const validateAction = (raw, context) => {
    * ── Per-type rules that the schema cannot express ──────────────────────────
    */
 
-  // Likes and reposts are toggles. Acting on one already done would *undo* it, which is not
-  // what a model that asked to "like this post" meant, and reads to the author as a retraction.
+  /*
+   * ── Toggles, and the undo they would silently perform ──────────────────────
+   *
+   * Like, repost and save all toggle. A model that asks to "like this post" about a post the
+   * bot already liked means nothing by it, but the service would *remove* the like — and to
+   * the author that reads as a retraction, arriving as a notification they can't explain.
+   * The perception carries `already_*` on every feed post precisely so this check can exist.
+   */
   if (type === "like_post" && meta?.alreadyLiked) {
     return { ok: false, action, reason: "already liked" };
   }
   if (type === "repost_post" && meta?.alreadyReposted) {
     return { ok: false, action, reason: "already reposted" };
+  }
+  if (type === "save_post" && meta?.alreadySaved) {
+    return { ok: false, action, reason: "already saved" };
+  }
+  /*
+   * Not a toggle — dismissing is an idempotent upsert — but still refused. Re-dismissing
+   * something already dismissed spends one of a capped daily budget to change nothing.
+   */
+  if (type === "not_interested_post" && meta?.alreadyDismissed) {
+    return { ok: false, action, reason: "already marked not interested" };
+  }
+
+  /*
+   * ── Relationship actions that would be no-ops ──────────────────────────────
+   *
+   * Each of these is refused rather than executed-and-ignored, because the underlying service
+   * treats them as successes: `muteUser` on someone already muted returns ok, and the audit
+   * log would then show a mute that did nothing. Worse, a stateless model with no memory of
+   * having done it will propose the same one every cycle, forever.
+   */
+  if (type === "follow_user" || type === "send_follow_request") {
+    if (meta?.following) return { ok: false, action, reason: "already following" };
+    if (meta?.requested) return { ok: false, action, reason: "a follow request is already pending" };
+  }
+  if (type === "unfollow_user" && meta && !meta.following && !meta.requested) {
+    return { ok: false, action, reason: "not following this account" };
+  }
+  if (type === "mute_user" && meta?.muted) {
+    return { ok: false, action, reason: "already muted" };
+  }
+  if (type === "block_user" && meta?.blocked) {
+    return { ok: false, action, reason: "already blocked" };
+  }
+
+  /*
+   * A bot must not mute or block the person it is talking to *instead of* answering them, and
+   * it must never block another bot into a mutual dead end. The bot-to-bot case is the one
+   * worth spelling out: two personas blocking each other is invisible to every human involved
+   * and permanently removes both from each other's reach, for a reason neither owner chose.
+   */
+  if ((type === "mute_user" || type === "block_user") && meta?.isBot) {
+    return { ok: false, action, reason: "bots do not moderate other bots" };
+  }
+
+  /*
+   * Never the owner, for any of the three.
+   *
+   * The owner shows up in a bot's perception all the time — their posts are in its feed, they
+   * DM it, they follow it. A persona that decides its owner is spamming would file a report
+   * naming the person responsible for it, or block the account that operates it, and the owner
+   * would find out from a moderation queue. The bot is theirs; it does not get an opinion
+   * about them.
+   */
+  if (
+    ownerId &&
+    ["mute_user", "block_user"].includes(type) &&
+    String(action.userId) === String(ownerId)
+  ) {
+    return { ok: false, action, reason: "a bot does not moderate its own owner" };
   }
 
   /*
@@ -173,6 +340,90 @@ const validateAction = (raw, context) => {
   }
   if (type === "reply_dm" && meta?.withIsBot) {
     return { ok: false, action, reason: "bots do not message other bots" };
+  }
+
+  /*
+   * ── Reporting ─────────────────────────────────────────────────────────────
+   *
+   * Its target is resolved here rather than through `TARGET_OF`, because which *kind* of thing
+   * is being reported is the model's choice: a post or the account behind it. Both are still
+   * drawn from the same allowlists as every other action, so the guarantee is unchanged — a
+   * bot can only report something it was actually shown.
+   *
+   * The reason is a category id from the same table a person's report uses, narrowed to the
+   * subset a model can honestly judge. Free text is not accepted at all: `details` is where a
+   * person explains themselves, and a generated paragraph in a moderation queue is unverifiable
+   * prose that a human then has to read before discovering it says nothing.
+   */
+  if (type === "report_content") {
+    const reason = asString(raw.reason);
+    const category = BOT_REPORT_REASONS.get(reason);
+    if (!category) {
+      return {
+        ok: false,
+        action,
+        reason: `not a reportable reason: ${reason.slice(0, 40) || "(none)"}`,
+      };
+    }
+
+    const postId = asString(raw.post_id);
+    const userId = asString(raw.user_id);
+    if (Boolean(postId) === Boolean(userId)) {
+      // Both or neither. A report has exactly one subject, and guessing which one the model
+      // meant is how the wrong account ends up in a moderation queue.
+      return { ok: false, action, reason: "report exactly one post or one user" };
+    }
+
+    const kind = postId ? "post" : "user";
+    const spec = REPORTABLE[kind];
+    const id = postId || userId;
+
+    const allowed = allowedTargets?.[spec.kind];
+    if (!allowed?.has(id)) {
+      return { ok: false, action, reason: `${kind} not in perception` };
+    }
+    const reportMeta = allowed.get(id);
+
+    /*
+     * Never its own author. `posts` carries `authorId`, so this is checkable without another
+     * query — and without it a bot could report the account it is a persona of, or report a
+     * post into a queue naming its own owner.
+     */
+    if (kind === "post" && reportMeta?.authorId && reportMeta.authorId === String(botId)) {
+      return { ok: false, action, reason: "cannot report its own post" };
+    }
+    if (kind === "user" && id === String(botId)) {
+      return { ok: false, action, reason: "cannot report itself" };
+    }
+    // Nor the person who runs it — see the note on the mute/block guard above. The owner's
+    // posts reach a bot's feed routinely, so this is not a theoretical path.
+    if (ownerId && (id === String(ownerId) || reportMeta?.authorId === String(ownerId))) {
+      return { ok: false, action, reason: "a bot does not report its own owner" };
+    }
+
+    action.reportKind = kind;
+    // Both halves, because `createReport` validates the pair together and a category without
+    // its subcategory is the 400 this whole mapping exists to avoid.
+    action.reportCategory = category;
+    action.reportSubcategory = reason;
+    action.targetType = spec.type;
+    action.targetId = id;
+    if (kind === "post") {
+      action.postId = id;
+    } else {
+      action.userId = id;
+      /*
+       * Carried from the allowlist rather than looked up later. `resolveReportTarget` addresses
+       * an account by handle, and the handle is already here — taking it from the same entry
+       * that authorised the target means the executor needs no query and no `User` import, and
+       * the two can't disagree about who was meant. A rename in the intervening seconds makes
+       * the report 404 and be refused, which is the right way for that race to fail.
+       */
+      action.reportUsername = reportMeta?.username || "";
+      if (!action.reportUsername) {
+        return { ok: false, action, reason: "that account has no handle to report" };
+      }
+    }
   }
 
   /*
@@ -208,6 +459,11 @@ const validateAction = (raw, context) => {
  * @param {Iterable<string>} [context.extraBlockedTags] admin additions, read once per cycle
  * @param {string} [context.systemPrompt] to check generated text against for leakage
  * @param {number} [context.maxTextLength]
+ * @param {string} [context.botId] the acting bot, so it cannot report itself or its own posts
+ * @param {string} [context.ownerId] the human who runs it, who is off-limits to all three of
+ *        mute, block and report — their posts reach the bot's feed like anyone else's
+ * @param {Set<string>} [context.blockedActions] types refused before anything else is checked,
+ *        because a per-day cap on them is already spent — see `SENSITIVE_ACTION_LIMITS`
  * @returns {{actions: object[], rejected: Array<{type: string, targetType: ?string, targetId: ?string, reason: string}>}}
  */
 export const validateDecision = (decision, context = {}) => {
@@ -216,9 +472,12 @@ export const validateDecision = (decision, context = {}) => {
     extraBlockedTags = [],
     systemPrompt = "",
     maxTextLength = MAX_BOT_TEXT_LENGTH,
+    botId = null,
+    ownerId = null,
+    blockedActions = new Set(),
   } = context;
 
-  const inner = { allowedTargets, extraBlockedTags, systemPrompt, maxTextLength };
+  const inner = { allowedTargets, extraBlockedTags, systemPrompt, maxTextLength, botId, ownerId };
   const raw = Array.isArray(decision?.actions) ? decision.actions : [];
 
   const actions = [];
@@ -239,6 +498,25 @@ export const validateDecision = (decision, context = {}) => {
         targetType: null,
         targetId: null,
         reason: `more than ${MAX_ACTIONS_PER_CYCLE} actions in one cycle`,
+      });
+      continue;
+    }
+
+    /*
+     * The per-type daily caps, applied before the action is examined at all.
+     *
+     * Checked here rather than only in the executor so the refusal reads honestly in the audit
+     * log — "the daily cap for this is spent", not "rejected" with no explanation — and so a
+     * cycle that proposes three blocks against a spent cap records three refusals rather than
+     * performing the first and failing the rest.
+     */
+    const proposedType = asString(candidate?.type);
+    if (blockedActions.has(proposedType)) {
+      rejected.push({
+        type: proposedType,
+        targetType: null,
+        targetId: null,
+        reason: "the daily limit for this kind of action is used up",
       });
       continue;
     }

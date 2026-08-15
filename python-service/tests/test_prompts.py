@@ -173,23 +173,55 @@ def test_action_types_are_a_closed_enum():
     assert ACTION_TOOL["input_schema"]["additionalProperties"] is False
 
 
-def test_the_twelve_agreed_actions_are_all_present_and_nothing_else():
+def test_the_agreed_actions_are_all_present_and_nothing_else():
+    """The action space, spelled out.
+
+    Written as a literal rather than derived, because the whole point is to fail when someone
+    adds a verb — a new action needs a matching entry in five other places (the Node validator's
+    `REQUIRED_ARGS` and `TARGET_OF`, the executor's switch, `COUNTED_ACTIONS`, and the
+    `BOT_ACTIONS` enum) and none of those are enforced by a type.
+    """
     assert set(ACTION_TYPES) == {
+        # Reads and the null action.
         "scroll_feed",
         "view_profile",
+        "do_nothing",
+        # Reacting to a post.
         "like_post",
         "comment_post",
         "repost_post",
         "quote_post",
+        "save_post",
+        "not_interested_post",
+        # Relationships.
         "follow_user",
         "send_follow_request",
+        "unfollow_user",
+        "favourite_author",
+        # Talking.
         "send_dm",
         "reply_dm",
         "create_post",
-        "do_nothing",
+        # The three that land on someone else. Capped separately on the Node side.
+        "mute_user",
+        "block_user",
+        "report_content",
     }
     # Every type declares what it needs, so none can slip through unvalidated.
     assert set(REQUIRED_ARGS) == set(ACTION_TYPES)
+
+
+def test_report_reasons_are_a_closed_enum_a_model_can_actually_judge():
+    """A report goes in front of a human moderator, so the category has to be one the model can
+    honestly assess from text. Impersonation, age, intellectual property and nudity are excluded
+    because they turn on facts a model does not have."""
+    from tools import REPORT_REASONS
+
+    schema = ACTION_TOOL["input_schema"]["properties"]["actions"]["items"]
+    assert schema["properties"]["reason"]["enum"] == REPORT_REASONS
+
+    for excluded in ("impersonation", "underage", "ip", "nudity", "something_else"):
+        assert excluded not in REPORT_REASONS
 
 
 def test_generated_text_and_action_count_are_capped_in_the_schema():

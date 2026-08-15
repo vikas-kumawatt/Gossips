@@ -1,6 +1,8 @@
 import BotActionLog from "../models/BotActionLog.js";
 import { commentOnPost, createPost } from "../services/authoring.js";
-import { followUser, likePost, repostPost } from "../services/engagement.js";
+import { followUser, likePost, repostPost, unfollowUser } from "../services/engagement.js";
+import { favouriteAuthor, savePost, setNotInterested } from "../services/curation.js";
+import { blockUser, muteUser, reportContent } from "../services/moderation.js";
 import { sendDirectMessage } from "../services/directMessage.js";
 import { participantsOfConversation } from "../utils/conversationActivity.js";
 import { canBotSendDm } from "./actionValidator.js";
@@ -221,11 +223,99 @@ const perform = async (action, botId) => {
       return result.ok ? executed() : rejected(result.error);
     }
 
+    case "unfollow_user": {
+      const result = await unfollowUser({ actorId: botId, targetId: action.userId });
+      return result.ok ? executed() : rejected(result.error);
+    }
+
+    /*
+     * The private three. Nobody but the owner can tell these happened, which is why they carry
+     * no extra gate beyond the general daily budget.
+     */
+    case "save_post": {
+      const result = await savePost({ actorId: botId, postId: action.postId });
+      if (!result.ok) return rejected(result.error);
+      /*
+       * Saving is a toggle and reports which way it went. The validator refuses a save on an
+       * `already_saved` post, so `saved: false` here means the state changed between the
+       * perception and now — the bot has just *un*-saved something. Recorded as a rejection
+       * because the intent wasn't carried out.
+       */
+      if (result.saved === false) return rejected("it was already saved and has been removed");
+      return executed();
+    }
+
+    case "not_interested_post": {
+      const result = await setNotInterested({ actorId: botId, postId: action.postId });
+      return result.ok ? executed() : rejected(result.error);
+    }
+
+    case "favourite_author": {
+      const result = await favouriteAuthor({ actorId: botId, targetId: action.userId });
+      if (!result.ok) return rejected(result.error);
+      if (result.favorite === false) return rejected("they were already a favourite and have been removed");
+      return executed();
+    }
+
+    /*
+     * The consequential three. Their own daily caps are applied before this — see
+     * `spentSensitiveActions` and the `blockedActions` set the validator consults — so
+     * reaching here means the budget allowed it.
+     */
+    case "mute_user": {
+      const result = await muteUser({ actorId: botId, targetId: action.userId });
+      if (!result.ok) return rejected(result.error);
+      // The service is idempotent and calls an existing mute a success. The validator already
+      // refuses that case, so hitting it here means the state changed mid-cycle; recording it
+      // as executed would spend a cap slot on nothing.
+      if (result.alreadyMuted) return rejected("already muted");
+      return executed();
+    }
+
+    case "block_user": {
+      const result = await blockUser({ actorId: botId, targetId: action.userId });
+      if (!result.ok) return rejected(result.error);
+      if (result.alreadyBlocked) return rejected("already blocked");
+      return executed();
+    }
+
+    case "report_content": {
+      /*
+       * The two shapes a bot may report. `resolveReportTarget` addresses an account by handle,
+       * and the validator carried the handle across from the allowlist entry that authorised
+       * the target — so there is no lookup here and no way for this to name a different
+       * account than the one that was checked.
+       */
+      const payload =
+        action.reportKind === "post"
+          ? { targetType: "post", targetId: action.postId }
+          : { targetType: "user", username: action.reportUsername };
+
+      const result = await reportContent({
+        actorId: botId,
+        ...payload,
+        category: action.reportCategory,
+        subcategory: action.reportSubcategory,
+        // No `details`: free text from a model in a moderation queue is unverifiable prose a
+        // human has to read before finding out it says nothing. The reason is the report.
+        details: null,
+        reporterIsBot: true,
+      });
+      if (!result.ok) return rejected(result.error);
+      /*
+       * An existing open report already covers this. The service calls that a success — for a
+       * person it means "we have it, thanks" — but for a bot it must not spend a cap slot, and
+       * the log should say why nothing happened.
+       */
+      if (result.alreadyReported) return rejected("this was already reported");
+      return executed();
+    }
+
     default:
       /*
-       * Unreachable — the validator only emits the twelve types. Kept because the alternative is
-       * a silent no-op logged as a success, and a type that reached here would mean the two
-       * modules had drifted, which is exactly the thing that must be loud.
+       * Unreachable — the validator only emits the types in `REQUIRED_ARGS`. Kept because the
+       * alternative is a silent no-op logged as a success, and a type that reached here would
+       * mean the two modules had drifted, which is exactly the thing that must be loud.
        */
       return rejected(`no executor for ${action.type}`);
   }
@@ -239,16 +329,37 @@ const perform = async (action, botId) => {
  * @param {object} context.bot the bot's `User` row (needs `_id` and `owner`)
  * @param {string} context.cycleId
  * @param {number} context.remainingActions write actions still allowed today
+ * @param {Map<string, number>} [context.sensitiveRemaining] per-type allowance left today for
+ *        report, mute and block — see `SENSITIVE_ACTION_LIMITS`
  * @param {object} [context.usage] token counts for this cycle
  * @returns {Promise<{executed: number, rejected: number, failed: number}>}
  */
 export const executeActions = async (actions, context) => {
-  const { bot, cycleId = "", remainingActions = Number.POSITIVE_INFINITY, usage = null } = context;
+  const {
+    bot,
+    cycleId = "",
+    remainingActions = Number.POSITIVE_INFINITY,
+    sensitiveRemaining = new Map(),
+    usage = null,
+  } = context;
   const botId = bot?._id ?? bot;
   const owner = bot?.owner ?? null;
 
   const counts = { executed: 0, rejected: 0, failed: 0 };
   let budget = remainingActions;
+  /*
+   * The per-type caps, decremented here as the general budget is.
+   *
+   * The validator refuses a type whose cap is *already spent*, which is necessary and was not
+   * sufficient: it reads one count before the cycle and the same cap is not re-checked between
+   * actions, so a decision proposing six blocks against a cap of three passed all six — six
+   * different targets, so not duplicates, and nothing else counted them. Blocks are the
+   * irreversible ones, which made it the worst place for that gap to be.
+   *
+   * A copy, so the caller's map is not mutated: the runner builds it once and a retry must not
+   * inherit a spent one.
+   */
+  const perType = new Map(sensitiveRemaining);
   /*
    * The cycle's token cost rides on the first row written and no other.
    *
@@ -283,6 +394,25 @@ export const executeActions = async (actions, context) => {
       continue;
     }
 
+    // The per-type cap, checked per action for the same reason the general budget is.
+    const typeBudget = perType.get(action.type);
+    if (typeBudget !== undefined && typeBudget <= 0) {
+      counts.rejected += 1;
+      await logAction({
+        bot: botId,
+        owner,
+        action: action.type,
+        outcome: "rejected",
+        targetType: action.targetType ?? null,
+        targetId: action.targetId ?? null,
+        reason: "the daily limit for this kind of action is used up",
+        cycleId,
+        usage: usageAttached ? null : usage,
+      });
+      usageAttached = true;
+      continue;
+    }
+
     let result;
     try {
       result = await perform(action, botId);
@@ -296,7 +426,12 @@ export const executeActions = async (actions, context) => {
     }
 
     counts[result.outcome] += 1;
-    if (result.outcome === "executed" && counted) budget -= 1;
+    if (result.outcome === "executed") {
+      if (counted) budget -= 1;
+      // Only a carried-out action spends its per-type allowance. A refused block blocked
+      // nobody, and charging for it would let a bot lock itself out by proposing bad ones.
+      if (typeBudget !== undefined) perType.set(action.type, typeBudget - 1);
+    }
 
     await logAction({
       bot: botId,

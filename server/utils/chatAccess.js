@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import Follow from "../models/Follow.js";
 import Group from "../models/Group.js";
 import GroupMember from "../models/GroupMember.js";
+import User from "../models/User.js";
 import UserRelation from "../models/UserRelation.js";
 import UserSettings from "../models/UserSettings.js";
 
@@ -182,6 +183,66 @@ export const privacyOf = async (userId) => {
   };
   if (key) privacyCache.set(key, { at: Date.now(), value });
   return value;
+};
+
+/**
+ * What `viewers` are allowed to know about `peerId`'s presence.
+ *
+ * The same two settings the socket's `getUserStatus` handler enforces, and the same order —
+ * lifted out of it because there is now a second caller. Presence over REST is what the AI
+ * bot DM inspection view uses: it has no socket of its own.
+ *
+ * ── Why this takes a list ───────────────────────────────────────────────────
+ *
+ * That view has *two* viewers and both have to be satisfied. The bot is the account in the
+ * conversation, so the peer's privacy choice was made about it — pass only the owner and you
+ * would show a last-seen the bot was never entitled to. But the human reading the screen is
+ * the owner, and pass only the bot and you have built a way to launder presence: someone who
+ * blocked me, or who limits last-seen to followers, becomes readable to me the moment my bot
+ * gets a DM from them. Neither viewer alone is the right answer, so every viewer must allow
+ * it and the strictest wins.
+ *
+ * Blocks are *not* covered here — `audienceAllows` says so explicitly — so callers check
+ * those separately and first, for every viewer they pass.
+ *
+ * Both fields come back null rather than absent when the policy denies them, so a caller
+ * that forgets to check still renders nothing instead of leaking a default.
+ *
+ * @param {Array<string|object>} viewers everyone who will see the answer; all must allow it.
+ * @param {Function} isOnline async (userId) => boolean — injected because presence lives in
+ *        the socket layer and importing it here would be a cycle.
+ * @param {Date} [knownLastActiveAt] the peer's `lastActiveAt` if the caller already loaded
+ *        it, which saves a query per peer on a list.
+ * @returns {Promise<{isOnline: boolean, lastSeen: Date|null}>}
+ */
+export const visiblePresence = async (viewers, peerId, isOnline, knownLastActiveAt) => {
+  const list = (Array.isArray(viewers) ? viewers : [viewers]).filter(Boolean);
+  if (!list.length) return { isOnline: false, lastSeen: null };
+
+  const privacy = await privacyOf(peerId);
+  const verdicts = await Promise.all(
+    list.flatMap((viewer) => [
+      audienceAllows(viewer, peerId, privacy.whoCanSeeOnlineStatus),
+      audienceAllows(viewer, peerId, privacy.whoCanSeeLastSeen),
+    ])
+  );
+  const maySeeOnline = verdicts.filter((_, i) => i % 2 === 0).every(Boolean);
+  const maySeeLastSeen = verdicts.filter((_, i) => i % 2 === 1).every(Boolean);
+
+  if (!maySeeOnline && !maySeeLastSeen) return { isOnline: false, lastSeen: null };
+
+  const online = await isOnline(peerId);
+  let lastSeen = null;
+  if (maySeeLastSeen) {
+    if (online) lastSeen = new Date();
+    else if (knownLastActiveAt !== undefined) lastSeen = knownLastActiveAt ?? null;
+    else {
+      const user = await User.findById(peerId).select("lastActiveAt").lean();
+      lastSeen = user?.lastActiveAt ?? null;
+    }
+  }
+
+  return { isOnline: maySeeOnline && online, lastSeen };
 };
 
 /**

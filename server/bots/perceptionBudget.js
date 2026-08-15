@@ -146,7 +146,14 @@ export const clip = (text, limit) => {
  * need to know how popular someone is, and every extra field is a token spent and a fact
  * disclosed to a model.
  */
-export const shapeActor = (user, { withBio = false } = {}) => ({
+/**
+ * @param {Map} [options.relationships] the bot's standing relationship with this account,
+ *        keyed by id — see `loadRelationships`. In the options object rather than a second
+ *        positional parameter so the existing `shapeActor(user, { withBio })` call sites keep
+ *        working unchanged; a positional insert there is the kind of silent breakage that
+ *        shows up as a missing bio rather than as an error.
+ */
+export const shapeActor = (user, { relationships = null, withBio = false } = {}) => ({
   id: String(user?._id ?? user?.id ?? ""),
   username: user?.username ?? "",
   // Labelled `untrusted_` because it is text a stranger chose. See `PERCEPTION_NOTICE`.
@@ -162,7 +169,28 @@ export const shapeActor = (user, { withBio = false } = {}) => ({
    */
   ...(withBio ? { untrusted_bio: clip(user?.bio, TEXT_CAPS.bio) } : {}),
   is_bot: Boolean(user?.isBot),
+  /*
+   * The standing relationship, when the caller has it.
+   *
+   * Only the true ones are emitted. Four `false`s per author on twelve posts is forty-eight
+   * tokens a cycle spent saying nothing, and the model reads an absent flag the same way —
+   * the alternative was measurably worse for no gain in accuracy.
+   */
+  ...relationshipFlags(relationships, user),
 });
+
+/** Only the flags that are set, keyed off the actor's id. See `shapeActor`. */
+const relationshipFlags = (relationships, user) => {
+  const id = String(user?._id ?? user?.id ?? "");
+  const state = relationships?.get?.(id);
+  if (!state) return {};
+  return {
+    ...(state.following ? { you_follow_them: true } : {}),
+    ...(state.requested ? { you_requested_to_follow: true } : {}),
+    ...(state.muted ? { you_muted_them: true } : {}),
+    ...(state.blocked ? { you_blocked_them: true } : {}),
+  };
+};
 
 /**
  * The standing instruction that accompanies every perception.
@@ -191,9 +219,9 @@ export const PERCEPTION_NOTICE =
  * cycle and, worse, teaches nothing — the model has no way to learn from a refusal it never
  * sees.
  */
-export const shapeFeedPost = (post) => ({
+export const shapeFeedPost = (post, relationships) => ({
   id: String(post?._id ?? ""),
-  author: shapeActor(post?.author),
+  author: shapeActor(post?.author, { relationships }),
   untrusted_text: clip(post?.content, TEXT_CAPS.postContent),
   has_media: Boolean(post?.media?.length),
   has_poll: Boolean(post?.poll),
@@ -201,10 +229,21 @@ export const shapeFeedPost = (post) => ({
   likes: post?.counts?.likes ?? 0,
   comments: post?.counts?.comments ?? 0,
   created_at: post?.createdAt ? new Date(post.createdAt).toISOString() : null,
-  /** Whether this bot has already engaged, so it isn't offered a toggle that would undo. */
+  /**
+   * Whether this bot has already engaged, so it isn't offered a toggle that would undo.
+   * Like, repost and save are all toggles; dismissing is idempotent but re-dismissing still
+   * spends an action out of a capped budget.
+   */
   already_liked: Boolean(post?.alreadyLiked),
   already_reposted: Boolean(post?.alreadyReposted),
+  already_saved: Boolean(post?.alreadySaved),
+  already_dismissed: Boolean(post?.alreadyDismissed),
   can_reply: post?.canReply !== false,
+  /*
+   * From an account the bot doesn't follow. Present only on those, so it reads as a note
+   * about this post rather than a field to be reasoned about on every one.
+   */
+  ...(post?.fromDiscovery ? { from_discovery: true } : {}),
 });
 
 export const shapeMessage = (message, botId) => ({
@@ -214,9 +253,9 @@ export const shapeMessage = (message, botId) => ({
   sent_at: message?.createdAt ? new Date(message.createdAt).toISOString() : null,
 });
 
-export const shapeConversation = (conversation, botId) => ({
+export const shapeConversation = (conversation, botId, relationships) => ({
   id: conversation?.conversation ?? "",
-  with: shapeActor(conversation?.peer),
+  with: shapeActor(conversation?.peer, { relationships }),
   unread: conversation?.unread ?? 0,
   /*
    * Oldest first, so the tail reads as a conversation. A reversed slice would put the newest
@@ -253,19 +292,32 @@ export const shapeConversation = (conversation, botId) => ({
  * a *toggle*, so liking a post whose `already_liked` we don't know is a coin flip that can
  * silently remove a like, and commenting on it would bypass the author's reply-audience check.
  * There is also no action in the space that a notification post enables — replying to the
- * comment that caused it isn't one of the twelve — so nothing is lost by excluding it.
+ * comment that caused it is not in the action space — so little is lost by excluding it.
+ * `save_post` and `report_content` would now be meaningful on one, which is a reason to
+ * revisit this, but not to widen it without the engagement state that makes the toggles safe.
  */
 export const collectAllowedTargets = (perception) => {
   const posts = new Map();
   const users = new Map();
   const conversations = new Map();
 
-  /* First mention wins; every shape carries the same id and username for a given person. */
+  /*
+   * First mention wins; every shape carries the same id and username for a given person.
+   *
+   * The relationship flags are carried through because the validator refuses the no-ops they
+   * imply — following someone already followed, muting someone already muted. They are only
+   * present on actors shaped with a relationship map (feed authors and conversation peers);
+   * a follow-request sender has none, and absent correctly reads as "not following".
+   */
   const noteUser = (actor) => {
     if (!actor?.id || users.has(actor.id)) return;
     users.set(actor.id, {
       username: actor.username ?? "",
       isBot: Boolean(actor.is_bot),
+      following: Boolean(actor.you_follow_them),
+      requested: Boolean(actor.you_requested_to_follow),
+      muted: Boolean(actor.you_muted_them),
+      blocked: Boolean(actor.you_blocked_them),
     });
   };
 
@@ -275,6 +327,8 @@ export const collectAllowedTargets = (perception) => {
         authorId: post.author?.id || null,
         alreadyLiked: Boolean(post.already_liked),
         alreadyReposted: Boolean(post.already_reposted),
+        alreadySaved: Boolean(post.already_saved),
+        alreadyDismissed: Boolean(post.already_dismissed),
         // Absent reads as allowed, matching `shapeFeedPost`'s `post?.canReply !== false`.
         canReply: post.can_reply !== false,
       });

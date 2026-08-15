@@ -48,7 +48,16 @@ const clearFollowRequestNotification = (recipientId, senderId) =>
     type: "follow_request",
   }).catch((error) => console.error("clearFollowRequestNotification error:", error));
 
-import { followUser as followUserService } from "../services/engagement.js";
+import {
+  followUser as followUserService,
+  unfollowUser as unfollowUserService,
+} from "../services/engagement.js";
+import {
+  blockUser as blockUserService,
+  muteUser as muteUserService,
+  unblockUser as unblockUserService,
+  unmuteUser as unmuteUserService,
+} from "../services/moderation.js";
 
 const invalidateFollowRelatedCaches = async (...usernames) => {
   const unique = [...new Set(usernames.filter(Boolean))];
@@ -711,41 +720,26 @@ export const followUser = async (req, res) => {
   }
 };
 
+/**
+ * A thin adapter over `unfollowUserService`, matching the shape `followUser` above already has.
+ *
+ * The body moved out so a bot can unfollow without a request to hand it — the counter
+ * arithmetic, the status-agnostic delete that makes this double as "cancel request", and the
+ * socket emit are all unchanged, just callable.
+ */
 export const unfollowUser = async (req, res) => {
   try {
-    const userToUnfollow = await User.findOne({ username: req.params.username }).select("_id username");
+    const userToUnfollow = await User.findOne({ username: req.params.username }).select("_id");
     if (!userToUnfollow) return res.status(404).json({ message: "User not found" });
 
-    if (userToUnfollow._id.toString() === req.user._id.toString()) {
-      return res.status(400).json({ message: "You cannot unfollow yourself" });
-    }
-
-    const edge = await Follow.findOneAndDelete({
-      follower: req.user._id,
-      following: userToUnfollow._id,
+    const result = await unfollowUserService({
+      actorId: req.user._id,
+      targetId: userToUnfollow._id,
     });
+    if (!result.ok) return res.status(result.status).json({ message: result.error });
 
-    if (!edge) {
-      return res.status(400).json({ message: "You are not following this user" });
-    }
-
-    if (edge.status === "accepted") {
-      await Promise.all([
-        User.updateOne({ _id: req.user._id }, { $inc: { "counts.following": -1 } }),
-        User.updateOne({ _id: userToUnfollow._id }, { $inc: { "counts.followers": -1 } }),
-      ]);
-    }
-
-    // This user's own room, so every tab they have open is told — on any instance.
-    // `getUserSocket` only ever listed the sockets attached to this one.
-    io.to(req.user._id.toString()).emit("followStatusUpdate", {
-      username: userToUnfollow.username,
-      action: edge.status === "pending" ? "cancel-request" : "unfollow",
-    });
-
-    await invalidateFollowRelatedCaches(req.user.username, req.params.username);
     res.status(200).json({
-      message: edge.status === "pending" ? "Follow request canceled" : "User unfollowed successfully",
+      message: result.wasPending ? "Follow request canceled" : "User unfollowed successfully",
     });
   } catch (error) {
     console.error("unfollowUser error:", error);
@@ -904,85 +898,29 @@ export const isFollowingMe = async (req, res) => {
 // Block / Restrict
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Thin adapters over the moderation service.
+ *
+ * The bodies moved to `services/moderation.js` so an AI account can mute, block and report
+ * without a request to hand them. Nothing about what they do changed — the follow-edge
+ * teardown, the conditional counter arithmetic and the profile-cache invalidation are the
+ * same writes in the same order, and the idempotent 200s are preserved because the client
+ * depends on them: a rejected block used to make an optimistic UI roll back and get stuck.
+ */
 export const blockUser = async (req, res) => {
   try {
-    const userToBlock = await User.findOne({ username: req.params.username })
-      .select("_id username");
+    const userToBlock = await User.findOne({ username: req.params.username }).select("_id");
     if (!userToBlock) return res.status(404).json({ message: "User not found" });
 
-    /*
-     * You cannot block yourself. `muteUser` below has always guarded this and this
-     * did not, so the endpoint happily wrote a self edge — which then landed in the
-     * client's blocked set and hid your own posts and profile from you.
-     */
-    if (userToBlock._id.toString() === req.user._id.toString()) {
-      return res.status(400).json({ error: "You can't block yourself" });
-    }
+    const result = await blockUserService({ actorId: req.user._id, targetId: userToBlock._id });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
 
-    const existing = await UserRelation.findOne({
-      from: req.user._id,
-      to: userToBlock._id,
-      kind: "block",
+    // `blocked: true` so the client can reconcile from the response instead of guessing
+    // that no error meant success.
+    res.status(200).json({
+      message: result.alreadyBlocked ? "User already blocked" : "User blocked successfully",
+      blocked: true,
     });
-    /*
-     * Idempotent, like `muteUser`. This answered 400 "User already blocked", and the
-     * client treats a rejected block as a failed one — so it rolled back its
-     * optimistic update and the button went straight back to saying "Block". Any UI
-     * holding slightly stale state was therefore permanently stuck: every click
-     * failed, and every failure restored the state that caused the next click.
-     *
-     * Already blocked is the state the caller asked for, so it is a success.
-     */
-    if (existing) {
-      return res.status(200).json({ message: "User already blocked", blocked: true });
-    }
-
-    await UserRelation.create({ from: req.user._id, to: userToBlock._id, kind: "block" });
-
-    // Remove any follow edges between the two users and adjust counts
-    const [removedA, removedB] = await Promise.all([
-      Follow.findOneAndDelete({ follower: req.user._id, following: userToBlock._id, status: "accepted" }),
-      Follow.findOneAndDelete({ follower: userToBlock._id, following: req.user._id, status: "accepted" }),
-      // Also clear pending requests in both directions
-      Follow.deleteMany({
-        $or: [
-          { follower: req.user._id, following: userToBlock._id },
-          { follower: userToBlock._id, following: req.user._id },
-        ],
-        status: "pending",
-      }),
-    ]);
-
-    const countUpdates = [];
-    if (removedA) {
-      countUpdates.push(
-        User.updateOne({ _id: req.user._id }, { $inc: { "counts.following": -1 } }),
-        User.updateOne({ _id: userToBlock._id }, { $inc: { "counts.followers": -1 } })
-      );
-    }
-    if (removedB) {
-      countUpdates.push(
-        User.updateOne({ _id: userToBlock._id }, { $inc: { "counts.following": -1 } }),
-        User.updateOne({ _id: req.user._id }, { $inc: { "counts.followers": -1 } })
-      );
-    }
-    await Promise.all(countUpdates);
-
-    /*
-     * The cached profiles, because this just changed them.
-     *
-     * `getUserProfile` caches its payload for 60s under `CacheKeys.profile(username)`,
-     * and the counter `$inc`s above are exactly the numbers in it. Every follow path
-     * calls this helper for the same reason; block mutated the same fields and never
-     * did, so follower/following counts stayed wrong on both profiles for up to a
-     * minute after a block. `relationship.youBlocked` is per-viewer and not part of
-     * the cached payload, but the counts are.
-     */
-    await invalidateFollowRelatedCaches(req.user.username, userToBlock.username);
-
-    // `blocked: true` so the client can reconcile from the response instead of
-    // guessing that no error meant success.
-    res.status(200).json({ message: "User blocked successfully", blocked: true });
   } catch (error) {
     console.error("blockUser error:", error);
     res.status(500).json({ error: "Server error" });
@@ -991,15 +929,15 @@ export const blockUser = async (req, res) => {
 
 export const unblockUser = async (req, res) => {
   try {
-    const userToUnblock = await User.findOne({ username: req.params.username })
-      .select("_id username");
+    const userToUnblock = await User.findOne({ username: req.params.username }).select("_id");
     if (!userToUnblock) return res.status(404).json({ message: "User not found" });
 
-    await UserRelation.deleteOne({ from: req.user._id, to: userToUnblock._id, kind: "block" });
-    // Blocking removed follow edges and adjusted counts; unblocking doesn't restore
-    // them, but the cached profiles are dropped anyway so the viewer's relationship
-    // block is rebuilt rather than served from before the change.
-    await invalidateFollowRelatedCaches(req.user.username, userToUnblock.username);
+    const result = await unblockUserService({
+      actorId: req.user._id,
+      targetId: userToUnblock._id,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+
     res.status(200).json({ message: "User unblocked successfully", blocked: false });
   } catch (error) {
     console.error("unblockUser error:", error);
@@ -1011,19 +949,14 @@ export const muteUser = async (req, res) => {
   try {
     const userToMute = await User.findOne({ username: req.params.username }).select("_id");
     if (!userToMute) return res.status(404).json({ message: "User not found" });
-    if (userToMute._id.toString() === req.user._id.toString()) {
-      return res.status(400).json({ message: "You can't mute yourself" });
-    }
 
-    const existing = await UserRelation.findOne({
-      from: req.user._id,
-      to: userToMute._id,
-      kind: "mute",
+    const result = await muteUserService({ actorId: req.user._id, targetId: userToMute._id });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+
+    res.status(200).json({
+      message: result.alreadyMuted ? "User already muted" : "User muted successfully",
+      muted: true,
     });
-    if (existing) return res.status(200).json({ message: "User already muted", muted: true });
-
-    await UserRelation.create({ from: req.user._id, to: userToMute._id, kind: "mute" });
-    res.status(200).json({ message: "User muted successfully", muted: true });
   } catch (error) {
     console.error("muteUser error:", error);
     res.status(500).json({ error: "Server error" });
@@ -1035,7 +968,12 @@ export const unmuteUser = async (req, res) => {
     const userToUnmute = await User.findOne({ username: req.params.username }).select("_id");
     if (!userToUnmute) return res.status(404).json({ message: "User not found" });
 
-    await UserRelation.deleteOne({ from: req.user._id, to: userToUnmute._id, kind: "mute" });
+    const result = await unmuteUserService({
+      actorId: req.user._id,
+      targetId: userToUnmute._id,
+    });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
+
     res.status(200).json({ message: "User unmuted successfully", muted: false });
   } catch (error) {
     console.error("unmuteUser error:", error);
@@ -1326,13 +1264,78 @@ const publicReason = (reason) => PUBLIC_REASON[reason] || reason;
  * changeUsername re-runs the identical checks and the unique index has the
  * final word.
  */
+/**
+ * Whose handle a rename request is about.
+ *
+ * The caller by default; one of their AI accounts when `botId` names it. That is
+ * the whole of the bot rename feature — everything below already keys off "the
+ * row being renamed" rather than "the person asking", so the quota, the history
+ * and the fourteen-day hold land on the bot's own row and a per-bot allowance
+ * falls out without any separate bookkeeping.
+ *
+ * Doing it this way rather than adding a rename to `botController` is deliberate,
+ * and the comment there said so before this existed: a second rename path would
+ * be a second place for the quota and the history to be forgotten, and those are
+ * what make impersonation-by-rename traceable. There is one path.
+ *
+ * Ownership is re-checked here on every call rather than trusted from the client,
+ * and the filter is the check — a `botId` that isn't a bot, or isn't this
+ * caller's, matches nothing and comes back null.
+ *
+ * @returns {Promise<{id: object, isBot: boolean}|null>} null if `botId` is given but not theirs.
+ */
+const renameTarget = async (req, botId) => {
+  if (botId === undefined || botId === null || botId === "") {
+    return { id: req.user._id, isBot: false };
+  }
+  if (!/^[a-f\d]{24}$/i.test(String(botId))) return null;
+
+  /*
+   * A suspended owner may not operate their bots, and renaming one is operating it.
+   *
+   * botRoutes states that rule and applies `requireActiveAccount` to every bot write. This
+   * endpoint has no such guard — a suspended person can still rename *themselves*, which is
+   * long-standing behaviour and not being changed here — so routing bot renames through it
+   * would have quietly created the one bot mutation suspension didn't stop. Rename is also
+   * the worst one to leave open: it is the impersonation lever the whole quota exists to
+   * slow down.
+   */
+  if (req.user.accountStatus === "suspended") return null;
+
+  const bot = await User.findOne({
+    _id: botId,
+    owner: req.user._id,
+    isBot: true,
+    // A deleted bot keeps its `owner` and `isBot` (deleteBot soft-deletes), so without this
+    // its handle could still be cycled — burning the 14-day hold on names nothing uses.
+    accountStatus: { $ne: "deleted" },
+  })
+    .select("_id")
+    .lean();
+  return bot ? { id: bot._id, isBot: true } : null;
+};
+
 export const getUsernameAvailability = async (req, res) => {
   try {
+    const target = await renameTarget(req, req.query.botId);
+    if (!target) return res.status(404).json({ error: "Not found" });
+
     const candidate = normalizeUsername(req.query.username);
     const { available, reason, message } = await checkUsernameAvailability(
       candidate,
-      req.user._id
+      target.id
     );
+    // `checkUsernameAvailability` says "already your username" — true when the target is
+    // you, wrong when it's your bot. Rewritten here rather than there, so the helper stays
+    // free of any idea about who is asking.
+    if (target.isBot && reason === "current") {
+      return res.status(200).json({
+        username: candidate,
+        available,
+        reason: publicReason(reason),
+        message: "This is already its username",
+      });
+    }
     return res
       .status(200)
       .json({ username: candidate, available, reason: publicReason(reason), message });
@@ -1348,7 +1351,10 @@ export const getUsernameAvailability = async (req, res) => {
  */
 export const getUsernameStatus = async (req, res) => {
   try {
-    const me = await User.findById(req.user._id)
+    const target = await renameTarget(req, req.query.botId);
+    if (!target) return res.status(404).json({ error: "Not found" });
+
+    const me = await User.findById(target.id)
       .select("username usernameChangedAt +usernameHistory")
       .lean();
     if (!me) return res.status(404).json({ error: "User not found" });
@@ -1379,18 +1385,23 @@ export const getUsernameStatus = async (req, res) => {
  */
 export const changeUsername = async (req, res) => {
   try {
+    const target = await renameTarget(req, req.body?.botId);
+    if (!target) return res.status(404).json({ error: "Not found" });
+
     const candidate = normalizeUsername(req.body?.username);
 
-    const me = await User.findById(req.user._id)
+    const me = await User.findById(target.id)
       .select("username usernameChangedAt +usernameHistory")
       .lean();
     if (!me) return res.status(404).json({ error: "User not found" });
 
     if (candidate === me.username) {
-      return res.status(400).json({ error: "This is already your username" });
+      return res.status(400).json({
+        error: target.isBot ? "This is already its username" : "This is already your username",
+      });
     }
 
-    const availability = await checkUsernameAvailability(candidate, req.user._id);
+    const availability = await checkUsernameAvailability(candidate, target.id);
     if (!availability.available) {
       // "invalid" is the user mistyping; the rest are conflicts.
       const status = availability.reason === "invalid" ? 400 : 409;
@@ -1402,9 +1413,9 @@ export const changeUsername = async (req, res) => {
     const quota = changeQuota(me.usernameHistory || []);
     if (quota.remaining <= 0) {
       return res.status(429).json({
-        error: `You can change your username ${quota.limit} times every ${Math.round(
-          CHANGE_WINDOW_MS / 86400000
-        )} days`,
+        error: `${target.isBot ? "This bot's username" : "You"} can ${
+          target.isBot ? "be changed" : "change your username"
+        } ${quota.limit} times every ${Math.round(CHANGE_WINDOW_MS / 86400000)} days`,
         reason: "rate_limited",
         nextAllowedAt: quota.nextAllowedAt,
       });
@@ -1417,7 +1428,7 @@ export const changeUsername = async (req, res) => {
     try {
       updated = await User.findOneAndUpdate(
         {
-          _id: req.user._id,
+          _id: target.id,
           /*
            * The concurrency guard, and it only needs to be this. Two requests
            * fired together would otherwise both see one change remaining and
@@ -1445,9 +1456,12 @@ export const changeUsername = async (req, res) => {
     }
 
     if (!updated) {
-      return res
-        .status(409)
-        .json({ error: "Your username changed elsewhere. Try again.", reason: "conflict" });
+      return res.status(409).json({
+        error: target.isBot
+          ? "This username changed elsewhere. Try again."
+          : "Your username changed elsewhere. Try again.",
+        reason: "conflict",
+      });
     }
 
     // Both keys, or the old handle keeps serving a profile that has moved and

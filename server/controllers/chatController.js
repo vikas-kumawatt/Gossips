@@ -11,7 +11,7 @@ import Follow from "../models/Follow.js";
 import { deleteFromCloudinary, uploadToCloudinary, videoStillUrl } from "../config/cloudinary.js";
 import { buildIceConfig, hasTurn } from "../config/iceServers.js";
 import { CHAT_UPLOAD_TYPES } from "../config/multerConfig.js";
-import { getIO } from "../config/socket.js";
+import { getIO, isUserOnline } from "../config/socket.js";
 import { v4 as uuidv4 } from "uuid";
 import bcrypt from "bcrypt";
 import {
@@ -79,6 +79,7 @@ import {
   isMessageParticipant,
   messageableIdSet,
   resolveGroupSend,
+  visiblePresence,
 } from "../utils/chatAccess.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -298,6 +299,9 @@ export const getMessages = async (req, res) => {
           name: "Gossips User",
           profilePic: "",
           isVerified: false,
+          // Kept, exactly as in `anonymizePeer`: the identity is hidden, the AI disclosure
+          // is not a thing blocking someone should be able to switch off.
+          isBot: Boolean(receiver.isBot),
           blockedByThem: true,
         }
       : {
@@ -306,8 +310,50 @@ export const getMessages = async (req, res) => {
           name: receiver.name,
           profilePic: receiver.profilePic,
           isVerified: receiver.isVerified,
+          /*
+           * `isBot` is schema-level `select: true`, so it was already on `receiver` and
+           * was simply not copied across — which meant the AI disclosure badge in the
+           * thread header had nothing to render from and only appeared because the page
+           * separately fetched the profile. Read-only views skip that fetch, so the one
+           * place the badge is legally required was the one place it could go missing.
+           */
+          isBot: Boolean(receiver.isBot),
           blockedByThem: false,
         };
+
+    /*
+     * Presence in the payload, for callers with no socket.
+     *
+     * Off by default: an ordinary client gets this from `userStatus` over the socket and a
+     * second copy here would only be one that could disagree. `req.includePresence` is set
+     * by the AI-bot DM inspection route, which has no socket of its own — see
+     * `getBotConversation`. Gated by `visiblePresence` against the *viewer*, which for that
+     * route is the bot rather than its owner.
+     *
+     * Blocks are checked here and in both directions, matching the socket handler's
+     * `eitherBlocks`. `audienceAllows` does not cover them and says so — and on the
+     * `blockedByThem` side the peer above has already been reduced to a blank "Gossips
+     * User", so presence would be hanging the real person's status off a placeholder built
+     * to hide exactly that.
+     *
+     * Both the bot and its owner are passed as viewers, and both must allow it. Gating on
+     * the bot alone would make this a laundering route: a peer who blocked the *owner*, or
+     * who limits last-seen to their followers, becomes readable to them as soon as their
+     * bot receives a DM. `presenceViewers` is set alongside the flag by the bot route.
+     */
+    if (req.includePresence && !blockState.blockedByThem && !blockState.youBlocked) {
+      const viewers = req.presenceViewers || [userId];
+      const ownerBlocked = await blockedIdSet(
+        req.originalUser?._id || userId,
+        [receiver._id]
+      );
+      if (!ownerBlocked.has(String(receiver._id))) {
+        Object.assign(
+          peer,
+          await visiblePresence(viewers, receiver._id, isUserOnline).catch(() => ({}))
+        );
+      }
+    }
 
     res.status(200).json({
       messages: chronologicalMessages,
@@ -518,6 +564,13 @@ export const getChats = async (req, res) => {
         name: "Gossips User",
         profilePic: "",
         isVerified: false,
+        /*
+         * Survives the anonymisation, unlike everything above it. What is being hidden here
+         * is *who* the account is; that it is an AI is a disclosure the platform owes
+         * regardless — see the note on `isBot` in models/User.js. Withholding the badge
+         * because the account blocked you would make blocking a way to un-disclose.
+         */
+        isBot: Boolean(peer.isBot),
         blockedByThem: true,
       };
 
@@ -743,7 +796,17 @@ export const getChats = async (req, res) => {
 
     const [peers, groups] = await Promise.all([
       peerIds.length
-        ? User.find({ _id: { $in: peerIds } }).select("username name profilePic isVerified").lean()
+        ? User.find({ _id: { $in: peerIds } })
+            /*
+             * `lastActiveAt` is here only so the `includePresence` block far below stays one
+             * query for the whole page rather than a `findById` per offline peer. It is
+             * split off into its own map immediately after this and *removed* from the peer
+             * documents — those are handed to the client whole (`user: otherUser`), and a
+             * raw last-seen riding along in them would be exactly the privacy gate that
+             * block exists to apply, bypassed.
+             */
+            .select("username name profilePic isVerified lastActiveAt")
+            .lean()
         : [],
       groupIds.length
         ? Group.find({ _id: { $in: groupIds } })
@@ -751,7 +814,13 @@ export const getChats = async (req, res) => {
             .lean()
         : [],
     ]);
-    const peerById = new Map(peers.map((u) => [u._id.toString(), u]));
+    // Split, not copied — see the select above. `peerById` must not carry a last-seen.
+    const lastActiveById = new Map(
+      peers.map((u) => [u._id.toString(), u.lastActiveAt ?? null])
+    );
+    const peerById = new Map(
+      peers.map(({ lastActiveAt: _lastActiveAt, ...peer }) => [peer._id.toString(), peer])
+    );
     const groupById = new Map(groups.map((g) => [g._id.toString(), g]));
 
     /*
@@ -872,6 +941,74 @@ export const getChats = async (req, res) => {
         chat.latestMessage?.sender?._id?.toString() === userId.toString() &&
         (peerWatermarks.get(chat.conversation) || EPOCH) >= new Date(chat.latestMessage.createdAt),
     }));
+
+    /*
+     * Presence per row, for callers with no socket — the AI bot DM inspection list.
+     *
+     * Off by default and deliberately so: an ordinary client is already receiving
+     * `presenceSnapshot` and live `userStatus` events, and this would be a second, staler
+     * copy of the same thing costing two privacy reads and a Redis lookup per row on the
+     * hottest list in the app. The bot list has no socket, so its rows had no online dot at
+     * all, and this is the only way it gets one.
+     *
+     * `visiblePresence` is gated against `userId`, which on that route is the bot.
+     */
+    if (req.includePresence) {
+      /*
+       * `blockedByThem` rows are excluded, and that exclusion is the important line.
+       *
+       * Their peer has already been replaced by `anonymizePeer` — no name, no picture, a
+       * deliberately blank "Gossips User". Merging presence in afterwards would hang the
+       * real person's online status and last-seen off that placeholder, which is precisely
+       * the information the anonymisation exists to withhold.
+       *
+       * `audienceAllows` would not have caught it either: it says so itself — "a block
+       * overrides everything, so callers check that separately and first".
+       */
+      /*
+       * `isBlocked` and `blockedByThem` are already on every row (see the reduce above), so
+       * the block check costs nothing extra — no second `blockedIdSet` call. Both directions
+       * matter, matching the socket handler's `eitherBlocks`: `audienceAllows` does not
+       * cover blocks and says so, and on the `blockedByThem` side the peer has already been
+       * reduced to a blank "Gossips User" by `anonymizePeer`.
+       */
+      const candidates = chatArray.filter(
+        (chat) => !chat.isGroup && chat.user?._id && !chat.blockedByThem && !chat.isBlocked
+      );
+
+      /*
+       * The owner's own blocks, on top of the bot's. Everything above is the bot's view;
+       * this is the human who will actually read the screen, and a peer who blocked *them*
+       * must not become visible through their bot.
+       */
+      const ownerId = req.originalUser?._id || userId;
+      const ownerBlocked =
+        String(ownerId) === String(userId) || !candidates.length
+          ? new Set()
+          : await blockedIdSet(ownerId, candidates.map((chat) => chat.user._id));
+
+      const dmRows = candidates.filter((chat) => !ownerBlocked.has(String(chat.user._id)));
+      const viewers = req.presenceViewers || [userId];
+      const presences = await Promise.all(
+        dmRows.map((chat) =>
+          visiblePresence(
+            viewers,
+            chat.user._id,
+            isUserOnline,
+            // Already loaded with the peers — see `lastActiveById`. Without it this is a
+            // `findById` per offline peer, on every page of the list.
+            lastActiveById.get(String(chat.user._id)) ?? null
+          ).catch(() => ({ isOnline: false, lastSeen: null }))
+        )
+      );
+      const byPeer = new Map(
+        dmRows.map((chat, index) => [String(chat.user._id), presences[index]])
+      );
+      chatArray = chatArray.map((chat) => {
+        const presence = chat.user?._id ? byPeer.get(String(chat.user._id)) : null;
+        return presence ? { ...chat, user: { ...chat.user, ...presence } } : chat;
+      });
+    }
 
     /*
      * ── What is still filtered after the fetch ────────────────────────────────

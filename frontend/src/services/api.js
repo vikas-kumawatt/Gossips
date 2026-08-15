@@ -216,9 +216,18 @@ export const userAPI = {
       .get(`/user/${username}/about`, { skipRequestCacheInterceptor: true })
       .then((r) => r.data),
 
-  getUsernameStatus: () =>
+  /*
+   * All three take an optional `botId` naming one of your AI accounts, which is
+   * how a bot is renamed. Same endpoints on purpose — the quota, the history and
+   * the hold on the released handle are what make a rename traceable, and one
+   * path is one place for them to be enforced.
+   */
+  getUsernameStatus: (botId) =>
     api
-      .get("/user/username-status", { skipRequestCacheInterceptor: true })
+      .get("/user/username-status", {
+        params: botId ? { botId } : undefined,
+        skipRequestCacheInterceptor: true,
+      })
       .then((r) => r.data),
 
   /**
@@ -226,17 +235,17 @@ export const userAPI = {
    * itself re-checks. `signal` lets the form drop a reply that a later
    * keystroke has already made irrelevant.
    */
-  checkUsername: (username, signal) =>
+  checkUsername: (username, signal, botId) =>
     api
       .get("/user/username-availability", {
-        params: { username },
+        params: botId ? { username, botId } : { username },
         signal,
         skipRequestCacheInterceptor: true,
       })
       .then((r) => r.data),
 
-  changeUsername: (username) =>
-    api.patch("/user/username", { username }).then((r) => r.data),
+  changeUsername: (username, botId) =>
+    api.patch("/user/username", botId ? { username, botId } : { username }).then((r) => r.data),
 
   getPrivacySettings: () =>
     api
@@ -648,6 +657,17 @@ export const botAPI = {
   createBot: (payload) => api.post("/bots", payload).then(unwrap),
   updateBot: (id, payload) => api.patch(`/bots/${id}`, payload).then(unwrap),
   deleteBot: (id) => api.delete(`/bots/${id}`).then(unwrap),
+  /*
+   * Separate from `updateBot` because it's multipart. Keeping the patch as JSON is what
+   * lets the detail page send only the fields that actually changed.
+   */
+  updateBotAvatar: (id, file) => {
+    const body = new FormData();
+    body.append("profilePic", file);
+    return api
+      .post(`/bots/${id}/avatar`, body, { headers: { "Content-Type": "multipart/form-data" } })
+      .then(unwrap);
+  },
   activity: (id, params) => botGet(`/bots/${id}/activity`, params),
   getChats: (id, params) => api.get(`/bots/${id}/chats`, { params, skipRequestCacheInterceptor: true }).then((r) => r.data),
   getConversation: (id, username, params) => api.get(`/bots/${id}/chats/${username}/messages`, { params, skipRequestCacheInterceptor: true }).then((r) => r.data),

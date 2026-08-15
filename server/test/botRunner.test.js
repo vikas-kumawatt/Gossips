@@ -49,6 +49,10 @@ let perceptionResult = null;
 let anythingToDo = true;
 let decideResult = null;
 let postingQuotaResult = null;
+/** Action types whose own daily cap is spent. See `SENSITIVE_ACTION_LIMITS`. */
+let spentSensitive = [];
+/** What the (mocked) pacing gate says about posting this cycle. Allowed by default. */
+let postingWindowResult = { allowed: true, reason: "" };
 /** What the runner actually sent to the model, so the quota's presence in it can be asserted. */
 let decideArgs = null;
 let staleClaims = [];
@@ -145,6 +149,21 @@ mock.module("../bots/rateLimits.js", {
     // Whether the bot still owes posts today. The default is "up to date", so every existing test
     // below keeps exercising the reactive path it was written for.
     postingQuota: async () => log("quota", postingQuotaResult),
+    /*
+     * The per-type daily caps — report, mute, block. Nothing spent by default: those limits
+     * have their own tests, and every case in this file is about the cycle around them.
+     * `remaining` is what the executor decrements; `spentTypes` is what the validator refuses
+     * up front.
+     */
+    sensitiveActionBudget: async () =>
+      log("sensitiveCaps", {
+        remaining: new Map([
+          ["report_content", 5],
+          ["mute_user", 10],
+          ["block_user", 3],
+        ]),
+        spentTypes: new Set(spentSensitive),
+      }),
     COUNTED_ACTIONS: [],
   },
 });
@@ -195,14 +214,29 @@ mock.module("../bots/executor.js", {
   },
 });
 
+/*
+ * Pacing is real except for one function.
+ *
+ * `shouldPostThisCycle` is deliberately probabilistic — that is how the day's posts get spread
+ * out instead of arriving in a block — which makes it the one thing in the runner's path that
+ * cannot be asserted on. Left real, every test that touches the posting quota would pass or
+ * fail depending on the hour the suite happened to run at, which is the worst kind of flake.
+ *
+ * So the real module is loaded first and only that function is replaced. `isAwake`, `hourIn`
+ * and the jitter stay genuine, because the waking-window tests below are about that code.
+ * The distribution itself is tested directly in test/botPacing.test.js.
+ */
+const realPacing = await import("../bots/pacing.js");
+mock.module("../bots/pacing.js", {
+  namedExports: {
+    ...realPacing,
+    shouldPostThisCycle: () => log("postingWindow", postingWindowResult),
+  },
+});
+
 const { startBotRunner, stopBotRunner } = await import("../bots/runner.js");
 
-/*
- * The pacing helpers moved to their own module so the Phase 7 pacing eval can measure the same code
- * the runner uses rather than a re-implementation of it. Imported unmocked here, because the
- * waking-window tests below are about that code and not about the runner's plumbing.
- */
-const { hourIn, isAwake } = await import("../bots/pacing.js");
+const { hourIn, isAwake } = realPacing;
 
 /* ── Fixtures ─────────────────────────────────────────────────────────────── */
 
@@ -225,6 +259,8 @@ const reset = () => {
   // Up to date on posting, so an empty perception still means "nothing to do" unless a test says
   // otherwise. `publishedToday` matches the quota for the same reason.
   postingQuotaResult = { owed: false, publishedToday: 1, quota: 1 };
+  spentSensitive = [];
+  postingWindowResult = { allowed: true, reason: "" };
 
   personaToClaim = {
     _id: PERSONA_ID,
@@ -432,8 +468,15 @@ test("an empty perception never reaches the model, once today's posts are done",
   assert.ok(!trace.includes("decide"));
   assert.equal(logged[0].action, "do_nothing");
   assert.equal(logged[0].outcome, "executed");
-  // The reason says *why* it is idle, because "nothing to react to" on an up-to-date account reads
-  // like a fault when it is a quiet afternoon.
+  /*
+   * The reason has to lead with what was actually empty.
+   *
+   * It used to lead with the quota — "nothing to react to, and today's 5 posts already
+   * published" — and an owner read that as the cause and went looking at their posting
+   * settings for a bug that was in the feed query. The quota is a footnote: this branch needs
+   * both halves and the quota is never the blocker on its own.
+   */
+  assert.match(logged[0].reason, /nothing in the feed/);
   assert.match(logged[0].reason, /already published/);
 });
 

@@ -30,6 +30,7 @@ mock.module("../models/Follow.js", {
 });
 
 const {
+  BOT_REPORT_REASONS,
   MAX_ACTIONS_PER_CYCLE,
   REQUIRED_ARGS,
   canBotSendDm,
@@ -111,6 +112,22 @@ test("the action space matches python-service/tools.py exactly", () => {
 
   const maxText = /MAX_TEXT_LENGTH = (\d+)/.exec(source);
   assert.equal(Number(maxText[1]), MAX_BOT_TEXT_LENGTH);
+
+  /*
+   * The report reasons are a second hand-maintained pair, and were left out of this check when
+   * they were added — the exact omission the rest of this test exists to prevent. A reason
+   * present in the tool schema but not in Node is an action the provider will happily return
+   * and Node will refuse every time, which looks like a model that never reports anything.
+   */
+  const reasonsBlock = /REPORT_REASONS = \[([\s\S]*?)\]/.exec(source);
+  assert.ok(reasonsBlock, "REPORT_REASONS not found in tools.py");
+  const pythonReasons = [...reasonsBlock[1].matchAll(/"([a-z_]+)"/g)].map((match) => match[1]);
+
+  assert.deepEqual(
+    pythonReasons.slice().sort(),
+    [...BOT_REPORT_REASONS.keys()].sort(),
+    "the report reason lists have drifted apart"
+  );
 });
 
 /* ── The load-bearing check ───────────────────────────────────────────────── */

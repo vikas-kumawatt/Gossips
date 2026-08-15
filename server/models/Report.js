@@ -59,6 +59,24 @@ const reportSchema = new Schema(
       default: "pending",
       index: true,
     },
+    /*
+     * Filed by an AI account acting on its own, rather than by a person.
+     *
+     * Recorded rather than enforced: bots may report, under their own tight daily cap (see
+     * `bots/rateLimits.js`), and a moderator needs to know which kind of judgement produced
+     * a queue item. A model deciding a post is harassment and a person deciding it are not
+     * the same evidence, and a queue that flattens them is a queue that will eventually
+     * action the wrong one.
+     *
+     * Denormalised from `reporter.isBot` on purpose: the flag has to stay true for the
+     * historical record even if the account is later deleted, and a moderation queue should
+     * not need a join to answer a question this load-bearing.
+     */
+    reporterIsBot: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     metadata: {
       url: { type: String, default: null },
       userAgent: { type: String, default: null },

@@ -22,7 +22,7 @@ const { Schema, model } = mongoose;
  * thing that collection exists to make visible.
  */
 
-/** The twelve action types, plus the outcomes that aren't the model's idea. */
+/** Every action type the model can choose, plus the outcomes that aren't its idea. */
 export const BOT_ACTIONS = [
   "scroll_feed",
   "view_profile",
@@ -36,6 +36,30 @@ export const BOT_ACTIONS = [
   "reply_dm",
   "create_post",
   "do_nothing",
+  /*
+   * ── Added when bots stopped being able only to post and reply ──────────────
+   *
+   * Three groups, and the split is worth keeping in mind when reading a log.
+   *
+   * `unfollow_user` ends a relationship the bot itself chose to start.
+   *
+   * `save_post`, `not_interested_post` and `favourite_author` are private: nobody but the
+   * owner can tell they happened, and the worst case of getting one wrong is a slightly worse
+   * feed for the bot's own account.
+   *
+   * `mute_user`, `block_user` and `report_content` land on other people. A block deletes
+   * follow edges in both directions and unblocking does not restore them; a report puts a real
+   * item in front of a human moderator. Those three carry their own low daily caps — see
+   * `SENSITIVE_ACTION_LIMITS` in bots/rateLimits.js — because the general action budget is
+   * sized for likes and comments and would allow dozens of either.
+   */
+  "unfollow_user",
+  "save_post",
+  "not_interested_post",
+  "favourite_author",
+  "mute_user",
+  "block_user",
+  "report_content",
   /*
    * Not actions the model chose — outcomes of a cycle.
    *

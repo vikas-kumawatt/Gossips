@@ -10,6 +10,11 @@ import {
   likePost as likePostService,
   repostPost as repostPostService,
 } from "../services/engagement.js";
+import {
+  savePost,
+  setNotInterested,
+  undoNotInterested as undoNotInterestedService,
+} from "../services/curation.js";
 import PostView from "../models/PostView.js";
 import Saved from "../models/Saved.js";
 import PollVote from "../models/PollVote.js";
@@ -1513,27 +1518,22 @@ export const getPostEditHistory = async (req, res) => {
 };
 
 // "Not interested" — record negative feedback for a post (hide + down-rank signals)
+/**
+ * Thin adapters over the curation service.
+ *
+ * The bodies moved to `services/curation.js` so an AI account can save and dismiss without a
+ * request to hand them. One behaviour change came with the move, and it is a tightening:
+ * `toggleSavePost` used to validate nothing at all — no existence check, no deleted or draft
+ * check, no block check, and an unparseable id fell through to a 500. Acceptable for a person
+ * tapping a bookmark on a post already rendered in front of them; not acceptable for a caller
+ * acting on ids a model produced. The service checks, so this path now does too.
+ */
 export const markNotInterested = async (req, res) => {
   try {
-    const { id } = req.params;
-    const userId = req.user.id;
-
-    const post = await Post.findById(id).select("author content isDeleted").lean();
-    if (!post || post.isDeleted) {
-      return res.status(StatusCodes.NOT_FOUND).json({ success: false, message: "Post not found" });
+    const result = await setNotInterested({ actorId: req.user.id, postId: req.params.id });
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, message: result.error });
     }
-
-    await NotInterested.updateOne(
-      { user: userId, post: id },
-      {
-        $set: {
-          author: post.author,
-          hashtags: parseHashtags(post.content || ""),
-        },
-      },
-      { upsert: true }
-    );
-
     return res.status(StatusCodes.OK).json({
       success: true,
       message: "You'll see fewer posts like this",
@@ -1547,8 +1547,13 @@ export const markNotInterested = async (req, res) => {
 // Undo "Not interested"
 export const undoNotInterested = async (req, res) => {
   try {
-    const { id } = req.params;
-    await NotInterested.deleteOne({ user: req.user.id, post: id });
+    const result = await undoNotInterestedService({
+      actorId: req.user.id,
+      postId: req.params.id,
+    });
+    if (!result.ok) {
+      return res.status(result.status).json({ success: false, message: result.error });
+    }
     return res.status(StatusCodes.OK).json({ success: true, message: "Undone" });
   } catch (error) {
     console.error("undoNotInterested error:", error);
@@ -1558,17 +1563,13 @@ export const undoNotInterested = async (req, res) => {
 
 export const toggleSavePost = async (req, res) => {
   try {
-    const { postId } = req.params;
-    const userId = req.user.id;
+    const result = await savePost({ actorId: req.user.id, postId: req.params.postId });
+    if (!result.ok) return res.status(result.status).json({ error: result.error });
 
-    const existing = await Saved.findOne({ user: userId, post: postId });
-    if (existing) {
-      await Saved.deleteOne({ _id: existing._id });
-      return res.status(200).json({ message: "Post unsaved successfully", saved: false });
-    }
-
-    await Saved.create({ user: userId, post: postId });
-    return res.status(200).json({ message: "Post saved successfully", saved: true });
+    return res.status(200).json({
+      message: result.saved ? "Post saved successfully" : "Post unsaved successfully",
+      saved: result.saved,
+    });
   } catch (error) {
     console.error("toggleSavePost error:", error);
     res.status(500).json({ error: "Server error" });
