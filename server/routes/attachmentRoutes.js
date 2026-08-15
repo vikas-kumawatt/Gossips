@@ -2,6 +2,7 @@ import { Router } from "express";
 import { rateLimit } from "express-rate-limit";
 import { getPoll, voteInPoll } from "../controllers/pollController.js";
 import { reverseGeocode, searchPlaces } from "../controllers/placeController.js";
+import { getGifs } from "../controllers/gifController.js";
 import { optionalProtect, protect } from "../middleware/authMiddleware.js";
 
 const router = Router();
@@ -33,11 +34,23 @@ const voteLimit = rateLimit({
   legacyHeaders: false,
 });
 
+// Giphy is rate-limited per key. The client debounces, but we add a backstop.
+const gifLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
+  message: { success: false, error: { message: "Slow down a moment" } },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
 // type is "post" or "comment"
 router.post("/polls/:type/:id/vote", protect, voteLimit, voteInPoll);
 router.get("/polls/:type/:id", optionalProtect, getPoll);
 
 router.get("/places/search", protect, placeLimit, searchPlaces);
 router.get("/places/reverse", protect, placeLimit, reverseGeocode);
+
+router.get("/gifs", protect, gifLimit, getGifs);
 
 export default router;

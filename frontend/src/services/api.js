@@ -580,6 +580,8 @@ export const attachmentAPI = {
   searchPlaces: (q) => cachedGet("/attachments/places/search", { params: { q } }),
 
   reverseGeocode: (lat, lng) => cachedGet("/attachments/places/reverse", { params: { lat, lng } }),
+
+  getGifs: (params) => api.get("/attachments/gifs", { params, skipRequestCacheInterceptor: true }).then((r) => r.data),
 };
 
 /**

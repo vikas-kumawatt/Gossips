@@ -9,18 +9,14 @@ import {
   rememberGif,
   toggleFavoriteGif,
 } from "../lib/gifCategories";
+import { attachmentAPI } from "../services/api";
 
 /**
  * Giphy picker. One copy, used by the post composer, the reply composers and
  * the chat inputs — each of those used to have its own.
  *
- * Giphy is called straight from the browser rather than proxied: the key is a
- * public client key and the images are hotlinked from Giphy's CDN anyway. The
- * server checks the host on submit, so only a picker result can end up on a
- * post.
+ * Giphy is proxied via the backend to protect the API key and handle rate limits.
  */
-
-const API_KEY = import.meta.env.VITE_GIPHY_API_KEY;
 const PAGE_SIZE = 24;
 // Giphy rate-limits per key, and searching on every keystroke burns it fast.
 const DEBOUNCE_MS = 350;
@@ -105,12 +101,6 @@ const GifPicker = ({ onSelect, onClose }) => {
       return;
     }
 
-    if (!API_KEY) {
-      setError("GIFs aren't set up on this install");
-      pager.current.loading = false;
-      setLoading(false);
-      return;
-    }
 
     setLoading(true);
     if (!append) setError("");
@@ -119,14 +109,14 @@ const GifPicker = ({ onSelect, onClose }) => {
     const category = GIF_CATEGORIES.find((c) => c.id === activeTab);
     const search = term || category?.query || "";
     const offset = append ? pager.current.offset : 0;
-    const base = search
-      ? `https://api.giphy.com/v1/gifs/search?api_key=${API_KEY}&q=${encodeURIComponent(search)}`
-      : `https://api.giphy.com/v1/gifs/trending?api_key=${API_KEY}`;
 
     try {
-      const response = await fetch(`${base}&limit=${PAGE_SIZE}&offset=${offset}&rating=pg-13`);
-      if (!response.ok) throw new Error(String(response.status));
-      const json = await response.json();
+      const json = await attachmentAPI.getGifs({
+        query: search,
+        limit: PAGE_SIZE,
+        offset
+      });
+      
       if (id !== requestId.current) return; // a newer request already landed
 
       const page = (json.data || []).map(toGif).filter((g) => g.url);
