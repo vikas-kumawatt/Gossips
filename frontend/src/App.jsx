@@ -1,4 +1,4 @@
-import { Routes, Route, Navigate, useParams } from "react-router-dom";
+import { Routes, Route, Navigate, useParams, useLocation } from "react-router-dom";
 import { useEffect, useState, useRef } from "react";
 import axios from "axios";
 import { UserContext } from "./contexts/UserContext";
@@ -55,6 +55,7 @@ import { SocketProvider } from "./contexts/SocketContext";
 import { ChatProvider } from "./contexts/ChatProvider";
 import { CallProvider } from "./contexts/CallProvider";
 import CallOverlay from "./components/Chat/CallOverlay";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 import {
   AUTH_EVENT,
   attachAuthInterceptors,
@@ -76,6 +77,28 @@ import HashtagPage from "./pages/HashtagPage";
 function LegacyGroupRedirect() {
   const { groupId } = useParams();
   return <Navigate to={`/chat/group/${groupId}`} replace />;
+}
+
+/**
+ * The boundary that catches a page, keyed so navigating away clears it.
+ *
+ * Wrapping `<Routes>` rather than each of the twenty-odd route elements: one
+ * place to keep correct, and the providers above it stay mounted — a crash while
+ * rendering a profile does not drop an in-progress call or tear down the socket.
+ *
+ * The `key` is what makes it recoverable. A boundary that has caught stays in its
+ * error state until something resets it, so without this a single bad page would
+ * hold the fallback on screen for the rest of the session no matter where the
+ * person navigated. Re-keying on pathname remounts the boundary — and only the
+ * boundary — on every navigation, so leaving the broken page is enough.
+ */
+function RouteErrorBoundary({ children }) {
+  const { pathname } = useLocation();
+  return (
+    <ErrorBoundary key={pathname} label={pathname}>
+      {children}
+    </ErrorBoundary>
+  );
 }
 
 /**
@@ -196,6 +219,7 @@ function App() {
             <BlockProvider>
             <ReportProvider>
             <CallOverlay />
+            <RouteErrorBoundary>
             <Routes>
               <Route
                 path="/"
@@ -471,6 +495,7 @@ function App() {
               <Route path="/ai-labels" element={<AiLabelsPage />} />
               <Route path="*" element={<NotFoundPage />} />
             </Routes>
+            </RouteErrorBoundary>
             </ReportProvider>
             </BlockProvider>
             </MuteProvider>

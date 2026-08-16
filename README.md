@@ -330,6 +330,8 @@ Gossips/
 │   ├── src/
 │   │   ├── common/           # Firebase init, ProtectedRoute, Session
 │   │   ├── components/       # Feed, chat, admin and shared UI components
+│   │   │   ├── ErrorBoundary.jsx  # Class boundary; detects stale-bundle errors
+│   │   │   ├── ErrorScreen.jsx    # Animated crash fallback
 │   │   │   ├── Chat/         # Message bubbles, composer, call overlay, polls
 │   │   │   ├── admin/        # Admin charts and UI primitives
 │   │   │   ├── layouts/      # Site header, mobile navbar
@@ -513,11 +515,30 @@ it does not collide with the Workbox worker at `/`. It handles data-only backgro
 notification clicks; call notifications set `requireInteraction` and a vibration pattern.
 
 **Loading and error UI.** `react-hot-toast` is imported in 42 files and is the primary error
-channel. There are **no React error boundaries** anywhere in the codebase. `ProtectedRoute`
-renders a plain `Loading...` while the session resolves; `AdminLayout` has a
-`loading | ready | denied` state machine; `ChatProvider` keeps `listLoading`/`listError` separate
-from `threadLoading`/`threadError` because the desktop layout renders both at once;
-`ReconnectBanner` appears when Socket.IO gives up reconnecting; `NotFoundPage` catches `*`.
+channel for handled failures. `ProtectedRoute` renders a plain `Loading...` while the session
+resolves; `AdminLayout` has a `loading | ready | denied` state machine; `ChatProvider` keeps
+`listLoading`/`listError` separate from `threadLoading`/`threadError` because the desktop layout
+renders both at once; `ReconnectBanner` appears when Socket.IO gives up reconnecting;
+`NotFoundPage` catches `*`.
+
+**Crash handling.** Three layers, because there are three distinct ways the screen can go blank:
+
+| Layer | Where | Catches |
+| --- | --- | --- |
+| `ErrorBoundary` (root) | `main.jsx`, above `<BrowserRouter>` | A provider or the router itself throwing while it mounts |
+| `RouteErrorBoundary` | `App.jsx`, wrapping `<Routes>` | Any page render. Keyed on `pathname`, so navigating away clears it. Providers above stay mounted, so an in-progress call survives a page crash |
+| Static boot fallback | inside `#root` in `index.html` | The bundle never loading at all — no React runs, so no boundary can. Hidden for 5s by CSS so a healthy load never flashes it; replaced the moment `createRoot().render()` succeeds |
+
+`ErrorScreen` renders the fallback: the animated brand mark, a plain-language message, and
+`Try again` (remounts the subtree) plus `Go home`. It detects a chunk-load failure — which in
+practice means a deploy replaced the files an open tab was built against — and swaps to
+"Gossips just updated / Reload", because telling someone to come back later for a problem a
+button in front of them solves would be wrong. The error text and stack render in development
+only, behind `import.meta.env.DEV` so the block is dropped from the production bundle rather
+than merely hidden. Animation is skipped under `prefers-reduced-motion`.
+
+Error boundaries do **not** catch errors in event handlers, `setTimeout` or promises — React
+routes those to the calling code, which is where the toasts are.
 
 ---
 
@@ -1670,8 +1691,11 @@ something not in the perception is rejected and logged rather than executed.
 that has been deleted is a permanent failure. An item the author deleted is abandoned silently. Three
 attempts exhaust into `failed` plus a notification.
 
-**Frontend.** There are no error boundaries — an uncaught render error will blank the page. Errors
-otherwise surface as toasts. `ChatProvider` reads `error.response.data.error` before `.message` before
+**Frontend.** An uncaught render error is caught by the nearest error boundary and replaced with
+`ErrorScreen` — at route level first, so the providers and any in-progress call survive, and by the
+root boundary above the router if a provider itself throws. A failure to load the bundle at all is
+covered by the static fallback in `index.html`, since no React runs to catch it. Handled errors
+surface as toasts. `ChatProvider` reads `error.response.data.error` before `.message` before
 `error.message`. Loading and error state are tracked separately for the conversation list and the open
 thread. `ReconnectBanner` appears when Socket.IO exhausts its 20 reconnect attempts. Unknown routes
 render `NotFoundPage`. Cached IndexedDB snapshots are used only to paint a warm start and are always
@@ -1805,7 +1829,8 @@ test suite.
 - **The migration scripts are broken** — `server/migrations/` does not exist.
 - **`scripts/makeAdmin.js` is referenced in a model comment but is not in the repository**, so the
   first staff account has to be created directly in the database.
-- **No frontend tests and no error boundaries.** An uncaught render error blanks the page.
+- **No frontend test suite.** The error boundaries were verified by mounting them in jsdom against a
+  deliberately throwing component, but that harness was not kept — there is no runner to keep it in.
 - **No HTTP-layer or socket-layer tests** on the server; coverage is concentrated on the bot subsystem
   and pure helpers.
 - **Content search is regex-based**, so an unanchored query scans two collections, and results are
