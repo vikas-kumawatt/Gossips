@@ -151,6 +151,32 @@ test("THE POINT: prior engagement is surfaced, because like and repost are toggl
   assert.equal(fresh.already_reposted, false);
 });
 
+test("a reply the bot has already written is surfaced, and reaches the allowlist", () => {
+  /*
+   * Not a toggle, and not a wasted action either — commenting twice works, which is how one
+   * post collected sixteen comments from one bot. The flag has to survive shaping *and*
+   * `collectAllowedTargets`, because the validator reads it from the allowlist rather than
+   * from the perception.
+   */
+  const postId = oid();
+  const shaped = shapeFeedPost({
+    _id: postId,
+    alreadyCommented: true,
+    alreadyQuoted: true,
+    author: { _id: oid(), username: "ana" },
+  });
+  assert.equal(shaped.already_commented, true);
+  assert.equal(shaped.already_quoted, true);
+
+  const allowed = collectAllowedTargets({ feed_posts: [shaped] });
+  assert.equal(allowed.posts.get(String(postId)).alreadyCommented, true);
+  assert.equal(allowed.posts.get(String(postId)).alreadyQuoted, true);
+
+  const fresh = shapeFeedPost({ _id: oid(), author: {} });
+  assert.equal(fresh.already_commented, false);
+  assert.equal(fresh.already_quoted, false);
+});
+
 test("can_reply defaults to allowed, and is false only when explicitly refused", () => {
   // A missing flag must not silently forbid every comment.
   assert.equal(shapeFeedPost({ _id: oid(), author: {} }).can_reply, true);

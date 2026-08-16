@@ -269,6 +269,32 @@ const validateAction = (raw, context) => {
   }
 
   /*
+   * ── One reply per post, ever ───────────────────────────────────────────────
+   *
+   * The `seen` check further down catches two comments on one post in a single decision. It
+   * cannot catch the case that actually happened: the same post offered again on the next
+   * cycle, to a model with no memory of the last one, twenty minutes later. One bot put
+   * sixteen comments under a single post that way over a day, and nothing refused any of them
+   * — each was a valid comment on a post it had legitimately been shown.
+   *
+   * So the guard is the bot's own comment history, carried into the perception as
+   * `already_commented`, which makes it hold across cycles, restarts and providers. Quoting is
+   * refused on the same basis: two quotes of one post are two posts on a profile saying the
+   * same thing about the same thing.
+   *
+   * A person does reply twice to a thread — but they do it because they read an answer, and a
+   * bot cycle cannot see one: replies to its comment are not in its perception, and there is
+   * no action in the space for answering one. Until there is, a second comment is not a
+   * conversation, it is the first one again.
+   */
+  if (type === "comment_post" && meta?.alreadyCommented) {
+    return { ok: false, action, reason: "already commented on this post" };
+  }
+  if (type === "quote_post" && meta?.alreadyQuoted) {
+    return { ok: false, action, reason: "already quoted this post" };
+  }
+
+  /*
    * ── Relationship actions that would be no-ops ──────────────────────────────
    *
    * Each of these is refused rather than executed-and-ignored, because the underlying service

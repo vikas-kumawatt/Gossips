@@ -107,8 +107,16 @@ export const TEXT_CAPS = {
  * to not answer a question twice — and trimming one to reach a rounder number would be the budget
  * dictating the behaviour instead of the reverse. It also costs nothing on a typical cycle: this is
  * a ceiling, not a spend, and a real perception measures in the hundreds of tokens.
+ *
+ * ── And again, from 8,400, for `already_commented` ──────────────────────────
+ *
+ * Two more booleans on every feed post is about 220 tokens at the cap, which took the headroom
+ * to 9% and tripped the eval — which is exactly the alarm that paragraph above describes, doing
+ * its job on the first field anyone added. Raised rather than shaved, for the same reason as
+ * last time: the twelve-post cap is a behavioural choice, and the flags are what stop a bot
+ * replying to the same post sixteen times.
  */
-export const PERCEPTION_TOKEN_BUDGET = 8400;
+export const PERCEPTION_TOKEN_BUDGET = 8800;
 
 /**
  * The order sections are sacrificed in when over budget: first listed goes first.
@@ -233,11 +241,18 @@ export const shapeFeedPost = (post, relationships) => ({
    * Whether this bot has already engaged, so it isn't offered a toggle that would undo.
    * Like, repost and save are all toggles; dismissing is idempotent but re-dismissing still
    * spends an action out of a capped budget.
+   *
+   * `already_commented` and `already_quoted` are neither: they are here because the action
+   * succeeds. A post that stays in a small feed is offered again every cycle, and a model with
+   * no memory of the last one will reply to it again — sixteen times, in the case that put
+   * these two fields here.
    */
   already_liked: Boolean(post?.alreadyLiked),
   already_reposted: Boolean(post?.alreadyReposted),
   already_saved: Boolean(post?.alreadySaved),
   already_dismissed: Boolean(post?.alreadyDismissed),
+  already_commented: Boolean(post?.alreadyCommented),
+  already_quoted: Boolean(post?.alreadyQuoted),
   can_reply: post?.canReply !== false,
   /*
    * From an account the bot doesn't follow. Present only on those, so it reads as a note
@@ -329,6 +344,8 @@ export const collectAllowedTargets = (perception) => {
         alreadyReposted: Boolean(post.already_reposted),
         alreadySaved: Boolean(post.already_saved),
         alreadyDismissed: Boolean(post.already_dismissed),
+        alreadyCommented: Boolean(post.already_commented),
+        alreadyQuoted: Boolean(post.already_quoted),
         // Absent reads as allowed, matching `shapeFeedPost`'s `post?.canReply !== false`.
         canReply: post.can_reply !== false,
       });

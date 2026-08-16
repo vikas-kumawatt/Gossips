@@ -523,13 +523,29 @@ def provider_says(monkeypatch, status, message=""):
     return client.post("/decide", json=body(), headers={"x-internal-secret": SECRET})
 
 
+def assert_detail(response, token):
+    """The classification token, which may carry the provider's own wording after it.
+
+    `main.py` appends `: <provider message>` when there is one, and that half is deliberate: Node
+    puts the detail in front of the owner, and "your credit balance is too low" is actionable
+    where `provider_no_credit` is not. Nothing branches on the string — `reasoningClient.js`
+    classifies on the HTTP status alone — so the contract these tests are pinning is the token at
+    the front, not the whole line.
+
+    Asserted as a prefix rather than with `in`, so a token appearing inside a provider's message
+    could never satisfy a test about which token we chose.
+    """
+    detail = response.json()["detail"]
+    assert detail.split(":")[0] == token, detail
+
+
 def test_THE_POINT_an_invalid_key_maps_to_402_not_401(monkeypatch):
     """Node treats 402 as "pause the bot and tell the owner", and 401 as "our own secret is
     wrong". Conflating them would have Node pausing bots over a misconfiguration on this side."""
     response = provider_says(monkeypatch, 401, "invalid x-api-key")
 
     assert response.status_code == 402
-    assert response.json()["detail"] == "provider_auth_failed"
+    assert_detail(response, "provider_auth_failed")
 
 
 def test_exhausted_credit_also_pauses_the_bot(monkeypatch):
@@ -537,7 +553,7 @@ def test_exhausted_credit_also_pauses_the_bot(monkeypatch):
     response = provider_says(monkeypatch, 400, "Your credit balance is too low")
 
     assert response.status_code == 402
-    assert response.json()["detail"] == "provider_no_credit"
+    assert_detail(response, "provider_no_credit")
 
 
 def test_a_rate_limit_that_is_really_an_exhausted_quota_pauses_the_bot(monkeypatch):
@@ -558,7 +574,7 @@ def test_a_rate_limit_that_is_really_an_exhausted_quota_pauses_the_bot(monkeypat
     )
 
     assert response.status_code == 402
-    assert response.json()["detail"] == "provider_no_credit"
+    assert_detail(response, "provider_no_credit")
 
 
 # Groq's actual 429, copied from a live eval run. The URL at the end is the whole problem.
@@ -584,7 +600,7 @@ def test_THE_POINT_an_upsell_link_is_not_an_empty_account(monkeypatch):
     response = provider_says(monkeypatch, 429, GROQ_RATE_LIMIT)
 
     assert response.status_code == 429
-    assert response.json()["detail"] == "provider_rate_limited"
+    assert_detail(response, "provider_rate_limited")
 
 
 def test_a_plain_rate_limit_is_transient_even_when_it_says_exceeded(monkeypatch):
@@ -602,7 +618,7 @@ def test_a_plain_rate_limit_is_transient_even_when_it_says_exceeded(monkeypatch)
         response = provider_says(monkeypatch, 429, message)
 
         assert response.status_code == 429, message
-        assert response.json()["detail"] == "provider_rate_limited"
+        assert_detail(response, "provider_rate_limited")
 
 
 def test_an_unrecognised_provider_400_is_retryable_not_a_pause(monkeypatch):
@@ -610,7 +626,7 @@ def test_an_unrecognised_provider_400_is_retryable_not_a_pause(monkeypatch):
     response = provider_says(monkeypatch, 400, "unexpected field 'foo'")
 
     assert response.status_code == 502
-    assert response.json()["detail"] == "provider_bad_request"
+    assert_detail(response, "provider_bad_request")
 
 
 def test_THE_POINT_a_missing_model_is_its_own_answer_neither_the_key_nor_a_blip(monkeypatch):
@@ -632,7 +648,7 @@ def test_THE_POINT_a_missing_model_is_its_own_answer_neither_the_key_nor_a_blip(
     response = provider_says(monkeypatch, 404, "model not found")
 
     assert response.status_code == 404
-    assert response.json()["detail"] == "provider_model_not_found"
+    assert_detail(response, "provider_model_not_found")
 
 
 def test_rate_limiting_and_unreachability_are_distinguished(monkeypatch):

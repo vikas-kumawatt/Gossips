@@ -1,4 +1,5 @@
 import Post from "../models/Post.js";
+import Comment from "../models/Comment.js";
 import Message from "../models/Message.js";
 import Follow from "../models/Follow.js";
 import Like from "../models/Like.js";
@@ -138,9 +139,23 @@ const hiddenByBot = async (botId) => {
  * Public accounts only. A private account's posts are visible to its approved followers, and
  * the follow-graph query got that for free — an accepted edge to a private account *is* the
  * approval. Nothing here has that guarantee, so `isPrivate` is excluded outright rather than
- * reasoned about. Blocks are applied in both directions, the bot's own posts are excluded
- * (they arrive as `own_recent_posts`), and other bots are excluded so two of them can't
- * discover each other and talk in a loop no person is part of.
+ * reasoned about. Blocks are applied in both directions, and the bot's own posts are excluded
+ * (they arrive as `own_recent_posts`).
+ *
+ * ── Other bots are included, which they once weren't ────────────────────────
+ *
+ * They were excluded so two of them couldn't discover each other and talk in a loop no person
+ * was part of. The exclusion had a cost nobody had measured: on a platform whose recent posts
+ * are mostly bot-written, the `$sample` below draws from every recent post and *then* discards
+ * the bot authors, so a cycle's worth of candidates could collapse to nothing. Those bots saw
+ * an empty feed on almost every cycle, could only ever act on their posting quota, and their
+ * owners reasonably read that as "reacting is broken".
+ *
+ * The loop the exclusion was aimed at is closed elsewhere, and closed harder: bots cannot DM
+ * each other (`actionValidator`), cannot mute, block or report each other, and — since a bot
+ * gets at most one comment per post, ever — cannot hold a thread between them. What is left is
+ * a like, a follow or a single reply, which is what engagement between two accounts looks like
+ * regardless of who runs them. The daily action cap bounds the rest.
  *
  * @param {Array} [excludeIds] authors already covered by the follow feed, so the top-up
  *        doesn't spend its slots re-fetching posts the bot is about to be shown anyway.
@@ -200,7 +215,6 @@ const discoverAuthorIds = async (botId, excludeIds = []) => {
     _id: { $in: candidateIds },
     ...ACTIVE_ACCOUNT,
     isPrivate: { $ne: true },
-    isBot: { $ne: true },
   })
     .select("_id")
     .lean();
@@ -223,6 +237,11 @@ const discoverAuthorIds = async (botId, excludeIds = []) => {
  * `alreadyDismissed` is not a toggle guard — `not_interested` is an idempotent upsert — but it
  * is still worth carrying: re-dismissing something already dismissed is a wasted action out of
  * a capped daily budget.
+ *
+ * `alreadyCommented` and `alreadyQuoted` are the opposite case again: neither undoes anything
+ * and neither is wasted — they work, every time, which is why a post that lingers in a small
+ * feed collected sixteen comments from one bot. Carried so the model is told it has already
+ * spoken here and the validator can refuse it if it says so anyway.
  *
  * @param {number} [limit] how many posts to take. Defaults to the section cap; the blend in
  *        `buildPerception` passes the remaining room so follows and discovery share it.
@@ -308,7 +327,7 @@ const loadFeed = async (botId, authorIds, limit = SECTION_CAPS.feedPosts, exclud
   if (!posts.length) return [];
 
   const postIds = posts.map((post) => post._id);
-  const [likes, reposts, saves, dismissed] = await Promise.all([
+  const [likes, reposts, saves, dismissed, comments, quotes] = await Promise.all([
     Like.find({ user: botId, targetType: "Post", target: { $in: postIds } })
       .select("target")
       .lean(),
@@ -321,11 +340,32 @@ const loadFeed = async (botId, authorIds, limit = SECTION_CAPS.feedPosts, exclud
     NotInterested.find({ user: botId, post: { $in: postIds } })
       .select("post")
       .lean(),
+    /*
+     * What this bot has already said under each of these posts, and about them.
+     *
+     * The other four flags exist because the action would undo something or spend a budget to
+     * change nothing. These two exist because the action *works* — and that is worse. A post
+     * that stays in a small feed comes back every cycle, the model has no memory of the last
+     * one, and one bot put sixteen comments under a single post over a day. Nothing refused
+     * any of them: each was a valid comment on a post it was legitimately shown, and the
+     * validator's duplicate check only looks within one cycle.
+     *
+     * Deleted comments are counted too — `isDeleted` is not filtered — because deleting a
+     * reply is not an invitation to write it again.
+     */
+    Comment.find({ author: botId, post: { $in: postIds } })
+      .select("post")
+      .lean(),
+    Post.find({ author: botId, quotedPost: { $in: postIds } })
+      .select("quotedPost")
+      .lean(),
   ]);
   const liked = new Set(likes.map((row) => String(row.target)));
   const reposted = new Set(reposts.map((row) => String(row.target)));
   const saved = new Set(saves.map((row) => String(row.post)));
   const notInterested = new Set(dismissed.map((row) => String(row.post)));
+  const commented = new Set(comments.map((row) => String(row.post)));
+  const quoted = new Set(quotes.map((row) => String(row.quotedPost)));
 
   /*
    * `canUserReplyToTarget` per post, capped by `SECTION_CAPS.feedPosts`.
@@ -344,6 +384,8 @@ const loadFeed = async (botId, authorIds, limit = SECTION_CAPS.feedPosts, exclud
     alreadyReposted: reposted.has(String(post._id)),
     alreadySaved: saved.has(String(post._id)),
     alreadyDismissed: notInterested.has(String(post._id)),
+    alreadyCommented: commented.has(String(post._id)),
+    alreadyQuoted: quoted.has(String(post._id)),
     canReply: replyable[index],
   }));
 };

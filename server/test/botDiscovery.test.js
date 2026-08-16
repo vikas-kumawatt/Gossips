@@ -78,6 +78,13 @@ mock.module("../models/Follow.js", {
 
 mock.module("../models/Like.js", { defaultExport: { find: () => chain([]) } });
 mock.module("../models/Repost.js", { defaultExport: { find: () => chain([]) } });
+/*
+ * Read per feed slice for `already_commented`. Mocked rather than left real because the real
+ * model imports its schemas from `Post.js`, which is mocked above — so an unmocked Comment
+ * would fail to load rather than fail a test.
+ */
+let ownComments = [];
+mock.module("../models/Comment.js", { defaultExport: { find: () => chain(ownComments) } });
 mock.module("../models/Notification.js", {
   defaultExport: { find: () => chain([]), countDocuments: async () => 0 },
 });
@@ -132,6 +139,7 @@ const reset = () => {
   blockedIds = new Set();
   mutedRelations = [];
   dismissedPosts = [];
+  ownComments = [];
 };
 
 /** True when the query is the discovery author sweep rather than a feed read. */
@@ -226,15 +234,12 @@ test("a feed the follow graph filled to the cap needs no discovery at all", asyn
   );
 });
 
-test("discovery excludes private accounts, bots and the bot itself", async () => {
+test("discovery excludes private accounts and the bot itself", async () => {
   /*
    * The follow-graph query got private accounts right for free: an accepted edge to a private
    * account *is* that account's approval. Discovery has no such guarantee, so the exclusion
    * has to be explicit — this asserts on the filter rather than the result, because the result
    * would also be empty if the query were simply broken.
-   *
-   * Bots are excluded so two of them can't discover each other and hold a conversation no
-   * person is part of.
    */
   reset();
   followEdges = [];
@@ -252,8 +257,29 @@ test("discovery excludes private accounts, bots and the bot itself", async () =>
 
   const filter = userQueries.at(-1);
   assert.deepEqual(filter.isPrivate, { $ne: true }, "private accounts are not discoverable");
-  assert.deepEqual(filter.isBot, { $ne: true }, "bots must not discover other bots");
   assert.ok(filter.accountStatus?.$nin?.includes("suspended"), "ACTIVE_ACCOUNT must be applied");
+});
+
+test("other bots are discoverable, or a bot-heavy platform leaves every bot blind", async () => {
+  /*
+   * This filter used to read `isBot: { $ne: true }`, to stop two bots discovering each other
+   * and holding a conversation no person was part of. What it actually produced: the sweep
+   * samples 120 recent posts and *then* drops the bot authors, so on a platform whose recent
+   * posts are mostly bot-written the candidates collapsed to nothing. Those bots saw an empty
+   * feed nearly every cycle and could only ever act on their posting quota.
+   *
+   * The loop is closed where it can be closed properly — no bot-to-bot DMs, no bot moderating
+   * a bot, and one comment per post — rather than by making them invisible to each other.
+   */
+  reset();
+  followEdges = [];
+  postsByQuery = (query) => (isDiscoverySweep(query) ? [{ author: STRANGER_ID }] : []);
+  eligibleUsers = [];
+
+  await buildPerception({ _id: BOT_ID });
+
+  const filter = userQueries.at(-1);
+  assert.equal(filter.isBot, undefined, "a bot's posts are as discoverable as anyone else's");
 });
 
 test("discovery honours blocks in both directions", async () => {

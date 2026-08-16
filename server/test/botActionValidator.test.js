@@ -273,6 +273,49 @@ test("a like or repost the bot has already made is refused, because both are tog
   assert.match(rejected[1].reason, /already reposted/);
 });
 
+test("THE POINT: a post the bot has already commented on cannot be commented on again", () => {
+  /*
+   * The regression this exists for: one bot put sixteen comments under a single post over a
+   * day. Every one was valid — the post kept arriving in a small feed, the model had no memory
+   * of the last cycle, and the duplicate check only looks inside one decision. So the guard is
+   * the bot's own comment history, carried in the perception, which holds across cycles.
+   *
+   * Quoting goes the same way: two quotes of one post are two posts on a profile saying the
+   * same thing about the same thing.
+   */
+  const answered = aPost({ alreadyCommented: true });
+  const quoted = aPost({ alreadyQuoted: true });
+  const { allowedTargets } = build({ posts: [answered, quoted] });
+
+  const { actions, rejected } = validateDecision(
+    {
+      actions: [
+        { type: "comment_post", post_id: String(answered._id), text: "and another thing" },
+        { type: "quote_post", post_id: String(quoted._id), text: "worth saying twice" },
+      ],
+    },
+    { allowedTargets }
+  );
+
+  assert.deepEqual(actions, [{ type: "do_nothing" }]);
+  assert.match(rejected[0].reason, /already commented/);
+  assert.match(rejected[1].reason, /already quoted/);
+});
+
+test("having commented on a post does not stop the bot liking or reposting it", () => {
+  // The guard is about repeating itself in prose, not about disengaging from the post.
+  const answered = aPost({ alreadyCommented: true });
+  const { allowedTargets } = build({ posts: [answered] });
+
+  const { actions, rejected } = validateDecision(
+    { actions: [{ type: "like_post", post_id: String(answered._id) }] },
+    { allowedTargets }
+  );
+
+  assert.equal(rejected.length, 0);
+  assert.equal(actions[0].type, "like_post");
+});
+
 test("the author's reply audience governs comments and quotes alike", () => {
   /*
    * services/authoring.js runs a quote through `canUserReplyToTarget`, the same gate a comment
