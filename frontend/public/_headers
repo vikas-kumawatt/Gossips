@@ -1,0 +1,52 @@
+# Response headers for the static host (Netlify reads this file from the site root).
+#
+# This is where the Content-Security-Policy belongs. The Express API returns JSON
+# and never a document, so a CSP there constrains nothing that matters; the
+# documents an attacker would want to inject script into are the ones served from
+# here. server/middleware/securityHeaders.js covers the API's own responses.
+#
+# `__API_ORIGIN__` and `__API_WS_ORIGIN__` are substituted at build time from
+# VITE_SERVER by the `publicFileEnv` plugin in vite.config.js — the same
+# mechanism that fills in firebase-messaging-sw.js. They are not literals here
+# because the API's address is deployment configuration.
+#
+# Verify a change with https://csp-evaluator.withgoogle.com/ and, more usefully,
+# by watching the browser console for violations while exercising Google
+# sign-in, the GIF picker, a video message and a push notification — those are
+# the four paths that reach a third-party origin.
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: geolocation=(self), camera=(self), microphone=(self), payment=(), usb=(), interest-cohort=()
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://www.gstatic.com; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://res.cloudinary.com https://*.giphy.com https://lh3.googleusercontent.com; media-src 'self' blob: https://res.cloudinary.com; font-src 'self' data:; connect-src 'self' __API_ORIGIN__ __API_WS_ORIGIN__ https://*.googleapis.com https://*.firebaseio.com https://fcmregistrations.googleapis.com https://www.gstatic.com; frame-src https://*.firebaseapp.com https://accounts.google.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+
+# Notes on the individual directives, since several look wrong until you know why:
+#
+#   script-src includes www.gstatic.com because firebase-messaging-sw.js pulls the
+#     Firebase compat SDK over importScripts. It is the only third-party script.
+#
+#   style-src needs 'unsafe-inline'. Framer Motion writes animated values to the
+#     style attribute on every frame, and there is no nonce that survives that.
+#     Removing it means removing the animation library.
+#
+#   img-src names Cloudinary (all uploaded media), Giphy (the picker hotlinks,
+#     never uploads) and lh3.googleusercontent.com (Google account avatars, copied
+#     onto the user record at sign-in). blob: and data: are the local preview of
+#     an attachment before it uploads.
+#
+#   connect-src carries both the https and wss forms of the API origin. Socket.IO
+#     upgrades to a WebSocket, and wss:// is not covered by the https:// entry.
+#
+#   frame-src exists for Firebase auth, which renders its handler in an iframe on
+#     some flows even when signInWithPopup is what the code calls.
+#
+#   frame-ancestors 'none' rather than X-Frame-Options alone — the header above is
+#     for browsers that predate it.
+
+# The service worker must not be cached, or a config or logic change sits behind
+# a stale copy until the browser decides to revalidate.
+/firebase-messaging-sw.js
+  Cache-Control: no-cache

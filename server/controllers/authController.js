@@ -1255,8 +1255,24 @@ export const forgotPassword = async (req, res) => {
       return res.status(200).json(genericResponse);
     }
 
+    /*
+     * The raw token goes in the email; only its hash is stored.
+     *
+     * It was persisted verbatim, which made `User.resetPasswordToken` a
+     * plaintext credential sitting in the database for an hour — anyone who
+     * could read a row (a backup, a dump, a logged query, an aggregation in the
+     * admin panel) could take over that account without knowing the password.
+     * Refresh tokens in this same file are already stored as `hashToken(...)`
+     * for exactly this reason, and OTP codes are HMAC'd; this was the one
+     * bearer secret still kept in the clear.
+     *
+     * SHA-256 with no salt and no stretching is the right primitive here and the
+     * wrong one for a password: the input is 32 bytes of CSPRNG, so there is no
+     * dictionary to run and nothing for a work factor to buy. It is the same
+     * argument `hashToken` makes about refresh tokens.
+     */
     const resetToken = crypto.randomBytes(32).toString("hex");
-    user.resetPasswordToken = resetToken;
+    user.resetPasswordToken = hashToken(resetToken);
     user.resetPasswordExpires = Date.now() + 3600000;
     await user.save();
 
@@ -1383,9 +1399,12 @@ export const resetPassword = async (req, res) => {
       return res.status(400).json({ message: PASSWORD_MSG });
     }
 
+    // Hashed on the way in, so the stored value is never the bearer secret —
+    // see forgotPassword. A link issued before this shipped no longer matches,
+    // which costs its holder one more "forgot password" click.
     const user = await User.findOne({
       ...HUMAN_ACCOUNT,
-      resetPasswordToken: token,
+      resetPasswordToken: hashToken(token),
       resetPasswordExpires: { $gt: Date.now() },
     });
 

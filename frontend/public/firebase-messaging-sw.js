@@ -16,23 +16,40 @@
  *
  * ── Configuration ────────────────────────────────────────────────────────────
  *
- * A service worker cannot read Vite's `import.meta.env`, so the two values below
- * cannot come from the build the way the rest of the Firebase config does. They are
- * not secrets — `messagingSenderId` and `appId` are public identifiers, present in
- * every client bundle already — but they do have to be filled in here by hand for
- * *this* project, and they have to match `VITE_FIREBASE_MESSAGING_SENDER_ID` and
- * `VITE_FIREBASE_APP_ID`.
+ * A service worker cannot read Vite's `import.meta.env`, so these four values used
+ * to be typed in here as literals — which meant one specific Firebase project was
+ * baked into the source, and pointing a deployment at a different one was a code
+ * change to a file most people would never think to look in.
  *
- * Until they are, this worker registers and receives nothing, which is the same
+ * The placeholders below are substituted from the environment by the
+ * `publicFileEnv` plugin in vite.config.js: at build time it rewrites the
+ * emitted file, and in dev it serves the substituted version. So this file stays
+ * a plain static worker — no bundling, no module semantics — while still being
+ * configured the same way as everything else.
+ *
+ * None of these are secrets; they are public identifiers already present in every
+ * client bundle. The point is that they are configuration, not source.
+ *
+ * With the variables unset the placeholders survive verbatim, the guard below
+ * fails, and the worker registers and receives nothing — the same
  * inert-until-configured state as the server's `FIREBASE_SERVICE_ACCOUNT` and the
  * client's `VITE_FIREBASE_VAPID_KEY`. Nothing breaks; push simply doesn't arrive.
  */
 const FIREBASE_CONFIG = {
-  messagingSenderId: "124129405104",
-  appId: "1:124129405104:web:82c439706ed19a6e493375",
-  projectId: "gossips-app",
-  apiKey: "AIzaSyBJfiyrOfUYdd6yZA5TaXfp9YHcvXUHHaY",
+  messagingSenderId: "__VITE_FIREBASE_MESSAGING_SENDER_ID__",
+  appId: "__VITE_FIREBASE_APP_ID__",
+  projectId: "__VITE_FIREBASE_PROJECT_ID__",
+  apiKey: "__VITE_FIREBASE_API_KEY__",
 };
+
+/*
+ * An unsubstituted placeholder is not a configured value. Without this the guard
+ * below would see two non-empty strings and try to initialise Firebase with
+ * literal `__VITE_…__` text, which fails inside the SDK rather than here.
+ */
+for (const key of Object.keys(FIREBASE_CONFIG)) {
+  if (/^__VITE_[A-Z0-9_]+__$/.test(FIREBASE_CONFIG[key])) FIREBASE_CONFIG[key] = "";
+}
 
 /*
  * No bare `push` listener here.

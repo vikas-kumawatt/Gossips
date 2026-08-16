@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import UserSettings from "../models/UserSettings.js";
+import { signFor } from "./signingSecret.js";
 
 /**
  * Chat lock, enforced by the server rather than by the client.
@@ -39,13 +40,15 @@ import UserSettings from "../models/UserSettings.js";
  */
 const GRANT_TTL_MS = 15 * 60 * 1000;
 
-const SECRET = () => process.env.JWT_SECRET || "";
+/*
+ * Versioned, and part of the signed input — see utils/signingSecret.js. Bumping
+ * the version invalidates outstanding grants, which costs anyone holding one a
+ * re-entry of their PIN; they expire in fifteen minutes regardless.
+ */
+const DOMAIN = "chatlock:v1";
 
 const sign = (userId, chatId, expiresAt) =>
-  crypto
-    .createHmac("sha256", SECRET())
-    .update(`${userId}\n${chatId}\n${expiresAt}`)
-    .digest("base64url");
+  signFor(DOMAIN, `${userId}\n${chatId}\n${expiresAt}`);
 
 export const issueUnlockGrant = (userId, chatId) => {
   const expiresAt = Date.now() + GRANT_TTL_MS;

@@ -222,7 +222,23 @@ function App() {
                   </ProtectedRoute>
                 }
               />
-              <Route path=":profileId" element={<ProfilePage />} />
+              {/*
+                Wrapped like every other content route. ProfilePage already
+                refused to render without a token, but it did so with a bare
+                `<Navigate to="/login" />` — which drops the location, so
+                following a link to a profile while signed out sent you to the
+                feed after logging in rather than to the profile. Enforcing it
+                here instead means one mechanism decides what "signed in" means,
+                and the `state={{ from }}` return path comes with it.
+              */}
+              <Route
+                path=":profileId"
+                element={
+                  <ProtectedRoute>
+                    <ProfilePage />
+                  </ProtectedRoute>
+                }
+              />
               <Route
                 path="/:username/post/:Postid"
                 element={

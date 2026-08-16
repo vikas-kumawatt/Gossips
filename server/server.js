@@ -16,6 +16,8 @@ import searchRoutes from "./routes/searchRoutes.js";
 import botRoutes from "./routes/botRoutes.js";
 import { maintenanceGate } from "./middleware/maintenanceMiddleware.js";
 import { sanitizeMongo } from "./middleware/sanitizeMongo.js";
+import { securityHeaders } from "./middleware/securityHeaders.js";
+import { signingSecret } from "./utils/signingSecret.js";
 import { backfillRoles } from "./utils/roles.js";
 import { startScheduler } from "./utils/scheduler.js";
 import { startBotRunner } from "./bots/runner.js";
@@ -39,7 +41,31 @@ const app = express();
  * one hop, which is what a single reverse proxy warrants; trusting all hops
  * would let a client forge its own address via X-Forwarded-For.
  */
+/*
+ * Fail here rather than per-request.
+ *
+ * `signingSecret()` throws when JWT_SECRET is unset — correct, but it is called
+ * on the request path by `verifyMedia` and `verifyUnlockGrant`, so an instance
+ * booted without the variable would answer 500s to sends and to locked-chat
+ * reads while looking healthy everywhere else. Touching it once at startup turns
+ * that into a refusal to boot, which is the same bargain config/origins.js makes
+ * for ALLOWED_ORIGINS.
+ */
+signingSecret();
+
 app.set("trust proxy", 1);
+
+/*
+ * Express advertises itself on every response otherwise. It tells an attacker
+ * which stack to aim at and tells a user nothing.
+ */
+app.disable("x-powered-by");
+
+/*
+ * Before CORS and before routing, so it applies to preflights, 404s and the
+ * error handler as well as to successful responses.
+ */
+app.use(securityHeaders);
 
 // Shared with the CSRF guard on the auth routes — see config/origins.js.
 const allowedOrigins = ALLOWED_ORIGINS;

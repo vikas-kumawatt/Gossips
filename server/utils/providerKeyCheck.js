@@ -1,5 +1,6 @@
 import { AUTH_STYLES, providersMatchingKeyShape, providerOf } from "../bots/providers.js";
 import { redact } from "./keyVault.js";
+import { pinnedGet } from "./pinnedRequest.js";
 
 /**
  * Is this key real, and does it have credit?
@@ -82,7 +83,11 @@ const parseModels = (provider, body) => {
  * `reason` is safe to show an owner: either the provider's own message or a phrase written here.
  * Passed through `redact` regardless, because provider errors do sometimes echo the request.
  */
-export const checkProviderKey = async (providerId, plaintextKey, { baseUrl } = {}) => {
+export const checkProviderKey = async (
+  providerId,
+  plaintextKey,
+  { baseUrl, addresses } = {}
+) => {
   const provider = providerOf(providerId);
   if (!provider) {
     return { status: "invalid", reason: "That provider isn't supported.", models: [] };
@@ -128,20 +133,29 @@ export const checkProviderKey = async (providerId, plaintextKey, { baseUrl } = {
     };
   }
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
-
   try {
-    const response = await fetch(`${endpoint}${provider.modelsPath}`, {
-      method: "GET",
-      signal: controller.signal,
+    /*
+     * `pinnedGet` rather than `fetch`, and `addresses` rather than nothing.
+     *
+     * This request carries the owner's API key to an endpoint they nominated, so
+     * it is the one request in this file worth aiming somewhere else. The caller
+     * has already had `bots/selfHosted.js` resolve the host and reject every
+     * private or reserved address it returned — but the list was then discarded
+     * and `fetch` resolved the name again, so a record with a short TTL could
+     * answer differently for the request than it did for the check. Connecting
+     * to the address that was validated closes that window; the URL still names
+     * the hostname, so SNI, certificate validation and the Host header are
+     * unchanged.
+     *
+     * `addresses` is undefined for every provider in the fixed table, whose
+     * hostnames are not owner-supplied and have nothing to rebind, and
+     * resolution for those is ordinary. Redirects are not followed, for the same
+     * reason the previous `redirect: "manual"` said.
+     */
+    const response = await pinnedGet(`${endpoint}${provider.modelsPath}`, {
       headers: authHeadersFor(provider, key),
-      /*
-       * Never follow a redirect. A 3xx from a provider endpoint would send the key to whatever host
-       * the response named — which is the SSRF the fixed base-URL table exists to prevent, arriving
-       * by the back door.
-       */
-      redirect: "manual",
+      addresses,
+      timeoutMs: TIMEOUT_MS,
     });
 
     if (response.ok) {
@@ -232,7 +246,5 @@ export const checkProviderKey = async (providerId, plaintextKey, { baseUrl } = {
           : `Couldn't reach ${provider.label}. Try again shortly.`,
       models: [],
     };
-  } finally {
-    clearTimeout(timer);
   }
 };

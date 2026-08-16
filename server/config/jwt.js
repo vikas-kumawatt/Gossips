@@ -30,13 +30,16 @@ export const JWT_VERIFY_OPTIONS = { algorithms: JWT_ALGORITHMS };
  * token, and any future `typ` is refused by default rather than by remembering to
  * add it here.
  *
- * `undefined` is allowed because tokens minted before the `typ` claim existed carry
- * none, and rejecting them would sign those users out. Note what that concedes: a
- * pre-`typ` *refresh* token also has no `typ`, lives seven days, and is therefore
- * accepted here for up to a week after the claim shipped. That is the behaviour the
- * old `typ === "refresh"` denylist had too, so this is not a regression — but it is
- * a hole with an expiry date rather than a safe default, and once seven days have
- * passed since the `typ` claim first deployed this case should simply be removed.
+ * This used to also accept `decoded.typ === undefined`, so that tokens minted
+ * before the claim existed kept working rather than signing those users out. The
+ * comment recorded what that conceded — a pre-`typ` *refresh* token also carries
+ * no `typ`, lives seven days, and was therefore accepted as an access token for
+ * up to a week — and said the case should be removed once seven days had passed
+ * since `typ` first deployed.
+ *
+ * It has. `typ: "access"` has been minted since the initial commit, and the
+ * longest-lived token in the system is the seven-day refresh token, so nothing
+ * without the claim can still be inside its validity window. The allowance is
+ * removed rather than left to be inherited by whoever reads this next.
  */
-export const isAccessToken = (decoded) =>
-  decoded?.typ === undefined || decoded?.typ === "access";
+export const isAccessToken = (decoded) => decoded?.typ === "access";

@@ -321,7 +321,9 @@ Notes on the diagram:
 ```text
 Gossips/
 ├── frontend/                 # React + Vite PWA
-│   ├── public/               # Static assets, firebase-messaging-sw.js, PWA icons
+│   ├── public/               # Static assets, PWA icons
+│   │   ├── firebase-messaging-sw.js  # Push worker; config templated from env
+│   │   └── _headers          # Netlify response headers, incl. the browser CSP
 │   ├── images/               # Logos, favicons, QR assets
 │   ├── scripts/
 │   │   └── smoke-build.mjs   # Post-build check: loads the bundle in jsdom
@@ -364,7 +366,7 @@ Gossips/
 │   │   ├── providers.js, selfHosted.js
 │   ├── config/               # db, redis, socket, cloudinary, multer, jwt, cors origins, ICE
 │   ├── controllers/          # Request handlers, one per domain
-│   ├── middleware/           # auth, admin, feature gates, maintenance, mongo sanitiser
+│   ├── middleware/           # auth, admin, feature gates, maintenance, sanitiser, headers
 │   ├── models/               # 30 Mongoose schemas (+ one removed-model tombstone)
 │   ├── routes/               # 14 Express routers
 │   ├── scripts/              # One-off maintenance scripts
@@ -416,7 +418,7 @@ lazy-loaded — there is no `React.lazy` or `Suspense` anywhere in `src/`.
 | `/signup`, `/login` | `UserAuthForm` | No |
 | `/verify-email` | `VerifyOtpPage` | No (self-guards on a verification ticket) |
 | `/tag/:tag` | `HashtagPage` | Yes |
-| `/:profileId` | `ProfilePage` | **No** |
+| `/:profileId` | `ProfilePage` | Yes |
 | `/:username/post/:Postid` | `PostPage` | Yes |
 | `/search` | `SearchPage` | Yes |
 | `/activity` | `ActivityPage` | Yes |
@@ -1132,6 +1134,7 @@ matching cookie. A password reset instead deletes every session for the user.
 | `NODE_ENV` | No | `production` switches cookies to `secure` + `SameSite=None` and silences error logging |
 | `REDIS_URL` | No | Defaults to `redis://localhost:6379`; the app runs without a reachable Redis |
 | `CLIENT_URL` | No | Referenced in the codebase alongside `FRONTEND_URL` |
+| `ALLOWED_ORIGINS` | **Yes in production** | Comma-separated origin allow-list shared by CORS and the `/auth` CSRF guard. Unset outside production falls back to `http://localhost:5173`; unset **in** production throws at boot |
 | `BOTS_ENABLED` | No | Must be exactly `"true"` to start the bot runner and DM responder |
 | `PYTHON_SERVICE_URL` | No | Defaults to `http://127.0.0.1:8000`. Note `run.sh` listens on **8001**, so set this explicitly |
 | `INTERNAL_SERVICE_SECRET` | Yes if bots enabled | Shared secret sent as `X-Internal-Secret` to the Python service |
@@ -1235,6 +1238,10 @@ FIREBASE_PROJECT_ID=<project-id>
 FIREBASE_CLIENT_EMAIL=<service-account email>
 FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n…\n-----END PRIVATE KEY-----\n"
 
+# optional in development (defaults to http://localhost:5173);
+# REQUIRED in production, where an unset value throws at boot
+# ALLOWED_ORIGINS=http://localhost:5173
+
 # optional
 REDIS_URL=redis://127.0.0.1:6379
 GIPHY_API_KEY=<key>
@@ -1258,8 +1265,9 @@ VITE_FIREBASE_APP_ID=<app id>
 VITE_FIREBASE_VAPID_KEY=<vapid key>
 ```
 
-`http://localhost:5173` is already in the CORS allow-list (`server/config/origins.js`). Any other
-dev origin has to be added there.
+`http://localhost:5173` is the development default for the CORS and CSRF allow-list
+(`server/config/origins.js`), so it needs no configuration. Any other dev origin — a LAN address for
+testing on a phone, say — has to be named in `ALLOWED_ORIGINS`, comma-separated.
 
 ### Running
 
@@ -1321,9 +1329,10 @@ loads without mounting logs `mounted: no` but does **not** fail.
 - The API listens on **port 5000**, hardcoded. A platform that injects `PORT` needs a code change.
 - `app.set("trust proxy", 1)` assumes exactly one reverse-proxy hop in front of the API. The
   comment names Render as the environment this was written for.
-- `server/config/origins.js` is the CORS and CSRF allow-list, hardcoded to
-  `http://localhost:5173` and `https://gossipsss.netlify.app`. **A different front-end origin
-  requires editing this file** — it is not configurable by environment.
+- `server/config/origins.js` builds the CORS and CSRF allow-list from `ALLOWED_ORIGINS`
+  (comma-separated). **It throws at boot if that variable is unset while `NODE_ENV=production`**,
+  so set it before deploying. Entries are normalised through `URL`, so a trailing slash is
+  tolerated and a non-URL entry fails loudly.
 - Production cookies rely on `NODE_ENV=production` to become `Secure` + `SameSite=None`, which in
   turn requires HTTPS and implies a cross-origin front end.
 - `python-service/run.sh` binds `127.0.0.1` with one worker and its header comments state that
@@ -1474,9 +1483,10 @@ over `url\ntype\nfileSize`, keyed on `JWT_SECRET`. The send path and the discard
 `timingSafeEqual` before accepting the descriptor.
 
 > This is an **integrity** token, not an access token. It proves the server produced that descriptor,
-> so a client cannot attach an arbitrary URL to a message. The Cloudinary URLs themselves are public
-> and unguessable-by-obscurity only. Note also that only `url`, `type` and `fileSize` are covered —
-> `thumbnail`, `duration`, `waveform` and dimensions are not signed.
+> so a client cannot attach an arbitrary URL to a message, nor alter any field the server derived —
+> the signature covers `url`, `type`, `fileSize`, `thumbnail`, `filename`, `duration`, `dimensions`
+> and `waveform`. It says nothing about who may send the attachment, and the Cloudinary URL it names
+> remains publicly fetchable to anyone who learns it.
 
 Externally hosted GIFs bypass the token by way of a host allow-list (`media.giphy.com`,
 `i.giphy.com`, `media0-4.giphy.com`, https only).
@@ -1552,7 +1562,12 @@ Mechanisms that are present in the code:
   and params before any route, dropping branches past depth 8 rather than failing open.
 - **Rate limiting** on every sensitive route, keyed per user where an authenticated user exists, plus
   per-user budgets on every socket event including a default bucket for handlers added later.
-- **Timing-safe comparison** for OTP codes, media tokens and the internal service secret.
+- **Timing-safe comparison** for OTP codes, media tokens, chat-lock grants and the internal service
+  secret.
+- **Domain-separated HMACs.** `utils/signingSecret.js` is the single accessor for the raw-HMAC
+  signing key. It throws when `JWT_SECRET` is unset rather than signing with an empty key, and every
+  signature carries a versioned domain prefix so an attachment token cannot be replayed as a
+  chat-lock grant.
 - **BYOK key encryption**: AES-256-GCM with a scrypt-derived key (N=16384, r=8, p=1) from
   `BYOK_ENCRYPTION_SECRET`, which must be at least 32 characters or key derivation throws. Ciphertext
   and fingerprint are `select: false` and stripped by `toJSON`; only a 4-character hint is exposed.
@@ -1560,10 +1575,25 @@ Mechanisms that are present in the code:
   name-based rule for anything matching `api_key|secret|token|password|authorization|credential`.
 - **SSRF defence** for owner-supplied self-hosted endpoints: https only, no credentials in the URL,
   no query or fragment, and a DNS resolution check that rejects if *any* resolved address is private
-  or reserved. Redirects are never followed, by the key checker or by the Python service.
+  or reserved. Redirects are never followed, by the key checker or by the Python service. The
+  validated address is then **pinned** for the Node-side key check (`utils/pinnedRequest.js`), so the
+  request that carries the owner's API key connects to the address that was checked rather than
+  re-resolving; the URL still names the host, leaving SNI, certificate validation and `Host` intact.
+  The endpoint is re-validated immediately before every use, including on the DM reply path.
+- **Response security headers** on every API response (`middleware/securityHeaders.js`): `nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, a `default-src 'none'` CSP,
+  `Cross-Origin-Resource-Policy: cross-origin`, and HSTS on HTTPS requests only. `x-powered-by` is
+  disabled. The browser-facing CSP lives in `frontend/public/_headers`, since that is where the
+  documents are served from.
 - **Staff routes answer 404**, not 403, so their existence is not confirmed to a non-staff caller.
 - **Upload constraints**: MIME allow-list, 50 MB cap, temp files unlinked on both response `finish`
-  and `close`, and signed descriptors so a client cannot attach an arbitrary URL to a message.
+  and `close`, and signed descriptors so a client cannot attach an arbitrary URL to a message. The
+  signature covers every server-derived field — `url`, `type`, `fileSize`, `thumbnail`, `filename`,
+  `duration`, `dimensions`, `waveform` — so a client holding a valid token still cannot repoint a
+  video's poster frame or restate its duration. Client-chosen fields (`caption`, `isSpoiler`) are
+  deliberately outside the signature.
+- **Password reset tokens are hashed at rest** (SHA-256), like refresh tokens. The raw token exists
+  only in the email.
 - **Error responses** are fixed strings for 5xx; `err.message` is logged rather than returned,
   because it routinely carries file paths and driver output.
 - **Sensitive fields** are `select: false` and stripped in `toJSON`: password, 2FA secret and backup
@@ -1571,24 +1601,35 @@ Mechanisms that are present in the code:
 
 Limitations visible in the implementation, stated so they are not mistaken for absences of risk:
 
-- `JWT_SECRET` is reused for access tokens, refresh tokens, verification tickets, the OTP HMAC and
-  the media integrity HMAC. Rotating it invalidates all five at once.
-- `utils/mediaToken.js` falls back to an empty HMAC key when `JWT_SECRET` is unset, whereas
-  `keyVault.js` throws. An unset secret degrades that signature silently.
-- `resetPasswordToken` is stored in plaintext on the `User` document, unlike refresh tokens (hashed)
-  and OTP codes (HMAC'd).
-- `isAccessToken` accepts tokens with no `typ` claim, which includes pre-`typ` refresh tokens for up
-  to their 7-day lifetime. The code comments this as an intentional hole with an expiry date.
-- `selfHosted.js` documents DNS rebinding as a stated residual risk of its resolve-then-fetch check.
-- The signed chat descriptor covers only `url`, `type` and `fileSize`.
-- Cloudinary URLs are public once known; there is no signed-delivery or access control on media.
-- `public/firebase-messaging-sw.js` hardcodes a live Firebase web config (project id, sender id,
-  app id and web API key) because a service worker cannot read `import.meta.env`. These particular
-  values are not secrets, but they are baked into the bundle and cannot be changed by configuration.
-- `contexts/FollowContext.jsx` contains a hardcoded LAN fallback socket URL
-  (`http://192.168.5.133:5000`) used when `VITE_SERVER` is unset.
-- The `/:profileId` route is the one content route not wrapped in `ProtectedRoute`.
-- There is no CSP, no HSTS and no `helmet`-style header middleware.
+- `JWT_SECRET` is reused for access tokens, refresh tokens, verification tickets, the OTP HMAC, the
+  chat-lock grant HMAC and the media integrity HMAC. The three raw-HMAC uses are domain-separated
+  (`otp:v1:`, `chatlock:v1`, `media:v3`) so a signature minted for one cannot verify under another,
+  and `utils/signingSecret.js` refuses to sign at all when the variable is unset. What remains is
+  that rotating it invalidates all six at once — which is the behaviour you want if you are rotating
+  because it leaked, and an inconvenience if you are rotating on a schedule.
+- **DNS rebinding is closed on the Node side but not the Python side.** `POST /decide` and `/reply`
+  hand `base_url` to the reasoning service as a string, and that service resolves it itself; its
+  `endpoint_allowed()` check matches on the literal hostname and never resolves, so it cannot detect
+  a rebind. Closing it means passing validated addresses across the service boundary and binding an
+  httpx transport to them. Mitigations meanwhile: https only, validation immediately before each
+  call, no redirect following, and `botAllowCustomEndpoints` defaulting to `false` — owner-supplied
+  endpoints do not exist at all until an admin enables them.
+- **Cloudinary URLs are public once known.** There is no signed delivery or access control on media;
+  an unguessable URL is the only protection, and it does not expire. Fixing this means authenticated
+  delivery plus signing at every serialisation point, and existing stored URLs would stay public
+  regardless — it is a migration, not a patch.
+- `subscription`, `isBusiness`/`businessInfo`, `twoFactorEnabled` and several `UserSettings` privacy
+  fields exist on the schema with no code reading them; they are storage, not behaviour.
+- There is no rate limit on the socket handshake itself, only on events after it.
+- No dependency scanning, SBOM or automated audit runs anywhere in the repository.
+- The API sets its own security headers rather than using `helmet`, because two of helmet's defaults
+  are wrong for a cross-origin JSON API (`Cross-Origin-Resource-Policy: same-origin` would break
+  every fetch, and its CSP describes a document this server never sends). The list is short and
+  written out with reasons in `middleware/securityHeaders.js`.
+- The browser-facing CSP in `frontend/public/_headers` is Netlify-specific. Another static host needs
+  the same directives expressed in its own format.
+- `style-src` requires `'unsafe-inline'` because Framer Motion writes animated values to the style
+  attribute on every frame. Removing it means removing the animation library.
 
 No claim is made here that the application is secure or production-ready.
 
@@ -1758,9 +1799,9 @@ test suite.
 ## Known limitations
 
 - **No deployment configuration.** No Dockerfile, CI workflow, or platform manifest is checked in.
-- **The API port is hardcoded** to 5000; `PORT` is present in the `.env` template but never read.
-- **Allowed origins are hardcoded** in `server/config/origins.js`. Deploying the client anywhere other
-  than `localhost:5173` or `gossipsss.netlify.app` requires a code change.
+- **The API port is hardcoded** to 5000; `PORT` is never read.
+- **`ALLOWED_ORIGINS` must be set in production** or the server refuses to boot. This is deliberate —
+  there is no safe default for an origin allow-list — but it is a required deployment step.
 - **The migration scripts are broken** — `server/migrations/` does not exist.
 - **`scripts/makeAdmin.js` is referenced in a model comment but is not in the repository**, so the
   first staff account has to be created directly in the database.
@@ -1777,11 +1818,13 @@ test suite.
   process-local.
 - **Brevo SMTP credentials are a hard boot requirement** — `authController.js` throws at import
   without all three variables, so the server will not start without an email provider.
-- **`firebase-messaging-sw.js` hardcodes a Firebase web config** that must be edited by hand to point
-  at a different Firebase project; it cannot read `.env`.
+- **`firebase-messaging-sw.js` and `_headers` are templated at build time**, not by Vite's normal
+  `import.meta.env` substitution — Vite copies `public/` verbatim, so a small plugin
+  (`publicFileEnv` in `vite.config.js`) fills in their placeholders. Anything else added to `public/`
+  that needs configuration must be registered in that plugin's file list.
 - **`aws-sdk` and `sharp` are installed but unused**, adding install weight for no benefit.
 - **`frontend/README.md` is empty.**
-- **A LAN IP is hardcoded** as a socket fallback in `contexts/FollowContext.jsx`, and a LAN IP appears
+- **A LAN IP appears
   in the server's startup log line.
 - **TURN is not configured by default**, so roughly one call in five — those behind symmetric NAT, which
   includes most mobile carriers — will fail to connect. `config/iceServers.js` documents this as a

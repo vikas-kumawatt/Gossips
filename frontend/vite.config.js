@@ -1,13 +1,128 @@
-import { defineConfig } from "vite";
+import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+/*
+ * This file's own directory, rather than `process.cwd()`.
+ *
+ * The project root is where this config lives, not wherever npm happened to be
+ * invoked from — `npm --prefix frontend run dev` and `cd frontend && vite` agree
+ * today, but a build run from the repository root would not. It also keeps the
+ * config free of `process`, which the browser-globals ESLint config flags.
+ */
+const ROOT = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Files in `public/` that carry `__PLACEHOLDER__` tokens, with the MIME type to
+ * serve them as in dev. `_headers` is read by Netlify at deploy time and never
+ * requested by a browser, so its dev entry only matters for inspection.
+ */
+const TEMPLATED_PUBLIC_FILES = {
+  "firebase-messaging-sw.js": "application/javascript",
+  _headers: "text/plain",
+};
+
+/**
+ * Substitute environment values into static files under `public/`.
+ *
+ * Vite copies `public/` verbatim and never applies `import.meta.env` to it,
+ * which is why two things ended up hardcoded that should not have been: the
+ * push service worker's Firebase project (it cannot read `import.meta.env` at
+ * all — a service worker is not a module, and moving it out of `public/` would
+ * put it under hashed `/assets/` where it could no longer control the app), and
+ * the API origin inside the Content-Security-Policy.
+ *
+ * Both keep `__TOKEN__` placeholders and are filled in here. Two paths, because
+ * `public/` is served from disk in dev and copied to `dist/` on build:
+ *
+ *   dev    — a middleware answers the request with the substituted text
+ *   build  — `closeBundle` rewrites the emitted copy
+ *
+ * `loadEnv(mode, root, "")` rather than `process.env`, so `.env`, `.env.<mode>`
+ * and the rest are read exactly as they are for the client bundle — these files
+ * cannot end up configured differently from the app they belong to.
+ *
+ * An unset variable leaves its placeholder untouched rather than emitting an
+ * empty string, so the result is visibly unconfigured rather than subtly wrong.
+ * The service worker checks for that and stays inert.
+ */
+const publicFileEnv = (mode) => {
+  const env = loadEnv(mode, ROOT, "");
+
+  /*
+   * Derived, because a CSP needs an origin and `VITE_SERVER` may carry a path,
+   * and because Socket.IO's `wss://` form is a separate connect-src entry that
+   * the `https://` one does not cover.
+   */
+  const derived = {};
+  try {
+    const api = new URL(env.VITE_SERVER);
+    derived.__API_ORIGIN__ = api.origin;
+    derived.__API_WS_ORIGIN__ = `${api.protocol === "http:" ? "ws:" : "wss:"}//${api.host}`;
+  } catch {
+    // VITE_SERVER unset or malformed. Leave both placeholders in place; the app
+    // has no API to talk to either way, and a silently permissive CSP is worse
+    // than an obviously broken one.
+  }
+
+  /*
+   * `||`, not `??`. `loadEnv` returns "" for a variable that is present but
+   * empty, and `??` would substitute that empty string — which looks configured
+   * to every downstream check while being nothing at all. An empty value is
+   * treated as unset, so the placeholder survives and the consumer can see it.
+   */
+  const substitute = (source) =>
+    source.replace(/__[A-Z0-9_]+__/g, (token) => derived[token] || env[token.slice(2, -2)] || token);
+
+  const read = (dir, file) => {
+    const full = path.resolve(ROOT, dir, file);
+    return fs.existsSync(full) ? { full, text: fs.readFileSync(full, "utf8") } : null;
+  };
+
+  return {
+    name: "public-file-env",
+
+    /*
+     * No `enforce`, and that matters. vite-plugin-pwa declares `enforce: "post"`
+     * and builds its precache manifest in `closeBundle`; Vite runs normal-phase
+     * plugins before post-phase ones, so the substitution below lands before the
+     * manifest is computed and the recorded revision hash matches the bytes
+     * actually shipped. Giving this plugin `enforce: "post"` and listing it
+     * after VitePWA would silently invert that and precache a stale hash.
+     */
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const name = req.url?.split("?")[0]?.replace(/^\//, "");
+        if (!name || !(name in TEMPLATED_PUBLIC_FILES)) return next();
+        const found = read("public", name);
+        if (!found) return next();
+        res.setHeader("Content-Type", TEMPLATED_PUBLIC_FILES[name]);
+        // A service worker update is decided by byte comparison against the
+        // cached copy; caching it would hide a config change indefinitely.
+        res.setHeader("Cache-Control", "no-cache");
+        res.end(substitute(found.text));
+      });
+    },
+
+    closeBundle() {
+      for (const name of Object.keys(TEMPLATED_PUBLIC_FILES)) {
+        const found = read("dist", name);
+        if (found) fs.writeFileSync(found.full, substitute(found.text));
+      }
+    },
+  };
+};
 
 // https://vite.dev/config/
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [
     react(),
     tailwindcss(),
+    publicFileEnv(mode),
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
@@ -101,4 +216,4 @@ export default defineConfig({
       },
     },
   },
-});
+}));

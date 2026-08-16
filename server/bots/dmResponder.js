@@ -10,8 +10,9 @@ import { validateDecision } from "./actionValidator.js";
 import { executeActions, logAction } from "./executor.js";
 import { loadMemories } from "./memory.js";
 import { collectAllowedTargets, shapeActor, shapeMessage } from "./perceptionBudget.js";
-import { baseUrlFor } from "./providers.js";
+import { baseUrlFor, needsEndpoint } from "./providers.js";
 import { dmReplyBudget } from "./rateLimits.js";
+import { ENDPOINT_SOURCE, assertSafeEndpoint } from "./selfHosted.js";
 import { FAILURE_KINDS, replyToConversation } from "./reasoningClient.js";
 
 /**
@@ -153,6 +154,32 @@ const replyOnce = async ({ bot, persona, peer, conversationKey }) => {
     return;
   }
 
+  /*
+   * An owner-supplied endpoint is checked here too.
+   *
+   * This used to be skipped, on the reasoning that the runner re-checks and would
+   * pause the bot on its next cycle, so a resolver call on the reply latency path
+   * bought nothing the durable path didn't already provide.
+   *
+   * That reasoning covers the bot eventually stopping. It does not cover what
+   * happens in between: a cycle is up to twenty minutes, this path is triggered
+   * by every inbound DM, and each run hands the owner's decrypted API key to
+   * whatever the endpoint's hostname resolves to at that instant. So a name that
+   * has begun answering with an internal address is used as many times as
+   * messages arrive before the runner next looks — and the Python service's own
+   * endpoint guard cannot catch it, because that one matches on the literal
+   * hostname and never resolves.
+   *
+   * The cost the old comment weighed is real but small: `dns.lookup` goes through
+   * the OS resolver cache, and it sits in front of a model call measured in
+   * seconds. Failing quietly here is still this path's normal behaviour — the
+   * message stays unread and the runner handles it properly.
+   */
+  if (needsEndpoint(record.provider) && record.endpointSource === ENDPOINT_SOURCE.OWNER) {
+    const checked = await assertSafeEndpoint(baseUrlFor(record), ENDPOINT_SOURCE.OWNER);
+    if (!checked.ok) return;
+  }
+
   const conversation = await buildConversation(conversationKey, bot, peer);
   if (!conversation) return;
 
@@ -175,13 +202,8 @@ const replyOnce = async ({ bot, persona, peer, conversationKey }) => {
     memory: { self, about: summary && peer.username ? { [peer.username]: summary } : {} },
     apiKey,
     provider: record.provider,
-    /*
-     * No re-validation here, unlike the runner. An owner-supplied endpoint that has started resolving
-     * privately is caught on the next cycle, which pauses the bot properly — and this path is
-     * best-effort by design, so failing quietly is its normal behaviour rather than a gap. Duplicating
-     * the DNS check would put a resolver call on the latency path of every reply for a case the durable
-     * path already handles.
-     */
+    // Validated above, immediately before this call, for the same reason the
+    // runner validates immediately before its own.
     baseUrl: baseUrlFor(record),
   });
 

@@ -36,19 +36,31 @@ import net from "node:net";
  *     URL, every resolved address must be public. Off by default, because most deployments have no
  *     reason to accept it at all.
  *
- * ── The residual risk, stated rather than hidden ────────────────────────────
+ * ── DNS rebinding, and where it is and is not closed ────────────────────────
  *
- * DNS rebinding is not fully closed. `assertSafeEndpoint` resolves the hostname and rejects private
- * results, but a name can resolve differently between that check and the socket connecting a moment
- * later. Closing it completely means connecting to a pinned IP while carrying the original `Host`
- * header — which breaks TLS certificate verification, and for the `OWNER` path TLS is doing more work
- * than the pinning would.
+ * `assertSafeEndpoint` resolves the hostname and rejects private results, but a name can resolve
+ * differently between that check and the socket connecting a moment later. This file used to record
+ * that as an accepted residual, on the grounds that connecting to a pinned IP "breaks TLS
+ * certificate verification". That is only true if the request is *addressed* to the IP. Node lets
+ * name resolution be overridden per connection, so the socket can go to the checked address while
+ * the URL still names the host — SNI, certificate validation and the `Host` header all unchanged.
+ * `utils/pinnedRequest.js` does exactly that.
  *
- * So the mitigations are: `https` only, which means a valid certificate for the *name*; validation
- * immediately before the call rather than only at save time; and no redirect following, which closes
- * the much easier version of the same attack. The window is small and the payoff for an attacker is
- * a request to a private address with no response body returned to them — the reasoning service
- * returns a mapped status, never the provider's body.
+ * Closed, therefore, on the Node side: `checkProviderKey` — the request that carries the owner's
+ * decrypted API key — connects only to an address this file returned. Callers must pass
+ * `addresses` through; dropping it silently reverts to ordinary resolution, which is why every
+ * caller is named in that file's comment.
+ *
+ * **Not** closed for the reasoning path. `POST /decide` and `/reply` hand `base_url` to the Python
+ * service as a string, and that service resolves it itself; its own `endpoint_allowed()` matches on
+ * the literal hostname and never resolves, so it cannot see a rebind at all. Pinning there means
+ * passing the validated addresses across the service boundary and giving httpx a transport bound to
+ * them. Until that exists, the mitigations on this path are the ones that were always here: `https`
+ * only, so a valid certificate for the *name* is still required; validation immediately before each
+ * call rather than at save time only — now including the DM responder, which previously skipped it;
+ * and no redirect following. The payoff for an attacker remains a request to a private address whose
+ * body they never see, because the reasoning service returns a mapped status and never the
+ * provider's response.
  */
 
 /** Who supplied the URL. This, not the address, is what decides the rules. */

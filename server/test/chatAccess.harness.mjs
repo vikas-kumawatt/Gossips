@@ -1694,7 +1694,13 @@ ok("conversation access: non-string refused", !(await access.canReadConversation
   const lock = await loadModule(
     "utils/chatLock.js",
     `const crypto = __crypto;\nconst UserSettings = { findOne: () => __q(null) };`,
-    { __crypto: (await import("node:crypto")).default, __q: query }
+    {
+      __crypto: (await import("node:crypto")).default,
+      __q: query,
+      // The real one, not a stub: the domain prefix and the required-secret
+      // check are part of what these assertions are testing.
+      signFor: (await import("../utils/signingSecret.js")).signFor,
+    }
   );
 
   const { grant } = lock.issueUnlockGrant(A, `user_${B}`);
@@ -1725,16 +1731,18 @@ ok("conversation access: non-string refused", !(await access.canReadConversation
    * Reusing a live grant's signature with an older timestamp doesn't test this:
    * the signature covers the timestamp, so that input is refused by the MAC
    * comparison and the expiry check never runs. The HMAC is recomputed here
-   * against the real payload format so the only thing left to reject it is the
-   * clock. Duplicating the format is the cost of testing it — and if the format
-   * changes, this fails loudly rather than passing vacuously.
+   * against the real payload format — including the `chatlock:v1` domain prefix
+   * from utils/signingSecret.js — so the only thing left to reject it is the
+   * clock. Duplicating the format is the cost of testing it, and if the format
+   * changes, this fails loudly rather than passing vacuously. It has done so
+   * once already, which is the argument for keeping it.
    */
   {
     const crypto = (await import("node:crypto")).default;
     const past = Date.now() - 1000;
     const mac = crypto
       .createHmac("sha256", process.env.JWT_SECRET)
-      .update(`${A}\n${`user_${B}`}\n${past}`)
+      .update(`chatlock:v1\n${A}\n${`user_${B}`}\n${past}`)
       .digest("base64url");
     ok(
       "unlock: a correctly signed but expired grant is refused",
@@ -1745,7 +1753,7 @@ ok("conversation access: non-string refused", !(await access.canReadConversation
     const future = Date.now() + 60 * 60 * 1000;
     const liveMac = crypto
       .createHmac("sha256", process.env.JWT_SECRET)
-      .update(`${A}\n${`user_${B}`}\n${future}`)
+      .update(`chatlock:v1\n${A}\n${`user_${B}`}\n${future}`)
       .digest("base64url");
     ok(
       "unlock: the same construction in the future is accepted",

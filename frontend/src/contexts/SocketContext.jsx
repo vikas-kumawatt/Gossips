@@ -57,9 +57,20 @@ export const SocketProvider = ({ children }) => {
         setIsConnected(true);
         setReconnectFailed(false);
         setConnectionEpoch((n) => n + 1);
-        // Join user room
-        if (userAuth.id) {
-          newSocket.emit("join", userAuth.id);
+        /*
+         * Join user room.
+         *
+         * `id || _id` because the stored auth object is not consistently shaped
+         * — ChatProvider reads `userAuth?.id || userAuth?._id` in three places,
+         * and FollowContext did the same before it moved onto this socket. Every
+         * per-user emit from the server (`followStatusUpdate`, notifications,
+         * chat-list updates) targets this room, so joining the wrong one, or not
+         * joining at all, is silent: the socket connects and simply never
+         * receives anything.
+         */
+        const userId = userAuth.id || userAuth._id;
+        if (userId) {
+          newSocket.emit("join", userId);
         }
       });
 
@@ -94,7 +105,10 @@ export const SocketProvider = ({ children }) => {
       setIsConnected(false);
       setReconnectFailed(false);
     }
-  }, [userAuth?.token, userAuth?.id]);
+    // `_id` alongside `id` because the room join now falls back to it; without
+    // it here, an auth object carrying only `_id` would connect once and never
+    // rejoin when that value changed.
+  }, [userAuth?.token, userAuth?.id, userAuth?._id]);
 
   /** Try again after reconnection was abandoned. */
   const retryConnection = useCallback(() => {

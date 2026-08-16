@@ -112,6 +112,10 @@ export const addApiKey = async (req, res) => {
      */
     let endpoint = "";
     let endpointSource = "";
+    // Populated only for an owner-supplied endpoint; see the assertSafeEndpoint
+    // branch below. Undefined for the fixed provider table, which resolves
+    // normally.
+    let endpointAddresses;
     if (needsEndpoint(provider)) {
       const settings = await getSettings();
       const published = settings?.botSelfHostedEndpoints || [];
@@ -134,6 +138,9 @@ export const addApiKey = async (req, res) => {
         const checked = await assertSafeEndpoint(requested, ENDPOINT_SOURCE.OWNER);
         if (!checked.ok) return fail(res, checked.error);
         endpoint = checked.url;
+        // Carried to the probe below rather than discarded, so the request goes
+        // to the address that was validated. See utils/pinnedRequest.js.
+        endpointAddresses = checked.addresses;
         endpointSource = ENDPOINT_SOURCE.OWNER;
       }
     } else if (req.body?.baseUrl) {
@@ -161,7 +168,10 @@ export const addApiKey = async (req, res) => {
       return fail(res, `You've already added this key${existing.label ? ` as "${existing.label}"` : ""}`);
     }
 
-    const check = await checkProviderKey(provider, plaintext, { baseUrl: endpoint });
+    const check = await checkProviderKey(provider, plaintext, {
+      baseUrl: endpoint,
+      addresses: endpointAddresses,
+    });
     if (check.status === "invalid") {
       return fail(res, check.reason || "The provider rejected this key");
     }
@@ -357,6 +367,7 @@ export const revalidateApiKey = async (req, res) => {
      * resolved publicly then can resolve to loopback now, and "revalidate" is exactly the moment to
      * find that out. The operator's own endpoints skip it — they own the network.
      */
+    let endpointAddresses;
     if (apiKey.endpointSource === ENDPOINT_SOURCE.OWNER) {
       const recheck = await assertSafeEndpoint(apiKey.baseUrl, ENDPOINT_SOURCE.OWNER);
       if (!recheck.ok) {
@@ -366,9 +377,15 @@ export const revalidateApiKey = async (req, res) => {
         await apiKey.save();
         return fail(res, recheck.error, 409);
       }
+      // The recheck's own answer, so the probe below cannot be sent somewhere
+      // the recheck never saw.
+      endpointAddresses = recheck.addresses;
     }
 
-    const check = await checkProviderKey(apiKey.provider, plaintext, { baseUrl: apiKey.baseUrl });
+    const check = await checkProviderKey(apiKey.provider, plaintext, {
+      baseUrl: apiKey.baseUrl,
+      addresses: endpointAddresses,
+    });
 
     // `unknown` leaves the stored state untouched — see providerKeyCheck.js.
     if (check.status === "unknown") {

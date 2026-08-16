@@ -1,15 +1,32 @@
 import React, { createContext, useState, useContext, useEffect, useCallback, useRef } from 'react';
 import { UserContext } from './UserContext';
-import io from 'socket.io-client';
+import { useSocket } from './useSocket';
 
+/*
+ * Follow state broadcast to every open surface.
+ *
+ * This used to open its own `io()` connection — a second socket to the same
+ * origin, with the same token, the same transports and the same `join`, in order
+ * to listen for one event. Three things were wrong with that. It doubled every
+ * user's connection count for no gain; its URL fell back to a hardcoded LAN
+ * address (`http://192.168.5.133:5000`) when `VITE_SERVER` was unset, so a
+ * misconfigured build quietly dialled someone's development machine; and the
+ * effect depended on `handleFollowUpdate`, which changes on every `userAuth`
+ * change — and `handleFollowUpdate` sets `userAuth`, so each follow update tore
+ * the socket down and reopened it.
+ *
+ * SocketProvider is already an ancestor of this one and has already joined the
+ * user's room, so the event arrives on the shared connection. Subscribing to it
+ * is all that is left.
+ */
 
 // eslint-disable-next-line react-refresh/only-export-components
 export const FollowContext = createContext();
 
 export const FollowProvider = ({ children }) => {
   const { userAuth, setUserAuth } = useContext(UserContext);
+  const { socket } = useSocket();
   const [followUpdates, setFollowUpdates] = useState([]);
-  const socketRef = useRef(null);
 
   const handleFollowUpdate = useCallback((update) => {
     setFollowUpdates(prev => [...prev, update]);
@@ -41,33 +58,27 @@ export const FollowProvider = ({ children }) => {
     });
   }, [setUserAuth, userAuth]);
 
+  /*
+   * Through a ref so the subscription doesn't depend on the handler's identity.
+   * `handleFollowUpdate` is rebuilt whenever `userAuth` changes and itself calls
+   * `setUserAuth`, so depending on it directly meant unsubscribing and
+   * resubscribing on every single follow update.
+   */
+  const handlerRef = useRef(handleFollowUpdate);
   useEffect(() => {
-    if (userAuth.token) {
-      const socketUrl = import.meta.env.VITE_SERVER ? new URL(import.meta.env.VITE_SERVER).origin : 'http://192.168.5.133:5000';
-      const newSocket = io(socketUrl, {
-        auth: { token: userAuth.token },
-        transports: ['websocket', 'polling'],
-      });
+    handlerRef.current = handleFollowUpdate;
+  }, [handleFollowUpdate]);
 
-      newSocket.on('connect', () => {
-        newSocket.emit('join', userAuth.id || userAuth._id);
-      });
+  useEffect(() => {
+    if (!socket) return;
 
-      newSocket.on('connect_error', (error) => {
-        console.error('Socket connection error:', error);
-      });
+    const onFollowStatusUpdate = (update) => handlerRef.current(update);
+    socket.on('followStatusUpdate', onFollowStatusUpdate);
 
-      newSocket.on('followStatusUpdate', (update) => {
-        handleFollowUpdate(update);
-      });
-
-      socketRef.current = newSocket;
-
-      return () => {
-        newSocket.disconnect();
-      };
-    }
-  }, [userAuth.token, userAuth.id, userAuth._id, handleFollowUpdate]);
+    return () => {
+      socket.off('followStatusUpdate', onFollowStatusUpdate);
+    };
+  }, [socket]);
 
   return (
     <FollowContext.Provider value={{ followUpdates, handleFollowUpdate }}>
