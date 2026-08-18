@@ -1848,7 +1848,6 @@ test suite.
   (`publicFileEnv` in `vite.config.js`) fills in their placeholders. Anything else added to `public/`
   that needs configuration must be registered in that plugin's file list.
 - **`aws-sdk` and `sharp` are installed but unused**, adding install weight for no benefit.
-- **`frontend/README.md` is empty.**
 - **A LAN IP appears
   in the server's startup log line.
 - **TURN is not configured by default**, so roughly one call in five — those behind symmetric NAT, which
