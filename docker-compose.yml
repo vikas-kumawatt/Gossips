@@ -56,7 +56,7 @@ services:
       # services resolve by service name rather than as localhost.
       MONGO_URI: mongodb://mongo:27017/gossips
       REDIS_URL: redis://redis:6379
-      PYTHON_SERVICE_URL: http://bot-service:8001
+      PYTHON_SERVICE_URL: http://bot-service:8000
       PORT: 5000
       # Left as development on purpose. `NODE_ENV=production` switches session
       # cookies to Secure + SameSite=None, which a browser will not send over
@@ -75,11 +75,11 @@ services:
     # No published port. Nothing outside the compose network should reach it —
     # the same reason run.sh binds 127.0.0.1. The API talks to it by service name.
     expose:
-      - "8001"
+      - "8000"
     env_file:
       - ./python-service/.env
     environment:
-      BOT_SERVICE_PORT: 8001
+      BOT_SERVICE_PORT: 8000
 
 volumes:
   mongo-data:

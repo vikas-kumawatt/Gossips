@@ -1170,7 +1170,7 @@ matching cookie. A password reset instead deletes every session for the user.
 | `CLIENT_URL` | No | Referenced in the codebase alongside `FRONTEND_URL` |
 | `ALLOWED_ORIGINS` | **Yes in production** | Comma-separated origin allow-list shared by CORS and the `/auth` CSRF guard. Unset outside production falls back to `http://localhost:5173`; unset **in** production throws at boot |
 | `BOTS_ENABLED` | No | Must be exactly `"true"` to start the bot runner and DM responder |
-| `PYTHON_SERVICE_URL` | No | Defaults to `http://127.0.0.1:8000`. Note `run.sh` listens on **8001**, so set this explicitly |
+| `PYTHON_SERVICE_URL` | No | Defaults to `http://127.0.0.1:8000`, which `run.sh` now matches |
 | `INTERNAL_SERVICE_SECRET` | Yes if bots enabled | Shared secret sent as `X-Internal-Secret` to the Python service |
 | `BYOK_ENCRYPTION_SECRET` | Yes if bots enabled | ≥32 characters; scrypt-derived into the AES-256-GCM key for provider keys |
 | `GIPHY_API_KEY` | No | Enables the GIF picker |
@@ -1209,7 +1209,7 @@ hardcoded in that file and must be edited by hand for a different Firebase proje
 | `BOT_REQUEST_TIMEOUT` | No | Provider call timeout in seconds (default `45`) |
 | `BOT_MAX_OUTPUT_TOKENS` | No | Default `1024` |
 | `LOG_LEVEL` | No | Default `INFO` |
-| `BOT_SERVICE_PORT` | No | Read by `run.sh`; default `8001` |
+| `BOT_SERVICE_PORT` | No | Read by `run.sh`; default `8000`. Overriding it means overriding `PYTHON_SERVICE_URL` to match |
 
 No provider API keys belong in this file — keys arrive per request from Node and are discarded
 when the call returns.
@@ -1284,7 +1284,7 @@ GIPHY_API_KEY=<key>
 
 # bots (optional)
 BOTS_ENABLED=false
-PYTHON_SERVICE_URL=http://127.0.0.1:8001
+PYTHON_SERVICE_URL=http://127.0.0.1:8000
 INTERNAL_SERVICE_SECRET=<shared secret, 32+ bytes>
 BYOK_ENCRYPTION_SECRET=<at least 32 characters>
 ```
@@ -1323,7 +1323,7 @@ And, only if `BOTS_ENABLED=true`:
 
 ```bash
 cd python-service
-INTERNAL_SERVICE_SECRET=<same secret> ./run.sh     # uvicorn on 127.0.0.1:8001
+INTERNAL_SERVICE_SECRET=<same secret> ./run.sh     # uvicorn on 127.0.0.1:8000
 ```
 
 `run.sh` binds to `127.0.0.1` with a single worker deliberately. Make sure
@@ -2014,7 +2014,7 @@ rolling back automatically if it does not answer. A red suite means the SSH step
 
 | Command | Description |
 | --- | --- |
-| `./run.sh` | `uvicorn main:app --host 127.0.0.1 --port ${BOT_SERVICE_PORT:-8001} --workers 1` |
+| `./run.sh` | uvicorn on `127.0.0.1:${BOT_SERVICE_PORT:-8000}`, one worker. Prefers `./venv/bin/uvicorn`, falls back to PATH |
 | `pytest` | Runs the test suite |
 
 ---
