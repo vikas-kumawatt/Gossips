@@ -1,0 +1,85 @@
+# A complete local stack: MongoDB, Redis, the API, and the bot reasoning service.
+#
+# The point is the second-clone case. Running this app locally otherwise means
+# installing and configuring MongoDB and Redis by hand, and the README's setup
+# section is the only record of what versions and settings it expects. This is
+# that record, executable.
+#
+#   docker compose up
+#
+# The Vite dev server is deliberately not here — it wants to run on the host with
+# hot reload against your editor, and containerising it buys nothing.
+#
+# Secrets come from server/.env, which is git-ignored. Nothing below contains a
+# credential, and nothing below should ever be given one.
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      # Exposed so you can point Compass or mongosh at it from the host.
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # The API's first action is to connect, and it does not retry — so it must
+      # not start until Mongo is genuinely accepting connections, which is later
+      # than the container being "up".
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  api:
+    build:
+      context: ./server
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    env_file:
+      # Every secret lives here. See the environment table in README.md.
+      - ./server/.env
+    environment:
+      # Overrides for anything in .env that names a host: inside the network,
+      # services resolve by service name rather than as localhost.
+      MONGO_URI: mongodb://mongo:27017/gossips
+      REDIS_URL: redis://redis:6379
+      PYTHON_SERVICE_URL: http://bot-service:8001
+      PORT: 5000
+      # Left as development on purpose. `NODE_ENV=production` switches session
+      # cookies to Secure + SameSite=None, which a browser will not send over
+      # http://localhost — so signing in locally would silently fail.
+      NODE_ENV: development
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  bot-service:
+    build:
+      context: ./python-service
+    restart: unless-stopped
+    # No published port. Nothing outside the compose network should reach it —
+    # the same reason run.sh binds 127.0.0.1. The API talks to it by service name.
+    expose:
+      - "8001"
+    env_file:
+      - ./python-service/.env
+    environment:
+      BOT_SERVICE_PORT: 8001
+
+volumes:
+  mongo-data:

@@ -23,8 +23,12 @@ import {
   buildPostSearchPipeline,
   buildReplySearchPipeline,
   mergeByRecency,
+  mergeByRelevance,
+  looksLikeWholeWords,
+  isTextIndexUnavailable,
   parseSearchFilters,
 } from "../utils/contentSearch.js";
+import { encodeOffsetCursor, decodeOffsetCursor } from "../utils/activitySort.js";
 import { decorateContent } from "../utils/attachments.js";
 import { viewerCanReplyFromSets } from "../utils/replyPermission.js";
 import { escapeRegex } from "../utils/respond.js";
@@ -61,13 +65,41 @@ export const searchContent = async (req, res) => {
 
     const limit = Math.min(parseCursorLimit(req.query.limit, 15), MAX_SEARCH_LIMIT);
 
+    /*
+     * Which of the two orderings to run.
+     *
+     * Decided before the cursor is read, because the two modes issue different
+     * *kinds* of cursor and each is nonsense to the other's decoder. `relevance`
+     * is only meaningful with text to rank, and only answerable by the text index
+     * if the query is whole words — the index finds nothing at all for a
+     * half-typed "coff" — so both conditions are checked here rather than letting
+     * an unanswerable request return an empty page.
+     */
+    const wantsRelevance =
+      filters.sort === "relevance" && Boolean(filters.q) && looksLikeWholeWords(filters.q);
+
     const rawCursor = typeof req.query.cursor === "string" ? req.query.cursor : "";
-    const parsedCursor = decodeCursor(rawCursor);
-    if (rawCursor && !parsedCursor) {
-      return res.status(400).json({ error: "That page cursor isn't valid" });
+
+    /*
+     * Ranked pages carry an offset cursor; chronological ones carry a keyset
+     * cursor over {createdAt, _id}. Validating every cursor as a keyset cursor —
+     * which is what this did — rejected a perfectly good relevance cursor with
+     * "that page cursor isn't valid", so relevance search worked for exactly one
+     * page and then 400'd.
+     */
+    let skip = 0;
+    let cursorMatch = {};
+    if (wantsRelevance) {
+      skip = decodeOffsetCursor(rawCursor);
+    } else {
+      const parsedCursor = decodeCursor(rawCursor);
+      if (rawCursor && !parsedCursor) {
+        return res.status(400).json({ error: "That page cursor isn't valid" });
+      }
+      const built = buildAggregateCursorMatch(parsedCursor);
+      if (built.error) return res.status(400).json({ error: built.error });
+      cursorMatch = built.match;
     }
-    const { match: cursorMatch, error: cursorError } = buildAggregateCursorMatch(parsedCursor);
-    if (cursorError) return res.status(400).json({ error: cursorError });
 
     // ── Single-profile filter ────────────────────────────────────────────────
     // Resolved from the username rather than trusting an id from the client, and
@@ -131,32 +163,83 @@ export const searchContent = async (req, res) => {
     // instead of compiling into a pattern of the searcher's choosing.
     const contentRegex = filters.q ? new RegExp(escapeRegex(filters.q), "i") : null;
 
-    const pipelineInput = {
-      viewerId,
-      filters,
-      contentRegex,
-      cursorMatch,
-      authorId,
-      followingIds,
-      hiddenAuthorIds,
-      // One extra row is what tells us whether another page exists.
-      limit: limit + 1,
-    };
+    const runSearch = async ({ ranked }) => {
+      const pipelineInput = {
+        viewerId,
+        filters,
+        contentRegex: ranked ? null : contentRegex,
+        textQuery: ranked ? filters.q : null,
+        // A keyset cursor is meaningless once results are ordered by score.
+        cursorMatch: ranked ? {} : cursorMatch,
+        authorId,
+        followingIds,
+        hiddenAuthorIds,
+        /*
+         * The ranked path over-fetches by the offset and slices after merging.
+         * Applying `$skip` inside each pipeline would skip that many *posts* and
+         * that many *replies* independently, which is not the same rows as
+         * skipping that many results — the two lists are ranked separately and
+         * only become one ordering after the merge below.
+         *
+         * Bounded: `limit` is capped at MAX_SEARCH_LIMIT, and the offset only
+         * grows while someone keeps paging.
+         */
+        limit: ranked ? skip + limit + 1 : limit + 1,
+      };
 
-    const [postRows, replyRows] = await Promise.all([
-      Post.aggregate(buildPostSearchPipeline(pipelineInput)),
-      filters.excludeReplies
-        ? Promise.resolve([])
-        : Comment.aggregate(buildReplySearchPipeline(pipelineInput)),
-    ]);
+      const [postRows, replyRows] = await Promise.all([
+        Post.aggregate(buildPostSearchPipeline(pipelineInput)),
+        filters.excludeReplies
+          ? Promise.resolve([])
+          : Comment.aggregate(buildReplySearchPipeline(pipelineInput)),
+      ]);
 
-    const merged = mergeByRecency(
-      [
+      const tagged = [
         ...postRows.map((row) => ({ ...row, kind: "post" })),
         ...replyRows.map((row) => ({ ...row, kind: "reply" })),
-      ],
-      limit + 1
-    );
+      ];
+
+      return ranked
+        ? mergeByRelevance(tagged, skip + limit + 1).slice(skip)
+        : mergeByRecency(tagged, limit + 1);
+    };
+
+    let ranked = wantsRelevance;
+    let merged;
+
+    /*
+     * The fallback, for the two ways ranking can fail to answer.
+     *
+     * Empty: a text index matches whole words, so a query that is a partial
+     * word, spelled differently, or tokenised differently by language comes back
+     * with nothing while the regex would have found it. Retried on the first page
+     * only — a later page coming back empty means the end of the results, not a
+     * failed match.
+     *
+     * Thrown: the indexes are declared `background: true`, so on an existing
+     * collection they are unusable until the build finishes, and `$text` throws
+     * `IndexNotFound` rather than returning nothing. That window is the first
+     * minutes after a deploy. Without this the endpoint would 500 for every
+     * relevance search until the build completed; with it, relevance quietly
+     * degrades to recency and `meta.sort` says so.
+     *
+     * Only that specific error is swallowed. Anything else propagates to the
+     * catch below and is reported as a failure, because a fallback that hides
+     * arbitrary errors would turn a broken query into a silently wrong answer.
+     */
+    try {
+      merged = await runSearch({ ranked });
+    } catch (error) {
+      if (!ranked || !isTextIndexUnavailable(error)) throw error;
+      console.warn("searchContent: text index unavailable, falling back to recency");
+      ranked = false;
+      merged = await runSearch({ ranked: false });
+    }
+
+    if (ranked && !merged.length && !skip) {
+      ranked = false;
+      merged = await runSearch({ ranked: false });
+    }
 
     const hasNextPage = merged.length > limit;
     const page = hasNextPage ? merged.slice(0, limit) : merged;
@@ -173,9 +256,19 @@ export const searchContent = async (req, res) => {
         hasNextPage,
         // Taken from the ordered id row, not the hydrated list, so the boundary
         // is right even if a document disappeared between the two queries.
-        nextCursor: hasNextPage ? encodeCursor(page[page.length - 1]) : null,
+        nextCursor: !hasNextPage
+          ? null
+          : ranked
+            ? encodeOffsetCursor(skip + limit)
+            : encodeCursor(page[page.length - 1]),
       },
-      meta: {},
+      /*
+       * Stated, because the client has to send it back unchanged for the next
+       * page to decode its cursor correctly — and because a relevance search
+       * that silently fell back to recency should say so rather than presenting
+       * chronological results as ranked.
+       */
+      meta: { sort: ranked ? "relevance" : "recent" },
     });
   } catch (error) {
     console.error("searchContent error:", error);

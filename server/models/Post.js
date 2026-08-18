@@ -221,6 +221,31 @@ postSchema.index({ hashtags: 1, createdAt: -1 });
 // The publisher polls this: due, still pending.
 postSchema.index({ scheduleStatus: 1, scheduledFor: 1 });
 
+/*
+ * Full-text, for the relevance ranking in `GET /search/content?sort=relevance`.
+ *
+ * A collection may hold only one text index, so this deliberately covers
+ * `content` alone rather than being widened later to include, say, hashtags —
+ * adding a field means dropping and rebuilding, which on a large collection is
+ * not free.
+ *
+ * It does not replace the regex path and is not meant to. A text index matches
+ * whole stemmed words, so it finds "running" for "run" and nothing at all for
+ * "runn" — while search-as-you-type is mostly partial words. Both exist because
+ * they answer different questions; see utils/contentSearch.js.
+ *
+ * `default_language: "none"` disables stemming and stop-word removal. Stemming
+ * is English-only here and this app's content is not: with the default, a Hindi
+ * or Spanish post is tokenised by an English stemmer, and common English words
+ * are dropped from queries entirely — so searching "the office" would drop "the"
+ * and quietly change the query. Without stemming, matching is exact-word, which
+ * is predictable across languages.
+ */
+postSchema.index(
+  { content: "text" },
+  { name: "content_text", default_language: "none", background: true }
+);
+
 // An unbounded array of 500-char strings would grow the document without limit,
 // so history is capped. The original is always kept — it's the version people
 // actually care about when checking what a post used to say — and versions are

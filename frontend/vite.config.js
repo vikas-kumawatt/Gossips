@@ -152,6 +152,63 @@ export default defineConfig(({ mode }) => ({
       workbox: {
         cleanupOutdatedCaches: true,
         clientsClaim: true,
+        /*
+         * Runtime caching, for cross-origin assets only.
+         *
+         * The precache covers the app shell. These cover the things the shell
+         * then requests from somewhere else, which is where the repeat-visit
+         * cost actually is — the same avatar and the same post image are fetched
+         * on every visit otherwise.
+         *
+         * ── What is deliberately absent ────────────────────────────────────
+         *
+         * Every API response. `/posts/feed`, `/chats`, `/user/:username` and the
+         * rest are per-account and auth-scoped, and a service worker cache is
+         * keyed by URL and shared across everyone who uses this browser profile.
+         * Caching them would mean one account's feed being served to the next
+         * account signed in on the same device — and `GET /chats` is explicitly
+         * marked `no-store` by the server for exactly that reason. The IndexedDB
+         * layers in src/utils already give warm-start rendering, scoped per user
+         * id and always revalidated, which is the correct place for that.
+         */
+        runtimeCaching: [
+          {
+            /*
+             * Uploaded media. CacheFirst because a Cloudinary URL is
+             * content-addressed in practice — the public id changes when the
+             * asset does — so a cached response cannot go stale, only unused.
+             */
+            urlPattern: ({ url }) => url.hostname === "res.cloudinary.com",
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gossips-media",
+              expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              // Opaque cross-origin responses are cached as errors otherwise.
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // GIFs are hotlinked from Giphy and never uploaded, so they miss the
+            // rule above. Shorter and smaller: a picker session can pull dozens.
+            urlPattern: ({ url }) => url.hostname.endsWith(".giphy.com"),
+            handler: "CacheFirst",
+            options: {
+              cacheName: "gossips-gifs",
+              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Google account avatars, copied onto the user record at sign-in.
+            urlPattern: ({ url }) => url.hostname === "lh3.googleusercontent.com",
+            handler: "StaleWhileRevalidate",
+            options: {
+              cacheName: "gossips-avatars",
+              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
       },
     }),
   ],

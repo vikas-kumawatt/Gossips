@@ -118,6 +118,15 @@ commentSchema.index({ isDeleted: 1, isScheduled: 1, createdAt: -1 });
 // The publisher polls this.
 commentSchema.index({ scheduleStatus: 1, scheduledFor: 1 });
 
+// Full-text, matching the one on Post — search unions both collections, so
+// ranking one and not the other would make replies permanently outrank posts or
+// vice versa. See the longer note in models/Post.js for why the language is
+// disabled and why it covers `content` only.
+commentSchema.index(
+  { content: "text" },
+  { name: "content_text", default_language: "none", background: true }
+);
+
 // Mirrors Post.editContent — see the notes there.
 export const MAX_EDIT_HISTORY = 20;
 

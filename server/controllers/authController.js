@@ -25,42 +25,78 @@ import {
 } from "../utils/otp.js";
 import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
 
-if (!process.env.BREVO_EMAIL || !process.env.BREVO_SMTP_KEY || !process.env.SMTP_USER) {
-  throw new Error(
-    `Missing required Brevo env vars: ${[
-      !process.env.BREVO_EMAIL && "BREVO_EMAIL",
-      !process.env.BREVO_SMTP_KEY && "BREVO_SMTP_KEY",
-      !process.env.SMTP_USER && "SMTP_USER",
-    ]
-      .filter(Boolean)
-      .join(", ")}`,
+/**
+ * Outbound email, and why a missing configuration is no longer fatal.
+ *
+ * This module used to `throw` at import when any of the three Brevo variables
+ * was absent. Because `server.js` imports the auth routes, that made SMTP
+ * credentials a hard requirement for the process to start *at all* — so a
+ * contributor cloning the repo to look at the feed, or a deployment that only
+ * ever serves reads, needed a transactional email account before the server
+ * would boot. The failure also arrived as a bare stack trace from an import,
+ * which is the least legible moment for it to happen.
+ *
+ * Email is needed by exactly two flows — signup verification and password reset
+ * — so the honest scope of "no SMTP configured" is that those two return an
+ * error and everything else works. That is what this does: refuse at the point
+ * of sending, with a message that says what is missing, and warn once at boot so
+ * it is not a surprise.
+ */
+const MISSING_MAIL_VARS = [
+  !process.env.BREVO_EMAIL && "BREVO_EMAIL",
+  !process.env.BREVO_SMTP_KEY && "BREVO_SMTP_KEY",
+  !process.env.SMTP_USER && "SMTP_USER",
+].filter(Boolean);
+
+export const mailConfigured = MISSING_MAIL_VARS.length === 0;
+
+const transporter = mailConfigured
+  ? nodemailer.createTransport({
+      host: "smtp-relay.brevo.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.BREVO_SMTP_KEY,
+      },
+      tls: {
+        rejectUnauthorized: false,
+      },
+    })
+  : /*
+     * A stand-in that rejects rather than a null that every call site has to
+     * remember to check. The two senders already handle a failed send — signup
+     * deletes the PendingSignup row and answers 502, forgot-password answers
+     * generically — so they inherit correct behaviour without a new branch.
+     */
+    {
+      sendMail: async () => {
+        const error = new Error(
+          `Email is not configured on this server (missing ${MISSING_MAIL_VARS.join(", ")})`
+        );
+        error.code = "EMAIL_NOT_CONFIGURED";
+        throw error;
+      },
+    };
+
+if (!mailConfigured) {
+  console.warn(
+    `Email disabled: missing ${MISSING_MAIL_VARS.join(", ")}. ` +
+      "Signup verification and password reset will fail; everything else runs."
   );
+} else {
+  transporter.verify((error) => {
+    if (error) {
+      console.error("Brevo SMTP verification failed:", {
+        message: error.message,
+        code: error.code,
+      });
+    } else {
+      console.log("Brevo SMTP ready");
+    }
+  });
 }
-
-const transporter = nodemailer.createTransport({
-  host: "smtp-relay.brevo.com",
-  port: 587,
-  secure: false,
-  requireTLS: true,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.BREVO_SMTP_KEY,
-  },
-  tls: {
-    rejectUnauthorized: false,
-  },
-});
-
-transporter.verify((error) => {
-  if (error) {
-    console.error("Brevo SMTP verification failed:", {
-      message: error.message,
-      code: error.code,
-    });
-  } else {
-    console.log("Brevo SMTP ready");
-  }
-});
 
 const serviceAccountKey = {
   projectId: process.env.FIREBASE_PROJECT_ID,

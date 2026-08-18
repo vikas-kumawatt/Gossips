@@ -246,8 +246,8 @@ in this repository beyond the code itself.
 | http-status-codes | ^2.3.0 | Status constants |
 | dotenv | ^16.4.7 | Env loading |
 
-> `aws-sdk` and `sharp` are listed in `server/package.json` but no source file in `server/`
-> imports either of them.
+> `aws-sdk` and `sharp` were listed as dependencies but imported by no source file; both have been
+> removed. Run `npm install` in `server/` to prune them from an existing `node_modules`.
 
 ### Bot reasoning service
 
@@ -265,7 +265,7 @@ in this repository beyond the code itself.
 | --- | --- | --- |
 | MongoDB | Primary datastore | Yes |
 | Cloudinary | All uploaded media | Yes, for uploads |
-| Brevo SMTP | OTP and password-reset email | Yes — `authController.js` throws at import without it |
+| Brevo SMTP | OTP and password-reset email | Only for those two flows; the server boots without it |
 | Firebase (Auth + FCM) | Google sign-in, push notifications | Yes for Google login; push degrades gracefully |
 | Redis | Socket.IO adapter, cache, call store | Optional — the app runs without it |
 | Giphy | GIF picker | Optional (`GIPHY_API_KEY`) |
@@ -348,6 +348,10 @@ Gossips/
 │   │   ├── App.jsx           # Route table and provider tree
 │   │   ├── main.jsx          # Entry point, PWA registration
 │   │   └── index.css         # Tailwind v4 entry + hand-written CSS
+│   ├── test/                 # Test suites (node:test)
+│   ├── test-support/         # jsdom bootstrap + JSX module hooks; outside test/
+│   │                         #   because Node counts every .mjs there as a test
+│   ├── netlify.toml          # Build, SPA fallback, asset cache headers
 │   ├── check-imports.mjs     # Standalone static import checker (not wired to a script)
 │   ├── eslint.config.js
 │   ├── vite.config.js
@@ -371,7 +375,8 @@ Gossips/
 │   ├── middleware/           # auth, admin, feature gates, maintenance, sanitiser, headers
 │   ├── models/               # 30 Mongoose schemas (+ one removed-model tombstone)
 │   ├── routes/               # 14 Express routers
-│   ├── scripts/              # One-off maintenance scripts
+│   ├── scripts/              # One-off maintenance; makeAdmin.js bootstraps staff
+│   ├── Dockerfile            # Multi-stage, non-root
 │   ├── services/             # Shared business logic used by both humans and bots
 │   ├── test/                 # node:test suites
 │   ├── utils/                # 51 helper modules
@@ -389,6 +394,8 @@ Gossips/
 │   ├── requirements.txt
 │   └── run.sh
 │
+├── .github/workflows/ci.yml  # Lint, tests and build on push and pull request
+├── docker-compose.yml        # Local stack: Mongo, Redis, API, reasoning service
 ├── docs/
 │   └── bots-implementation-plan.md
 ├── uploads/                  # Empty; Multer actually writes to server/uploads/ (git-ignored)
@@ -508,8 +515,13 @@ network rather than served in place of a fetch:
 
 **PWA and push.** `VitePWA` runs with `registerType: "autoUpdate"`, a manifest named `Gossips`
 (`theme_color`/`background_color` `#0a0a0a`, standalone display, 192/512 icons) and
-`workbox: { cleanupOutdatedCaches: true, clientsClaim: true }` — there is no `runtimeCaching`, so
-offline support is limited to the precached shell. Push uses a **second** service worker,
+`workbox: { cleanupOutdatedCaches: true, clientsClaim: true }`. `runtimeCaching` covers cross-origin
+assets only — Cloudinary media and Giphy GIFs `CacheFirst`, Google avatars `StaleWhileRevalidate`.
+**No API response is cached**, deliberately: those are per-account and a service worker cache is
+keyed by URL and shared across every account using that browser profile, so caching `/posts/feed`
+would serve one account's feed to the next person signed in on the same device. The IndexedDB layers
+in `src/utils` already provide warm-start rendering, scoped per user id and always revalidated.
+Push uses a **second** service worker,
 `public/firebase-messaging-sw.js`, registered at scope `/firebase-cloud-messaging-push-scope` so
 it does not collide with the Workbox worker at `/`. It handles data-only background messages and
 notification clicks; call notifications set `requireInteraction` and a vibration pattern.
@@ -562,7 +574,7 @@ routes those to the calling code, which is where the toasts are.
 8. `maintenanceGate`, then the 14 routers.
 9. A four-argument error handler that translates Multer errors to 400 with a readable message,
    preserves any `err.status`, and otherwise logs the error and returns a fixed string.
-10. `server.listen(5000)` — the port is **hardcoded**; `PORT` is not read.
+10. `server.listen(PORT)` — from the environment, defaulting to 5000.
 
 **Middleware.**
 
@@ -1141,9 +1153,10 @@ matching cookie. A password reset instead deletes every session for the user.
 | --- | --- | --- |
 | `MONGO_URI` | Yes | MongoDB connection string |
 | `JWT_SECRET` | Yes | Signs access, refresh and verification tokens; also keys the OTP HMAC and the media integrity HMAC |
-| `BREVO_EMAIL` | Yes | `From` address for outgoing mail — the auth controller throws at import if unset |
-| `BREVO_SMTP_KEY` | Yes | Brevo SMTP password |
-| `SMTP_USER` | Yes | Brevo SMTP username |
+| `BREVO_EMAIL` | For email only | `From` address for outgoing mail |
+| `BREVO_SMTP_KEY` | For email only | Brevo SMTP password |
+| `SMTP_USER` | For email only | Brevo SMTP username |
+| `PORT` | No | Defaults to 5000 |
 | `FRONTEND_URL` | Yes | Base URL used to build the password-reset link |
 | `CLOUDINARY_CLOUD_NAME` | Yes for uploads | Cloudinary account |
 | `CLOUDINARY_API_KEY` | Yes for uploads | Cloudinary credential |
@@ -1169,8 +1182,8 @@ matching cookie. A password reset instead deletes every session for the user.
 | `ICE_FORCE_RELAY` | No | `"true"` forces all call media through TURN (diagnostics only) |
 | `EVAL_API_KEY` / `EVAL_ANTHROPIC_KEY`, `EVAL_PROVIDER`, `EVAL_MODEL` | No | Used only by `npm run bots:eval:live` |
 
-`PORT` is **not read anywhere** — `server.js` hardcodes port 5000. There is no `.env.example` in
-the repository; the tables above are the only reference for what to set.
+`PORT` is read by `server.js`, defaulting to 5000. There is no `.env.example` in the repository;
+the tables above are the only reference for what to set.
 
 ### `frontend/.env`
 
@@ -1211,7 +1224,9 @@ when the call returns.
 - npm
 - MongoDB (local or Atlas)
 - A Cloudinary account, for any upload to work
-- A Brevo SMTP account — **the server will not boot without `BREVO_EMAIL`, `BREVO_SMTP_KEY` and `SMTP_USER`**
+- Optional: a Brevo SMTP account. Without it the server boots and warns, and the two flows that send
+  email — signup verification and password reset — return an error saying so. Everything else works,
+  so you can explore the app without a transactional email provider
 - A Firebase project with Admin credentials, for Google sign-in and push
 - Optional: Redis, for the Socket.IO adapter and cache
 - Optional, for bots only: Python 3.10+ and an LLM provider key
@@ -1316,21 +1331,136 @@ INTERNAL_SERVICE_SECRET=<same secret> ./run.sh     # uvicorn on 127.0.0.1:8001
 
 ### Making yourself an admin
 
-Roles are never settable through a public route. `models/User.js` notes that only
-`scripts/makeAdmin.js` or an existing `super_admin` can change one — **that script is not present
-in this repository**, so the first `super_admin` has to be set directly in the database:
+Roles are never settable through a public route, and the route that can grant one requires a
+`super_admin` — so the first staff account has to come from outside the API:
 
-```js
-db.users.updateOne({ username: "you" }, { $set: { role: "super_admin" } })
+```bash
+cd server
+npm run make-admin -- yourusername                      # inspect, change nothing
+npm run make-admin -- yourusername --role=super_admin    # grant
+npm run make-admin -- yourusername --role=user           # revoke
 ```
+
+Dry by default, like the other scripts in that directory: without `--role` it prints the account's
+current role and exits. It refuses bot accounts and refuses to promote a suspended or deactivated
+account (the admin middleware would deny it anyway), and writes an `AuditLog` row so a role change
+made from a terminal is as traceable as one made through the panel.
 
 ---
 
 ## Production build & deployment
 
-**There is no deployment configuration in this repository** — no Dockerfile, no CI workflow, no
-`render.yaml`, `netlify.toml`, `vercel.json`, `Procfile` or process manager config. What follows is
-only what the code itself asserts.
+The two halves deploy independently, on purpose.
+
+```mermaid
+flowchart LR
+    Push["git push main"]
+    subgraph CI["GitHub Actions"]
+      Tests["server + frontend + python tests"]
+      Deploy["ssh -> git checkout -> pm2 reload -> health check"]
+    end
+    Netlify["Netlify build"]
+    EC2["EC2 t3.micro<br/>nginx :443 -> 127.0.0.1:5000<br/>pm2: gossips-node, gossips-python"]
+    Atlas[("MongoDB Atlas")]
+
+    Push --> Tests --> Deploy --> EC2
+    Push --> Netlify
+    EC2 --> Atlas
+```
+
+| File | What it covers |
+| --- | --- |
+| `ecosystem.config.cjs` | **Production.** PM2 process definitions for both services |
+| `.github/workflows/ci.yml` | Tests, then deploy over SSH on a push to `main` |
+| `frontend/netlify.toml` | Build command, publish directory, SPA fallback, asset cache headers |
+| `frontend/public/_headers` | Response headers for the client origin, including the CSP |
+| `docker-compose.yml` + the two `Dockerfile`s | **Local development only** — Mongo and Redis in one command. Nothing in production uses them |
+
+**PM2, not containers.** The box is a single t3.micro with one deployer and one instance. Docker's
+real wins — environment parity, immutable artefacts, horizontal scale — are not what a deployment
+of this shape is short of, while the daemon's resident memory is 6–8% of a 1 GB host and a second
+operational model is a permanent cost. The Dockerfiles remain, because a reproducible local stack
+is worth having and because they make a future migration a decision rather than a rewrite.
+
+**The client stays on Netlify.** It already builds from the same push and serves from a CDN.
+
+**Deploy is gated on tests.** The `deploy` job `needs: [server, frontend, python]`, so a red suite
+means the SSH step never runs.
+
+### What a deploy actually does
+
+1. Records the current SHA to `.previous-sha` before touching anything.
+2. `git fetch` and `git checkout --force <sha>`. Force, because the box is a deployment target
+   rather than a workspace — a stray local edit must not be able to block a deploy.
+3. Installs dependencies **only if the lockfile moved**, checked with
+   `git diff --quiet <prev> <new> -- server/package-lock.json`. `npm ci` deletes `node_modules`
+   before rebuilding it, so running it unconditionally gives every deploy a window where the app
+   cannot start, for a change that usually touches no dependency at all.
+4. `pm2 reload ecosystem.config.cjs --update-env`, then `pm2 save --force`.
+5. Polls `http://127.0.0.1:5000/` for 15 seconds. Loopback, so it tests the process rather than
+   nginx or DNS, and `GET /` touches neither Atlas nor Redis.
+6. **If it never answers, rolls back automatically** — checks out `.previous-sha`, reinstalls,
+   reloads, and fails the workflow. The alternative is a box that does not serve while someone reads
+   a notification.
+
+### One-time setup
+
+```bash
+# On the box — the app directory is wherever your working copy already is.
+cd /path/to/Gossips
+git remote -v                     # confirm it tracks the right repo
+pm2 start ecosystem.config.cjs    # replaces whatever was started by hand
+pm2 save
+
+# PM2 does not rotate its own logs, and a full disk on this box surfaces as an
+# unrelated write failure rather than as a log problem.
+pm2 install pm2-logrotate
+pm2 set pm2-logrotate:max_size 10M
+pm2 set pm2-logrotate:retain 5
+
+# t3.micro has 1 GB and no swap by default. A reload briefly overlaps memory.
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+```
+
+Then five repository secrets:
+
+| Secret | Value |
+| --- | --- |
+| `EC2_HOST` | The instance's address |
+| `EC2_USER` | The SSH user (`ubuntu`, `ec2-user`, …) |
+| `EC2_SSH_KEY` | A private key whose public half is in the box's `authorized_keys` |
+| `EC2_KNOWN_HOSTS` | Output of `ssh-keyscan <host>` — pinned rather than `StrictHostKeyChecking=no`, so nothing else answering that address can receive the deploy |
+| `EC2_APP_DIR` | Absolute path to the working copy on the box |
+
+> **Check `server/.env` on the box before the first automated deploy.** It must contain
+> `ALLOWED_ORIGINS`, or the process exits at boot — an unset value is a deliberate hard failure in
+> production. You will not have hit this yet: that check is newer than your last manual deploy, and
+> the health check would catch it, roll back, and leave you reading logs to find out why.
+
+### Rolling back by hand
+
+```bash
+ssh ec2 && cd "$EC2_APP_DIR"
+cat .last-good-sha          # written after the last successful health check
+cat .previous-sha           # what was running before the most recent deploy
+
+git checkout --force <sha>
+npm ci --omit=dev --prefix server    # only if the lockfile differs
+pm2 reload ecosystem.config.cjs --update-env
+```
+
+### Why one PM2 instance, in fork mode
+
+`ecosystem.config.cjs` pins `instances: 1` and `exec_mode: "fork"`, and that is a correctness
+requirement rather than a value to tune. This server holds per-user state in process memory — the
+socket registry in `config/socket.js`, the socket rate-limit buckets, the WebRTC call timers, the
+per-user send-ordering chains. Cluster mode would put two users in the same conversation into
+different workers, where they would never see each other's messages: silently, and only under load.
+
+The fix is the Redis adapter — already imported, currently with no reachable Redis — not more
+workers. Until `REDIS_URL` resolves, one instance is the only correct setting.
 
 ### Build commands
 
@@ -1347,7 +1477,8 @@ loads without mounting logs `mounted: no` but does **not** fail.
 
 ### What the code assumes about the deployment
 
-- The API listens on **port 5000**, hardcoded. A platform that injects `PORT` needs a code change.
+- The API listens on `PORT`, falling back to 5000. A platform that injects the variable works
+  without configuration.
 - `app.set("trust proxy", 1)` assumes exactly one reverse-proxy hop in front of the API. The
   comment names Render as the environment this was written for.
 - `server/config/origins.js` builds the CORS and CSRF allow-list from `ALLOWED_ORIGINS`
@@ -1369,10 +1500,16 @@ loads without mounting logs `mounted: no` but does **not** fail.
 
 MongoDB with index creation permitted — every schema declares its own indexes, including TTL
 indexes on `Notification` (90 days), `PostView` (90 days), `PendingSignup`, `UserSession` and timed
-`UserRelation` mutes. There is **no migration runner**: `server/package.json` declares
-`migrate`, `migrate:verify`, `migrate:drop-legacy` and `migrate:backfill-flags` scripts pointing at
-`migrations/migrate.js`, but the `server/migrations/` directory does not exist, so those four
-scripts will fail. The only schema evolution that runs automatically is `backfillRoles()` on boot.
+`UserRelation` mutes, and **full-text indexes on `Post.content` and `Comment.content`** which back
+`sort=relevance`. Both text indexes are declared `background: true`, so on an existing collection of
+any size the first boot after this change spends time building them. Search handles that window
+itself — `$text` throwing `IndexNotFound` is caught and answered from the regex path, with
+`meta.sort` reporting `recent` — so relevance degrades rather than failing while the build runs.
+
+There is **no migration runner**, and no longer any script pretending otherwise — the four
+`migrate*` entries pointed at a `server/migrations/` directory that does not exist and have been
+removed. Schema evolution is Mongoose's own index synchronisation plus `backfillRoles()` on boot;
+the one-off corrections that do exist are the explicit scripts in `server/scripts/`.
 
 ---
 
@@ -1427,19 +1564,39 @@ it is present in every user payload built by a Mongoose projection.
 
 ### Content search — `GET /search/content`
 
-- **Mechanism: case-insensitive regex, not a MongoDB text index.** The query is escaped and applied
-  as `{ content: new RegExp(escaped, "i") }`. There is no `$text` index and no relevance ranking.
+- **Two modes, selected by `?sort=`.** `recent` (the default) is a case-insensitive escaped regex
+  over `content`, ordered `{ createdAt: -1, _id: -1 }`. `relevance` uses the full-text indexes on
+  `Post.content` and `Comment.content`, ranked by `$meta: "textScore"` with `createdAt` breaking ties.
+- **Neither subsumes the other**, which is why both exist. A regex matches substrings — "coff" finds
+  "coffee", which is what search-as-you-type needs — but cannot say which of two matches is better.
+  A text index ranks, but matches whole words only.
+- **Fallback, for three cases.** `sort=relevance` drops to the regex path when the query is a single
+  short fragment the index cannot serve, when the index returns nothing (first page only — a later
+  empty page means the end of the results), and when `$text` *throws* because the index is not usable
+  yet. That last one matters on deploy: both indexes are `background: true`, so on an existing
+  collection they are unusable until the build completes and `$text` fails with `IndexNotFound`
+  rather than returning nothing. Without the catch, every relevance search would 500 for the first
+  minutes after a deploy. Only that specific error is swallowed; anything else propagates. The
+  response reports which mode actually ran as `meta.sort`, so a fallback is never presented as ranked.
+- **Language.** Both text indexes are built `default_language: "none"`, which disables stemming and
+  stop-word removal. The default English stemmer would tokenise non-English posts wrongly and drop
+  common English words from queries entirely — searching "the office" would silently become "office".
 - **Collections:** `Post` and `Comment` are searched by two aggregation pipelines run in parallel,
-  then merged by recency into one list. Each result carries `kind: "post" | "reply"`.
-- **Sort:** always `{ createdAt: -1, _id: -1 }`. There is no "Top" mode.
-- **Pagination:** keyset cursor, base64url-encoded `{ createdAt, _id }`. `limit` defaults to 15 and
-  is clamped to 25; each pipeline fetches `limit + 1` to compute `hasNextPage`.
+  then merged into one list. Each result carries `kind: "post" | "reply"`. Scores are comparable
+  across the two because both indexes are built the same way on the same field.
+- **Pagination differs by mode.** `recent` uses a keyset cursor over `{ createdAt, _id }`.
+  `relevance` uses an offset cursor, because a text score is neither unique nor stored — the same
+  split `getHashtagContent` already makes between its `top` and `latest` sorts. The offset is applied
+  *after* merging, not inside either pipeline: skipping 15 posts and 15 replies is not the same rows
+  as skipping 15 results. `limit` defaults to 15 and is clamped to 25.
 - **Anchor required:** with neither a query nor a resolvable author, the endpoint returns an empty
   list and `meta.needsQuery`.
 
-**Filters:** `q` (≤100 chars), `from` (`anyone` / `following` / `user`), `username`, `datePosted`
-(`hour` / `day` / `week` / `month` / `year` / `all`), `after`, `before`, `minLikes`, `minComments`,
-`minReposts`, `excludeReplies`.
+**Filters:** `q` (≤100 chars), `sort` (`recent` / `relevance`), `from` (`anyone` / `following` /
+`user`), `username`, `datePosted` (`hour` / `day` / `week` / `month` / `year` / `all`), `after`,
+`before`, `minLikes`, `minComments`, `minReposts`, `excludeReplies`. An unrecognised value for any
+of them is rejected rather than defaulted — a filter that quietly stops applying makes results look
+complete when they are not.
 
 **Visibility:** results exclude deleted, draft and scheduled content; authors whose
 `accountStatus` is `deleted`, `deactivated`, `suspended` or `locked`; private accounts the viewer
@@ -1451,9 +1608,14 @@ under a hidden post stays hidden.
 
 - `GET /search/hashtags` — anchored **prefix** regex (`^term`), so it can be served from the index.
   Blocked tags are excluded twice: with `$nin` in the query and again after the read.
-- `GET /search/hashtags/trending` — `Hashtag` documents sorted by `postCount` then `lastUsedAt`.
-  **Purely count-based; there is no time decay.** Over-fetches ×3 and filters blocked tags at read
-  time.
+- `GET /search/hashtags/trending` — counted over a **7-day window** across posts *and* replies, by
+  aggregation, not read from `Hashtag.postCount`. That counter is a lifetime total, so ranking by it
+  answered "most used ever": a tag with ten thousand posts from last year permanently outranked one
+  with two hundred from this morning, and the list barely moved week to week. `postCount` in the
+  response now means "in the window". Cached for 5 minutes — the answer is identical for every
+  caller, so it does not need recomputing per request, and it falls through to the database when
+  Redis is unreachable. Seven days rather than 24 hours because a one-day window on a quiet week
+  returns an empty rail. Still a count, not a rate: a busy tag outranks an accelerating one.
 - `GET /tags/:tag` — posts and replies for one tag in a single `$unionWith` stream. `top` sorts by
   `likes + 2×replies + 3×reposts + 3×quotes` and paginates by **offset**; `latest`/`oldest` sort
   chronologically and paginate by **keyset**. A blocked tag returns `200 { restricted: true, items: [] }`.
@@ -1753,9 +1915,38 @@ network.
 
 ### Frontend
 
-**There is no frontend test suite** — no test runner, no test files, no `test` script. `jsdom` is a
-devDependency solely for `scripts/smoke-build.mjs`, which is a post-build sanity check rather than a
-test suite.
+```bash
+cd frontend
+npm test
+```
+
+Node's own test runner, with **no test framework installed** — `test-support/register.mjs` builds a jsdom
+DOM and registers a module hook that transforms JSX on import with the esbuild that ships inside
+Vite. Both were already dependencies (`jsdom` for the build smoke test), so the suite adds no
+packages and no second toolchain to keep in step with the build.
+
+`test/errorBoundary.test.mjs` covers the crash path end to end: healthy children pass through, a
+thrown render is replaced by the fallback rather than by nothing, the fallback is announced to
+assistive technology and offers a way out, a chunk-load failure is reported as a new deploy rather
+than a crash, retrying recovers once the cause is gone, and the error text does not reach a
+production build.
+
+The hooks define `import.meta.env.DEV` as `false`, so tests run against the same branches a
+production bundle contains.
+
+Coverage stops there — components with heavy context and socket dependencies are not covered, and
+there is no runner for those beyond what this bootstrap makes possible.
+
+### CI
+
+`.github/workflows/ci.yml` runs three test jobs on every push and pull request: server tests plus
+the deterministic bot evaluation, frontend lint + tests + build (the build being chained to the
+smoke test), and the Python suite. Every job is hermetic — no database, no network, no provider key.
+
+On a push to `main` those three gate a fourth: `deploy`, which SSHes to EC2, checks out the commit,
+installs dependencies only if a lockfile moved, reloads PM2, and polls the API on loopback —
+rolling back automatically if it does not answer. A red suite means the SSH step never runs. See
+[Production build & deployment](#production-build--deployment) for the runbook.
 
 ---
 
@@ -1799,17 +1990,25 @@ test suite.
 | `npm run docs:purge:check` / `docs:purge` | Report / apply removal of legacy document messages |
 | `npm run bots:email-index:check` / `bots:email-index` | Report / apply the bot email index migration |
 | `npm run users:index-audit` / `users:index-audit:apply` | Report / apply user index corrections |
-| `npm run migrate`, `migrate:verify`, `migrate:drop-legacy`, `migrate:backfill-flags` | **Broken** — these point at `migrations/migrate.js`, which does not exist |
+| `npm run make-admin -- <username>` | Show an account's role. Add `--role=admin\|super_admin\|user` to change it |
 
 ### `frontend/`
 
 | Command | Description |
 | --- | --- |
 | `npm run dev` | Vite dev server |
+| `npm test` | Node's test runner with a jsdom DOM and JSX transformed on import |
 | `npm run build` | `vite build` followed by the smoke test |
 | `npm run verify:build` | Runs the smoke test alone against an existing `dist/` |
 | `npm run lint` | `eslint .` |
 | `npm run preview` | Serves the production build locally |
+
+### Repository root
+
+| Command | Description |
+| --- | --- |
+| `npm run dev` | Starts the server and the frontend together |
+| `docker compose up` | MongoDB, Redis, the API and the reasoning service |
 
 ### `python-service/`
 
@@ -1822,37 +2021,57 @@ test suite.
 
 ## Known limitations
 
-- **No deployment configuration.** No Dockerfile, CI workflow, or platform manifest is checked in.
-- **The API port is hardcoded** to 5000; `PORT` is never read.
-- **`ALLOWED_ORIGINS` must be set in production** or the server refuses to boot. This is deliberate —
-  there is no safe default for an origin allow-list — but it is a required deployment step.
-- **The migration scripts are broken** — `server/migrations/` does not exist.
-- **`scripts/makeAdmin.js` is referenced in a model comment but is not in the repository**, so the
-  first staff account has to be created directly in the database.
-- **No frontend test suite.** The error boundaries were verified by mounting them in jsdom against a
-  deliberately throwing component, but that harness was not kept — there is no runner to keep it in.
-- **No HTTP-layer or socket-layer tests** on the server; coverage is concentrated on the bot subsystem
-  and pure helpers.
-- **Content search is regex-based**, so an unanchored query scans two collections, and results are
-  chronological only — there is no relevance ranking.
-- **Trending hashtags are ranked by lifetime post count** with no time decay, so "trending" means
-  "most used ever".
-- **Offline support is limited to the precached shell**; Workbox has no `runtimeCaching`, and the
-  IndexedDB caches are warm-start only.
-- **Multi-instance deployment needs Redis.** Without it, Socket.IO rooms and the WebRTC call store are
-  process-local.
-- **Brevo SMTP credentials are a hard boot requirement** — `authController.js` throws at import
-  without all three variables, so the server will not start without an email provider.
-- **`firebase-messaging-sw.js` and `_headers` are templated at build time**, not by Vite's normal
-  `import.meta.env` substitution — Vite copies `public/` verbatim, so a small plugin
-  (`publicFileEnv` in `vite.config.js`) fills in their placeholders. Anything else added to `public/`
-  that needs configuration must be registered in that plugin's file list.
-- **`aws-sdk` and `sharp` are installed but unused**, adding install weight for no benefit.
-- **A LAN IP appears
-  in the server's startup log line.
-- **TURN is not configured by default**, so roughly one call in five — those behind symmetric NAT, which
-  includes most mobile carriers — will fail to connect. `config/iceServers.js` documents this as a
-  deliberate, reversible trade.
+### Deliberate, not defects
+
+- **`ALLOWED_ORIGINS` must be set in production** or the server refuses to boot. There is no safe
+  default for an origin allow-list — the previous default trusted `localhost`, which anything on a
+  visitor's machine can occupy. A required deployment step, by design.
+- **Multi-instance deployment needs Redis.** Without it, Socket.IO rooms and the WebRTC call store
+  are process-local. That is a property of not running Redis rather than a bug; `REDIS_URL` is the
+  fix, and `docker-compose.yml` provides one locally.
+- **TURN is not configured by default**, so roughly one call in five — those behind symmetric NAT,
+  which includes most mobile carriers — will fail to connect. Credentials are a bandwidth bill that
+  only the operator can supply; `TURN_URLS`/`TURN_USERNAME`/`TURN_PASSWORD` enable it with no deploy.
+- **`firebase-messaging-sw.js` and `_headers` are templated at build time** rather than by Vite's
+  normal `import.meta.env` substitution, because Vite copies `public/` verbatim. Anything else added
+  to `public/` needing configuration must be registered in `publicFileEnv`'s file list in
+  `vite.config.js`.
+
+### Genuine limitations
+
+- **The Python reasoning service still re-resolves endpoint hostnames**, so DNS rebinding is closed
+  on the Node side only. Owner-supplied endpoints are off by default (`botAllowCustomEndpoints`).
+- **Cloudinary URLs are public once known.** No signed delivery; an unguessable URL that never
+  expires is the only protection.
+- **Relevance search cannot match partial words.** `sort=relevance` uses a text index, which matches
+  whole words only — the regex path covers "coff" → "coffee", and search falls back to it when the
+  index returns nothing.
+- **Ranked results paginate by offset**, so a post created mid-scroll can shift the page boundary.
+  A text score is neither unique nor stored, so there is nothing to key a cursor on.
+- **Trending is a 7-day count, not a rate.** A tag that is merely busy outranks one that is
+  genuinely accelerating; there is no velocity term.
+- **Offline support covers the shell and cross-origin media only.** No API response is cached by the
+  service worker, deliberately — those are per-account and the SW cache is shared per origin.
+- **No socket-layer tests.** HTTP middleware, the search pipelines and the bot subsystem are
+  covered; the Socket.IO handlers are not.
+- **Search tests assert pipeline shape, not ranking quality.** They run without a database, so they
+  pin the MongoDB constraints (`$text` in the first `$match`, the score materialised before the
+  joins, no `$skip` inside either pipeline) and the merge ordering — but nothing checks that the
+  results are *good*, which needs real data and a human.
+- **No end-to-end tests**, so no automated check that the three services work together.
+- **`docker-compose.yml` is for local development**, not a production topology — no TLS termination,
+  no replica set, no resource limits.
+- **A deploy restarts the API rather than draining it.** `exec_mode: "fork"` with one instance means
+  `pm2 reload` is a restart, so open WebSocket connections drop and there is a ~2 second gap where
+  nginx returns 502. Zero-downtime needs cluster mode, which needs Redis first.
+- **The deploy mutates a working copy in place** rather than switching an atomic release directory.
+  A failed `npm ci` therefore leaves the box between states; the health check catches that and rolls
+  back, but the window exists. Release directories with a symlink swap would remove it, at the cost
+  of disk and moving parts.
+- **The deploy trusts the box's `.env` files.** It does not verify they still contain what they
+  should, so a secret removed by hand is found at boot, not at deploy time.
+- **Nginx configuration is not in the repository.** TLS, the proxy pass, and any rate limits it
+  applies live only on the instance, so rebuilding the box means rediscovering them.
 
 ---
 

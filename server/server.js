@@ -258,6 +258,21 @@ app.use((err, req, res, _next) => {
     .json({ error: status < 500 ? "Bad request" : "Something went wrong" });
 });
 
-server.listen(5000, () => {
-  console.log("Server running on port 5000 at 192.168.234.133");
+/*
+ * `PORT` from the environment, 5000 otherwise.
+ *
+ * The port was the literal 5000 and `PORT` was read nowhere, which meant every
+ * platform that assigns a port by injecting that variable — Render, Heroku, Fly,
+ * Cloud Run, most PaaS — could only work by coincidence. The old log line also
+ * announced a specific machine's LAN address (`192.168.234.133`), hardcoded, so
+ * in production it printed an address the server was not reachable on.
+ *
+ * `Number(...)` because the environment hands over strings and `listen` accepts
+ * one, but a string port silently changes how the value is interpreted; `|| PORT`
+ * covers unset, empty and unparseable in one step.
+ */
+const PORT = Number(process.env.PORT) || 5000;
+
+server.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });

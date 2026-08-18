@@ -1,0 +1,52 @@
+# Netlify build and routing for the client.
+#
+# `config/origins.js` on the server has always had a Netlify URL in its allow
+# list, so this is where the client is served from — but none of the settings
+# below were checked in, which meant the build command, the publish directory and
+# the SPA fallback lived only in the site's dashboard.
+#
+# Response headers are NOT here. They are in `public/_headers`, because the CSP
+# has to be templated from VITE_SERVER at build time and this file cannot be.
+# Splitting them would mean two places to look; `public/_headers` wins because it
+# is the one that can be generated.
+
+[build]
+  base    = "frontend"
+  publish = "dist"
+  # `vite build && npm run verify:build` — the smoke test is chained on purpose.
+  # A bundler exit code says the files were written, not that they run.
+  command = "npm run build"
+
+[build.environment]
+  NODE_VERSION = "22"
+
+# Client-side routing. Without this, every path except "/" is a 404 from the CDN
+# — react-router never gets a chance to look at it, so opening a profile link in
+# a new tab fails while navigating to the same profile in-app works.
+#
+# Below the asset paths on purpose: Netlify evaluates redirects in order, and a
+# catch-all placed first would swallow requests for /assets/*.
+[[redirects]]
+  from = "/*"
+  to   = "/index.html"
+  status = 200
+
+# The service worker must never be served from cache, or a deploy's new worker
+# sits behind the old one until the browser decides to revalidate. Duplicated
+# from public/_headers so it holds even if that file is ever removed.
+[[headers]]
+  for = "/firebase-messaging-sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/sw.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+# Hashed assets are immutable by construction — the filename changes when the
+# contents do — so they can be cached for as long as a browser will hold them.
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+    Cache-Control = "public, max-age=31536000, immutable"

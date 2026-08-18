@@ -1,0 +1,20 @@
+# Kept out of the build context: everything here is either rebuilt inside the
+# image, secret, or large enough to slow every build for no benefit.
+
+node_modules
+npm-debug.log*
+
+# Secrets. `.env` is git-ignored too, but a build context is assembled from the
+# working directory rather than from git, so an untracked .env would otherwise be
+# copied into the image and stay in a layer.
+.env
+*.env.*
+*-firebase-adminsdk-*.json
+
+# Multer's scratch directory. Contents are transient by definition.
+uploads
+
+# Not needed at runtime.
+test
+Dockerfile
+.dockerignore

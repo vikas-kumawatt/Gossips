@@ -1,0 +1,256 @@
+name: CI
+
+# There was no pipeline at all, so nothing checked that the server's tests still
+# passed, that the client still built, or that lint was clean — the build being
+# broken was something you found out by deploying.
+#
+# Deliberately not a deploy workflow. This repository has no deployment
+# configuration checked in and no way to know which platform holds the
+# credentials, so inventing one would be a guess. This runs the checks that
+# already exist and nothing else.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+# A second push to the same branch cancels the run still going for the first.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server:
+    name: Server tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      # `npm ci` rather than `install`: it honours the lockfile exactly, so CI
+      # cannot pass against a dependency tree nobody has on disk.
+      - run: npm ci
+        working-directory: server
+
+      # The suites are hermetic — no MongoDB, no network. They mock at the module
+      # boundary (`--experimental-test-module-mocks`), which is why this job
+      # needs no services.
+      - run: npm test
+        working-directory: server
+        env:
+          # Several modules refuse to load without these. The values are
+          # throwaway; nothing here reaches a real service.
+          JWT_SECRET: ci-only-not-a-real-secret
+          BYOK_ENCRYPTION_SECRET: ci-only-not-a-real-secret-at-least-32-chars
+          NODE_ENV: test
+
+      # The deterministic half of the bot evaluation: adversarial decisions
+      # through the real validator, the perception token budget, and a simulated
+      # week of pacing. No API key, no network, no cost. `--live` is not run.
+      - run: npm run bots:eval
+        working-directory: server
+        env:
+          JWT_SECRET: ci-only-not-a-real-secret
+          BYOK_ENCRYPTION_SECRET: ci-only-not-a-real-secret-at-least-32-chars
+
+  frontend:
+    name: Frontend lint, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - run: npm run lint
+        working-directory: frontend
+
+      - run: npm test
+        working-directory: frontend
+
+      # `npm run build` is `vite build && npm run verify:build`. The second half
+      # loads the emitted bundle in jsdom and fails on the two error shapes a bad
+      # chunk split produces — which is the failure that once shipped and
+      # white-screened every visitor. Do not split these into separate steps;
+      # the chaining is the point.
+      - run: npm run build
+        working-directory: frontend
+        env:
+          # Enough for the build and the smoke test to resolve an origin. The
+          # real values are set by the host at deploy time.
+          VITE_SERVER: https://api.example.com
+
+  python:
+    name: Bot reasoning service tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: python-service/requirements.txt
+
+      - run: pip install -r requirements.txt
+
+      # Runs with no provider key and no network — the provider call is replaced
+      # at the `_http_post` seam.
+      - run: pytest -q
+
+  # ── Deploy ──────────────────────────────────────────────────────────────────
+  #
+  # Only the EC2 side. The client is on Netlify, which already builds from this
+  # same push; routing it through here would add nothing and would create a way
+  # for the two halves to end up on different commits.
+  #
+  # PM2 rather than containers, deliberately. The box has 1 GB of RAM, one
+  # deployer and one instance — the Docker daemon's resident cost and a second
+  # operational model buy parity and immutable artefacts that a single-box
+  # deployment does not currently need. `pm2 reload` also restarts faster than a
+  # container recreate, which matters when there is no room to overlap the two.
+
+  deploy:
+    name: Deploy to EC2
+    # The gate: a red suite means the deploy step never runs, so a broken commit
+    # cannot reach the box.
+    needs: [server, frontend, python]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One at a time, and a later push waits rather than racing. Not
+    # cancel-in-progress: interrupting a half-finished npm ci leaves the box in a
+    # state nobody chose.
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Open an SSH session
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          # Pinned, not trust-on-first-use. StrictHostKeyChecking=no would let
+          # anything answering that address receive the deploy.
+          printf '%s\n' "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Pull, install if needed, reload
+        run: |
+          ssh -i ~/.ssh/id_ed25519 \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "APP_DIR='${{ secrets.EC2_APP_DIR }}' TARGET_SHA='${{ github.sha }}' bash -euo pipefail" <<'REMOTE'
+            cd "$APP_DIR"
+
+            # nvm's node, explicitly, and this is not optional.
+            #
+            # A non-interactive SSH session does not source ~/.bashrc, so nvm is
+            # never initialised and `node` resolves to whatever is in /usr/bin —
+            # which on this box is a *different major version* from the one the
+            # app runs under. That matters because `npm ci` compiles native
+            # modules (bcrypt) against the ABI of whichever node runs it: build
+            # under one major, start under another, and the module fails to load
+            # at require time with an error about the wrong Node.js version.
+            #
+            # `set +u` around the source because nvm.sh reads unset variables and
+            # would abort under `set -u`.
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then set +u; . "$NVM_DIR/nvm.sh"; set -u; fi
+            echo "node $(node --version) at $(which node)"
+
+            # Recorded before anything moves, so a rollback does not mean reading
+            # the Actions log to find out what was working.
+            PREVIOUS_SHA="$(git rev-parse HEAD)"
+            echo "$PREVIOUS_SHA" > .previous-sha
+            echo "deploying $PREVIOUS_SHA -> $TARGET_SHA"
+
+            git fetch --quiet origin
+            # --force because the box is a deployment target, not a workspace: any
+            # local edit is an accident and must not be able to block a deploy.
+            git checkout --force --quiet "$TARGET_SHA"
+
+            # Dependencies are installed only when the lockfile actually moved.
+            # `npm ci` deletes node_modules before it rebuilds, so running it on
+            # every deploy means every deploy has a window where the app cannot
+            # start — for a change that usually touches no dependency at all.
+            if ! git diff --quiet "$PREVIOUS_SHA" "$TARGET_SHA" -- server/package-lock.json; then
+              echo "server dependencies changed; installing"
+              npm ci --omit=dev --prefix server
+            else
+              echo "server dependencies unchanged; skipping npm ci"
+            fi
+
+            if ! git diff --quiet "$PREVIOUS_SHA" "$TARGET_SHA" -- python-service/requirements.txt; then
+              echo "python dependencies changed; installing"
+              pip install --quiet -r python-service/requirements.txt
+            else
+              echo "python dependencies unchanged; skipping pip install"
+            fi
+
+            # --update-env so a changed ecosystem file or environment takes effect
+            # rather than the values PM2 captured when the process first started.
+            pm2 reload ecosystem.config.cjs --update-env
+            # Survives a reboot with the new process list.
+            pm2 save --force
+          REMOTE
+
+      - name: Verify the API answers, and roll back if it does not
+        run: |
+          ssh -i ~/.ssh/id_ed25519 \
+            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
+            "APP_DIR='${{ secrets.EC2_APP_DIR }}' bash -euo pipefail" <<'REMOTE'
+            cd "$APP_DIR"
+
+            # nvm's node, explicitly, and this is not optional.
+            #
+            # A non-interactive SSH session does not source ~/.bashrc, so nvm is
+            # never initialised and `node` resolves to whatever is in /usr/bin —
+            # which on this box is a *different major version* from the one the
+            # app runs under. That matters because `npm ci` compiles native
+            # modules (bcrypt) against the ABI of whichever node runs it: build
+            # under one major, start under another, and the module fails to load
+            # at require time with an error about the wrong Node.js version.
+            #
+            # `set +u` around the source because nvm.sh reads unset variables and
+            # would abort under `set -u`.
+            export NVM_DIR="$HOME/.nvm"
+            if [ -s "$NVM_DIR/nvm.sh" ]; then set +u; . "$NVM_DIR/nvm.sh"; set -u; fi
+            echo "node $(node --version) at $(which node)"
+
+            # Loopback, so this tests the process rather than nginx or DNS. `GET /`
+            # touches neither Atlas nor Redis: it answers whether Node is serving.
+            for attempt in $(seq 1 15); do
+              if curl --fail --silent --max-time 3 http://127.0.0.1:5000/ > /dev/null; then
+                echo "healthy after ${attempt}s"
+                git rev-parse HEAD > .last-good-sha
+                exit 0
+              fi
+              sleep 1
+            done
+
+            echo "::error::API did not answer within 15s — rolling back"
+            pm2 logs gossips-node --lines 40 --nostream || true
+
+            # Automatic, because the alternative is leaving a box that does not
+            # serve while someone reads a notification. A dependency change is
+            # reinstalled on the way back for the same reason it was installed on
+            # the way out.
+            PREVIOUS_SHA="$(cat .previous-sha)"
+            echo "restoring $PREVIOUS_SHA"
+            git checkout --force --quiet "$PREVIOUS_SHA"
+            npm ci --omit=dev --prefix server
+            pm2 reload ecosystem.config.cjs --update-env
+            exit 1
+          REMOTE

@@ -8,6 +8,8 @@
     "//build": "The smoke test is chained on purpose: a chunk split once passed `vite build`, deployed, and white-screened every visitor. Exit code 0 from the bundler says the files were written, not that they run. Drop `&& npm run verify:build` to un-gate deploys.",
     "build": "vite build && npm run verify:build",
     "verify:build": "node scripts/smoke-build.mjs",
+    "//test": "Node's own runner, with a jsdom DOM and esbuild transforming JSX on import — see test-support/register.mjs. No test framework is installed on purpose: both already ship with the build. No path argument, because `--test test/` makes Node resolve the directory as a module specifier and fail with ERR_UNSUPPORTED_DIR_IMPORT; discovery is left to the runner, as server/ does it. The support modules live outside test/ because Node's discovery counts every .mjs under a directory named test as a test file.",
+    "test": "node --import ./test-support/register.mjs --test",
     "lint": "eslint .",
     "preview": "vite preview"
   },

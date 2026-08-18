@@ -34,6 +34,67 @@ const DATE_WINDOWS_MS = {
 const FROM_PROFILES = new Set(["anyone", "following", "user"]);
 const DATE_PRESETS = new Set(["all", ...Object.keys(DATE_WINDOWS_MS)]);
 
+/**
+ * How a page of results is ordered.
+ *
+ *   recent    — newest first, matched by regex. The default, and unchanged.
+ *   relevance — ranked by `$meta: "textScore"` from the text index on `content`.
+ *
+ * Two modes rather than one because neither subsumes the other. Regex matches
+ * substrings, which is what a search-as-you-type box needs — "coff" has to find
+ * "coffee". A text index only matches whole words, so it cannot do that, but it
+ * is the only thing here that can say which of two matches is a *better* match.
+ *
+ * They also paginate differently, which is the real reason the mode is explicit
+ * rather than inferred from the query text. `recent` uses a keyset cursor over
+ * `{createdAt, _id}`; a relevance score is neither unique nor stored, so ranked
+ * results page by offset — the same split `getHashtagContent` already makes
+ * between its `top` and `latest` sorts. Inferring the mode per request would
+ * mean a cursor minted under one mode being decoded under the other as soon as
+ * the query changed shape.
+ */
+export const SEARCH_SORTS = new Set(["recent", "relevance"]);
+
+/**
+ * Whether a query can be served by the text index at all.
+ *
+ * A single trailing fragment — "coff", "javascr" — is what a half-typed query
+ * looks like, and the text index finds nothing for it. Rather than return an
+ * empty page for a query the regex path would have answered, `searchContent`
+ * treats this as a reason to fall back.
+ *
+ * Deliberately generous: one token of three characters or fewer is treated as a
+ * fragment, anything longer or multi-word is offered to the index and falls back
+ * only if it genuinely returns nothing.
+ */
+/**
+ * Whether a failed aggregation failed because there is no usable text index.
+ *
+ * The indexes on `Post.content` and `Comment.content` are declared
+ * `background: true`, so on an existing collection they are built after the
+ * process starts and are **not usable until the build completes**. A `$text`
+ * query in that window does not return nothing — it throws, with `IndexNotFound`
+ * (27) and "text index required for $text query". The same happens on a database
+ * where the indexes were never created at all.
+ *
+ * Without this, the first minutes after deploying — exactly when someone is
+ * watching — every relevance search would 500. Recognising the error lets the
+ * caller drop to the regex path it already has for empty results, so relevance
+ * degrades to recency until the index is ready rather than breaking.
+ *
+ * Matched on the code first and the message second: the code is the contract,
+ * but the message is what survives a driver that wraps the error.
+ */
+export const isTextIndexUnavailable = (error) =>
+  error?.code === 27 || error?.codeName === "IndexNotFound" ||
+  /text index required/i.test(error?.message || "");
+
+export const looksLikeWholeWords = (q) => {
+  const tokens = String(q || "").trim().split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  return tokens.length > 1 || tokens[0].length > 3;
+};
+
 /** Authors whose content is never returned by a discovery surface. */
 export const ACTIVE_ACCOUNT_STATUSES = { $nin: ["deleted", "deactivated", "suspended", "locked"] };
 
@@ -93,6 +154,14 @@ export const parseSearchFilters = (query = {}) => {
   const from = firstString(query.from).trim() || "anyone";
   if (!FROM_PROFILES.has(from)) return { error: "That profile filter isn't valid" };
 
+  /*
+   * Rejected rather than defaulted, like every other filter here: an unknown
+   * sort silently becoming "recent" is how someone ships a relevance toggle that
+   * never took effect and nothing said so.
+   */
+  const sort = firstString(query.sort).trim() || "recent";
+  if (!SEARCH_SORTS.has(sort)) return { error: "That sort isn't valid" };
+
   let username = "";
   if (from === "user") {
     // People type the handle with the @ still attached.
@@ -131,6 +200,7 @@ export const parseSearchFilters = (query = {}) => {
       minComments: minComments.value,
       minReposts: minReposts.value,
       excludeReplies: parseBooleanFlag(firstString(query.excludeReplies), false),
+      sort,
     },
   };
 };
@@ -228,10 +298,53 @@ export const authorVisibilityMatch = ({ prefix, authorField, viewerId, following
  * would cut the page down before invisible rows were removed, so a page could
  * come back short — or skip visible posts entirely on the next cursor.
  */
+/**
+ * The stages that differ between the two sort modes.
+ *
+ * `$text` has to sit in the *first* `$match` of a pipeline — MongoDB refuses it
+ * anywhere else — and `$meta: "textScore"` is only available when it does. Both
+ * pipelines below already open with a `$match`, so the term folds into that one
+ * and the score is projected alongside the sort key.
+ *
+ * Note what is deliberately *not* here: a `$skip`. Ranked results page by
+ * offset, but the offset cannot be applied inside either pipeline — posts and
+ * replies are ranked separately and merged afterwards, so skipping 15 rows of
+ * each yields rows 15–30 of two lists rather than rows 15–30 of the merged one.
+ * The caller over-fetches and slices after merging instead.
+ */
+const rankingStages = ({ textQuery }) =>
+  textQuery
+    ? {
+        match: { $text: { $search: textQuery } },
+        /*
+         * Materialised immediately, into a real field.
+         *
+         * `$meta: "textScore"` is only readable in the stage that follows the
+         * `$text` match; both pipelines then run several `$lookup`/`$unwind`
+         * stages before they sort, and the metadata is not guaranteed to
+         * survive them. Capturing it here makes `score` an ordinary field that
+         * the later `$project` and `$sort` can treat like any other.
+         */
+        early: [{ $addFields: { score: { $meta: "textScore" } } }],
+        project: { _id: 1, createdAt: 1, score: 1 },
+        // `createdAt` breaks ties, so equally-relevant matches still read
+        // newest-first rather than in whatever order the index returned them.
+        sort: { score: -1, createdAt: -1, _id: -1 },
+      }
+    : {
+        match: {},
+        early: [],
+        project: { _id: 1, createdAt: 1 },
+        sort: { createdAt: -1, _id: -1 },
+      };
+
 export const buildPostSearchPipeline = ({
   viewerId,
   filters,
   contentRegex,
+  // Set only for `sort=relevance`. Mutually exclusive with `contentRegex` —
+  // the controller picks one path per request.
+  textQuery = null,
   // An extra equality folded into the first $match. The hashtag page is the
   // same query as a search with no text: same visibility rules, same cursor,
   // different predicate.
@@ -250,6 +363,8 @@ export const buildPostSearchPipeline = ({
     hiddenAuthorIds,
   });
 
+  const ranking = rankingStages({ textQuery });
+
   return [
     {
       $match: {
@@ -257,6 +372,7 @@ export const buildPostSearchPipeline = ({
         // A scheduled post is stored as a draft until it goes out, so this one
         // exclusion covers both.
         isDraft: { $ne: true },
+        ...ranking.match,
         ...extraMatch,
         ...(contentRegex ? { content: contentRegex } : {}),
         // Posts carrying a parent are replies in the legacy sense; excluded
@@ -268,12 +384,13 @@ export const buildPostSearchPipeline = ({
         ...(authorConditions.length ? { $and: authorConditions } : {}),
       },
     },
+    ...ranking.early,
     { $lookup: { from: "users", localField: "author", foreignField: "_id", as: "authorDoc" } },
     { $unwind: "$authorDoc" },
     { $match: authorVisibilityMatch({ prefix: "authorDoc", authorField: "author", viewerId, followingIds }) },
     // Shed the joined account before sorting — the sort only needs the key.
-    { $project: { _id: 1, createdAt: 1 } },
-    { $sort: { createdAt: -1, _id: -1 } },
+    { $project: ranking.project },
+    { $sort: ranking.sort },
     { $limit: limit },
   ];
 };
@@ -291,6 +408,7 @@ export const buildReplySearchPipeline = ({
   viewerId,
   filters,
   contentRegex,
+  textQuery = null,
   extraMatch = {},
   cursorMatch,
   authorId,
@@ -306,11 +424,14 @@ export const buildReplySearchPipeline = ({
     hiddenAuthorIds,
   });
 
+  const ranking = rankingStages({ textQuery });
+
   return [
     {
       $match: {
         isDeleted: { $ne: true },
         isScheduled: { $ne: true },
+        ...ranking.match,
         ...extraMatch,
         ...(contentRegex ? { content: contentRegex } : {}),
         ...buildDateMatch(filters),
@@ -319,6 +440,7 @@ export const buildReplySearchPipeline = ({
         ...(authorConditions.length ? { $and: authorConditions } : {}),
       },
     },
+    ...ranking.early,
     { $lookup: { from: "users", localField: "author", foreignField: "_id", as: "authorDoc" } },
     { $unwind: "$authorDoc" },
     { $match: authorVisibilityMatch({ prefix: "authorDoc", authorField: "author", viewerId, followingIds }) },
@@ -344,8 +466,8 @@ export const buildReplySearchPipeline = ({
       }),
     },
 
-    { $project: { _id: 1, createdAt: 1 } },
-    { $sort: { createdAt: -1, _id: -1 } },
+    { $project: ranking.project },
+    { $sort: ranking.sort },
     { $limit: limit },
   ];
 };
@@ -363,6 +485,29 @@ export const mergeByRecency = (items, limit) =>
     .sort((a, b) => {
       const diff = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
       if (diff !== 0) return diff;
+      return String(b._id).localeCompare(String(a._id));
+    })
+    .slice(0, limit);
+
+/**
+ * The same merge, ordered by relevance.
+ *
+ * Posts and replies are ranked independently by Mongo, so the two lists arrive
+ * sorted but interleaved wrongly — merging them by `createdAt` would throw away
+ * the ranking that was just computed. Scores are comparable across the two
+ * collections because both indexes are built the same way on the same field.
+ *
+ * Ties fall back to recency and then to `_id`, so the order is total: without a
+ * deterministic tiebreak, two equally-scored rows could swap places between
+ * pages and the offset cursor would show one twice and the other never.
+ */
+export const mergeByRelevance = (items, limit) =>
+  [...items]
+    .sort((a, b) => {
+      const byScore = (b.score ?? 0) - (a.score ?? 0);
+      if (byScore !== 0) return byScore;
+      const byDate = new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      if (byDate !== 0) return byDate;
       return String(b._id).localeCompare(String(a._id));
     })
     .slice(0, limit);

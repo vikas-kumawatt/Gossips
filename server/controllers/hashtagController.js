@@ -16,6 +16,9 @@ import {
 } from "../utils/blockedHashtags.js";
 import { getSettings } from "../utils/settings.js";
 import { escapeRegex } from "../utils/respond.js";
+// Cache-aside; falls through to the loader when Redis is unreachable, so
+// trending still works on a single-instance deployment with no Redis at all.
+import { getOrSet } from "../utils/cache.js";
 
 const AUTHOR_SELECT = "_id username name bio profilePic isVerified verificationBadge isPrivate";
 
@@ -310,8 +313,33 @@ export const getHashtagContent = async (req, res) => {
   }
 };
 
+/*
+ * How far back "trending" looks.
+ *
+ * `Hashtag.postCount` is a lifetime counter, so ranking by it answered "most
+ * used ever" — a tag with ten thousand posts from last year outranked one with
+ * two hundred from this morning, permanently, and the list barely moved from one
+ * week to the next. That is a registry, not a trend.
+ *
+ * Seven days rather than twenty-four hours because this is not a high-volume
+ * platform: a one-day window on a quiet week returns three tags and an empty
+ * suggestion rail. Long enough to always have something to show, short enough
+ * that the list turns over.
+ */
+const TRENDING_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
 /**
  * GET /tags/trending — the tags worth suggesting.
+ *
+ * Counted over a recent window rather than read from the lifetime counter, and
+ * counted across posts *and* replies for the same reason the hashtag page unions
+ * both: a tag being argued about in replies is trending by any reading of the
+ * word.
+ *
+ * The cost is a real aggregation instead of an indexed `find`, which is why it
+ * is cached — the answer is identical for every caller, so it does not need
+ * recomputing per request. `postCount` is still returned, now meaning "posts in
+ * the window" rather than "posts ever", which is also the number the UI implies.
  *
  * Blocked tags are filtered at read time rather than trusted never to have been
  * written: the blocklist grows after tags are already in the registry.
@@ -320,12 +348,55 @@ export const getTrendingHashtags = async (req, res) => {
   try {
     const limit = Math.min(Math.max(Number.parseInt(req.query.limit, 10) || 10, 1), 30);
 
-    const rows = await Hashtag.find({ postCount: { $gt: 0 } })
-      .sort({ postCount: -1, lastUsedAt: -1 })
-      // Over-fetch so filtering can't return a short list.
-      .limit(limit * 3)
-      .select("tag postCount")
-      .lean();
+    /*
+     * Five minutes. Trending is a suggestion rail, not a live counter, and this
+     * is the most expensive read on the hashtag routes — it is also the one
+     * every client fires on load. Keyed on the limit because the aggregation is
+     * limited server-side. Falls through to the database when Redis is down.
+     */
+    const rows = await getOrSet(`trending:hashtags:v2:${limit}`, 300, async () => {
+      const since = new Date(Date.now() - TRENDING_WINDOW_MS);
+
+      /*
+       * Only content that is actually visible: published, not deleted, not a
+       * draft or scheduled item. A tag cannot trend on posts nobody can read.
+       * Author-level visibility (private accounts, blocks) is deliberately not
+       * applied — this list is identical for every viewer, which is what makes
+       * it cacheable, and a tag name leaks nothing about who used it.
+       */
+      const visible = {
+        hashtags: { $exists: true, $ne: [] },
+        createdAt: { $gte: since },
+        isDeleted: { $ne: true },
+      };
+
+      const stages = [
+        { $match: { ...visible, isDraft: { $ne: true } } },
+        { $unwind: "$hashtags" },
+        { $group: { _id: "$hashtags", postCount: { $sum: 1 } } },
+      ];
+
+      return Post.aggregate([
+        ...stages,
+        {
+          $unionWith: {
+            coll: Comment.collection.name,
+            pipeline: [
+              { $match: { ...visible, isScheduled: { $ne: true } } },
+              { $unwind: "$hashtags" },
+              { $group: { _id: "$hashtags", postCount: { $sum: 1 } } },
+            ],
+          },
+        },
+        // Posts and replies were grouped separately, so the two streams have to
+        // be folded together before ranking.
+        { $group: { _id: "$_id", postCount: { $sum: "$postCount" } } },
+        { $sort: { postCount: -1, _id: 1 } },
+        // Over-fetch so blocklist filtering can't return a short list.
+        { $limit: limit * 3 },
+        { $project: { _id: 0, tag: "$_id", postCount: 1 } },
+      ]);
+    });
 
     const allowed = [];
     for (const row of rows) {
