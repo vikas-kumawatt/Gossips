@@ -137,21 +137,65 @@ jobs:
     concurrency:
       group: deploy-production
       cancel-in-progress: false
+
+    # Through the environment rather than interpolated into each `run:` block.
+    #
+    # `${{ secrets.X }}` is substituted into the script *as text* before bash
+    # sees it, so an unset secret becomes an empty string and the command silently
+    # malforms — `ssh "@"`, which fails with ssh's usage message and tells you
+    # nothing about the cause. It is also how a secret containing a quote would
+    # break the script. As environment variables they are passed, not pasted.
+    env:
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      EC2_APP_DIR: ${{ secrets.EC2_APP_DIR }}
+      EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+      EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+      TARGET_SHA: ${{ github.sha }}
+
     steps:
+      - name: Check the deploy secrets are present
+        # Named individually, because "the deploy failed" is a much worse message
+        # than "EC2_HOST is not set". Values are never printed — only whether
+        # each one is empty.
+        run: |
+          missing=()
+          for name in EC2_HOST EC2_USER EC2_APP_DIR EC2_SSH_KEY EC2_KNOWN_HOSTS; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing repository secrets: ${missing[*]}"
+            echo "Add them under Settings -> Secrets and variables -> Actions -> Secrets"
+            echo "(the Secrets tab, not Variables, and at repository level)."
+            exit 1
+          fi
+          echo "all five deploy secrets are set"
+
       - name: Open an SSH session
         run: |
           install -m 700 -d ~/.ssh
-          printf '%s\n' "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_ed25519
+
+          # `tr -d '\r'` because the secret is pasted by a human, often from a
+          # Windows clipboard. OpenSSH rejects a private key containing carriage
+          # returns outright — "Load key: invalid format" — and the cause is
+          # invisible in the GitHub UI, which renders CRLF and LF identically.
+          printf '%s\n' "$EC2_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
+
           # Pinned, not trust-on-first-use. StrictHostKeyChecking=no would let
           # anything answering that address receive the deploy.
-          printf '%s\n' "${{ secrets.EC2_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "$EC2_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
+
+          # Fails here with a clear message rather than as a puzzling
+          # "Permission denied (publickey)" three steps later.
+          ssh-keygen -y -f ~/.ssh/id_ed25519 > /dev/null \
+            || { echo "::error::EC2_SSH_KEY is not a valid private key. Re-copy it whole, including the BEGIN and END lines."; exit 1; }
 
       - name: Pull, install if needed, reload
         run: |
           ssh -i ~/.ssh/id_ed25519 \
-            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
-            "APP_DIR='${{ secrets.EC2_APP_DIR }}' TARGET_SHA='${{ github.sha }}' bash -euo pipefail" <<'REMOTE'
+            "$EC2_USER@$EC2_HOST" \
+            "APP_DIR='$EC2_APP_DIR' TARGET_SHA='$TARGET_SHA' bash -euo pipefail" <<'REMOTE'
             cd "$APP_DIR"
 
             # nvm's node, explicitly, and this is not optional.
@@ -209,8 +253,8 @@ jobs:
       - name: Verify the API answers, and roll back if it does not
         run: |
           ssh -i ~/.ssh/id_ed25519 \
-            "${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}" \
-            "APP_DIR='${{ secrets.EC2_APP_DIR }}' bash -euo pipefail" <<'REMOTE'
+            "$EC2_USER@$EC2_HOST" \
+            "APP_DIR='$EC2_APP_DIR' bash -euo pipefail" <<'REMOTE'
             cd "$APP_DIR"
 
             # nvm's node, explicitly, and this is not optional.
