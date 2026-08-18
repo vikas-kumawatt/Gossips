@@ -29,22 +29,43 @@ export const isFirebaseConfigured = Boolean(
 
 // google auth
 
-const provider = new GoogleAuthProvider();
+/**
+ * `getAuth()` is called on demand, not while this module loads.
+ *
+ * It used to run at module scope, and it throws `auth/invalid-api-key` when the
+ * API key is missing — which is not a Google-sign-in failure, it is an exception
+ * thrown during import. Nothing catches an error at that point, so React never
+ * mounts and the entire app is a blank page. One absent `VITE_FIREBASE_*`
+ * variable in a deploy took down the feed, chat and everything else, for a
+ * feature most visitors never touch. The build smoke test is what caught it:
+ * "the bundle threw while loading".
+ *
+ * Deferring it means an unconfigured build loads normally and only Google
+ * sign-in is unavailable — which is the honest blast radius. The instances are
+ * cached because `signInWithPopup` needs the same `auth` object each time.
+ */
+let auth = null;
+let provider = null;
 
-const auth = getAuth();
+const googleAuth = () => {
+  if (!auth) {
+    auth = getAuth(firebaseApp);
+    provider = new GoogleAuthProvider();
+  }
+  return { auth, provider };
+};
 
 export const authWithGoogle = async () => {
-    
-    let user = null;
+  /*
+   * Refused before touching the SDK. Without this the caller gets
+   * `auth/invalid-api-key` from inside a popup handler, which reads as "Google
+   * rejected you" rather than "this deployment has no Firebase project".
+   */
+  if (!isFirebaseConfigured) {
+    throw new Error("Google sign-in isn't configured on this deployment");
+  }
 
-    await signInWithPopup(auth, provider)
-    .then((result) => {
-       user = result.user
-   
-    } )
-.catch((err) => {
-    console.log(err)
-})
-
-    return user;
-}
+  const { auth: instance, provider: googleProvider } = googleAuth();
+  const result = await signInWithPopup(instance, googleProvider);
+  return result.user;
+};

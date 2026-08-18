@@ -17,11 +17,26 @@ import { transform } from "esbuild";
  * test can assert that development-only branches really are gone.
  */
 
+/*
+ * The whole `import.meta.env` object, not individual keys.
+ *
+ * Defining keys one at a time leaves every *other* `import.meta.env.X` in the
+ * source untouched, and in Node `import.meta.env` does not exist — so a module
+ * reading an undeclared variable dies with "cannot read properties of
+ * undefined" rather than seeing `undefined`, which is what Vite would give it.
+ *
+ * Replacing the object also means anything absent from this list reads as
+ * `undefined`, exactly as it does in a build with that variable unset. The
+ * `VITE_FIREBASE_*` keys are deliberately missing: that is the CI condition, and
+ * it is the one that white-screened the app.
+ */
 const DEFINE = {
-  "import.meta.env.DEV": "false",
-  "import.meta.env.PROD": "true",
-  "import.meta.env.MODE": '"production"',
-  "import.meta.env.VITE_SERVER": '"http://localhost:5000"',
+  "import.meta.env": JSON.stringify({
+    DEV: false,
+    PROD: true,
+    MODE: "production",
+    VITE_SERVER: "http://localhost:5000",
+  }),
 };
 
 const isSource = (url) => url.startsWith("file:") && /\.(jsx|mjs|js)$/.test(url);
