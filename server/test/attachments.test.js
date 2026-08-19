@@ -1,13 +1,35 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import {
+import test, { mock } from "node:test";
+/*
+ * `bcrypt` is a native module and nothing here reaches the code that uses it —
+ * it arrives through models/User.js, which hashes passwords on save. Loading it
+ * means dlopen'ing a binary built for whichever platform last ran `npm install`,
+ * so a checkout made on Windows cannot run this suite on Linux or in CI.
+ *
+ * Stubbing keeps the suite hermetic: no compiler, no platform binary, nothing to
+ * rebuild after switching machines.
+ */
+mock.module("bcrypt", {
+  defaultExport: {
+    hash: async () => "stub-hash",
+    compare: async () => true,
+    genSalt: async () => "stub-salt",
+  },
+});
+
+/*
+ * Imported dynamically, not statically: an `import` statement is hoisted above
+ * everything else in the module, so a static import would load utils/attachments.js
+ * — and through it bcrypt — before the stub above could register.
+ */
+const {
   parseAttachments,
   parseGif,
   parseLocation,
   parsePoll,
   projectPoll,
-} from "../utils/attachments.js";
-import { normalizeMedia } from "../utils/mediaTypes.js";
+} = await import("../utils/attachments.js");
+const { normalizeMedia } = await import("../utils/mediaTypes.js");
 
 test("rejects a GIF URL that only looks like a picker result", () => {
   const result = parseGif({ url: "https://media.giphy.com.attacker.example/giphy.gif" });

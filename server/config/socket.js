@@ -19,12 +19,11 @@ import {
   CLIENT_MESSAGE_TYPES,
   EDITABLE_MESSAGE_TYPES,
   MAX_CONTENT_LENGTH,
-  parseSendPayload,
 } from "../utils/messageContent.js";
 import { scrub } from "../middleware/sanitizeMongo.js";
-import { messageEntities } from "../utils/mentions.js";
 import { getRedis } from "./redis.js";
 import { sendDirectMessage } from "../services/directMessage.js";
+import { sendGroupMessage } from "../services/groupMessage.js";
 import {
   bindUserToCall,
   createCall,
@@ -49,8 +48,6 @@ import {
   isMessageParticipant,
   messageableIdSet,
   privacyOf,
-  resolveGroupSend,
-  resolveReplyTo,
   visiblePresence,
 } from "../utils/chatAccess.js";
 import { pollFor } from "../utils/pollView.js";
@@ -76,36 +73,13 @@ import {
  * the tag is only ever rendered as text here.
  */
 
-/**
- * The admin kill-switches, for every path that creates a message.
- *
- * These have to be applied here because messages are created over the socket,
- * so the Express middleware that enforces them on HTTP routes never sees this
- * traffic. They were applied inline in the DM handler only, which meant
- * maintenance mode stopped direct messages and left every group in the app
- * running. `directMessagesEnabled` covers groups too, matching HTTP: /share
- * sits behind `requireMessagingEnabled` and can target a group.
- *
- * Staff bypass content flags, as they do in middleware/featureGate.js —
- * otherwise disabling messaging would also stop a moderator checking the fix.
- *
- * Returns a reason to refuse, or null to proceed.
+/*
+ * The maintenance and feature-flag gate used to live here as
+ * `messagingBlockedReason(socket)`. Both send paths now run it inside their
+ * services — see services/directMessage.js and services/groupMessage.js — so a
+ * bot and an HTTP caller are gated identically to a socket, rather than the gate
+ * being something only this file remembered to apply.
  */
-const messagingBlockedReason = async (socket) => {
-  if (["admin", "super_admin"].includes(socket.userRole)) return null;
-  const settings = await getSettings();
-  // The fallback matters: maintenanceMessage is an admin-editable string with
-  // no minimum length, and callers treat the return value as truthy-or-proceed.
-  // An empty message would otherwise switch maintenance mode off entirely.
-  if (settings.maintenanceMode) {
-    return settings.maintenanceMessage || "Gossips is down for maintenance.";
-  }
-  // Named for DMs but it gates group sends too, matching HTTP — /share sits
-  // behind requireMessagingEnabled and can target a group. The copy is generic
-  // because this handler serves both.
-  if (!settings.directMessagesEnabled) return "Messaging is temporarily disabled.";
-  return null;
-};
 
 
 // Group send permissions — mute, media, slow mode — live in
@@ -623,103 +597,38 @@ export const initializeSocket = (server) => {
       inSendOrder(socket.userId, async () => {
       const tempId = data?.tempId;
       try {
-        const {
-          groupId,
-          content,
-          media,
-          replyTo,
-          messageType = "text",
-        } = data;
-
-        // The same admin gates the DM path applies. This handler had none, so
-        // maintenance mode stopped direct messages and left groups running.
-        const blockedReason = await messagingBlockedReason(socket);
-        if (blockedReason) {
-          fail(socket, blockedReason, { tempId, ack });
-          return;
-        }
-
-        const payload = parseSendPayload({ content, media, messageType });
-        if (payload.error) {
-          fail(socket, payload.error, { tempId, ack });
-          return;
-        }
-
-        // Membership, group liveness, role permissions, mute, media rules and
-        // slow mode — all of it, and the same check /share and forwarding use.
-        const access = await resolveGroupSend(groupId, socket.userId, {
-          media: payload.media,
-        });
-        if (!access.ok) {
-          fail(socket, access.reason, { tempId, ack });
-          return;
-        }
-        const { group } = access;
-
-        // Canonical id: rooms are keyed by the group's own _id, so a
-        // differently-cased groupId from the client would broadcast to nothing.
-        const groupKey = group._id.toString();
-        const conversation = Message.groupConversationKey(groupKey);
-
-        const messageData = {
-          sender: socket.userId,
-          group: group._id,
-          isGroupMessage: true,
-          conversation,
-          content: payload.content,
-          media: payload.media,
-          replyTo: await resolveReplyTo(replyTo, { conversation, userId: socket.userId }),
-          messageType: payload.messageType,
-          ...(await messageEntities(payload.content)),
-          // Same idempotency as the DM path — see the note there.
-          ...(typeof tempId === "string" && tempId ? { clientId: tempId } : {}),
-          status: "sent",
-        };
-
-        let message;
-        try {
-          message = new Message(messageData);
-          await message.save();
-        } catch (saveError) {
-          if (saveError?.code !== 11000 || !messageData.clientId) throw saveError;
-          const existing = await Message.findOne({
-            sender: socket.userId,
-            clientId: messageData.clientId,
-          });
-          if (!existing) throw saveError;
-          message = existing;
-        }
-        // Same shape as the DM echo and the REST read — see the note there.
-        await message.populate([
-          { path: "sender", select: "username name profilePic isVerified" },
-          {
-            path: "replyTo",
-            select: "content messageType media isDeleted sender createdAt",
-            populate: { path: "sender", select: "username name" },
-          },
-        ]);
-
-        const messageObject = message.toObject();
-
-        // Broadcast to group room; socket.to() excludes the sender
-        socket.to(groupKey).emit("receiveGroupMessage", { ...messageObject, tempId, isOwn: false });
-        // Confirmation to sender
-        socket.emit("receiveGroupMessage", { ...messageObject, tempId, isOwn: true });
-
-        // Offline members, minus anyone who muted this group. The group path
-        // notified nobody at all before, which is why muting a group had no
-        // observable effect: there was nothing to suppress.
-        // The whole group document used to be passed as a third argument and never read.
-        await notifyGroupMembers(group._id, socket.userId, {
-          title: group.name,
-          body: `${message.sender?.name || message.sender?.username || "Someone"}: ${
-            payload.content || (payload.media?.length ? "Sent media" : "Sent a message")
-          }`,
-          data: { messageId: message._id, groupId: group._id },
+        /*
+         * Everything but the socket's own concerns lives in
+         * services/groupMessage.js now — the same move directMessage.js made, and
+         * for the same reasons. What remains is turning a socket event into a
+         * service call and a result into an ack.
+         *
+         * Unlike the DM handler there is no sender to verify: a group message
+         * carries no claimed `senderId`, so `socket.userId` is the only source.
+         */
+        const result = await sendGroupMessage({
+          senderId: socket.userId,
+          groupId: data?.groupId,
+          content: data?.content,
+          media: data?.media,
+          messageType: data?.messageType ?? "text",
+          replyTo: data?.replyTo,
+          // The client's optimistic id doubles as the idempotency key.
+          clientId: tempId,
+          // Staff bypass the maintenance and feature-flag gate, as in middleware.
+          actorRole: socket.userRole,
         });
 
-        succeed(ack, { tempId, messageId: message._id.toString() });
+        if (!result.ok) {
+          fail(socket, result.error, { tempId, ack });
+          return;
+        }
 
+        /*
+         * The definite answer. A client can settle its optimistic bubble on this
+         * rather than waiting for an echo that may never arrive.
+         */
+        succeed(ack, { tempId, messageId: result.message._id.toString() });
       } catch (error) {
         console.error("Error sending group message:", error);
         fail(socket, "Failed to send group message", { tempId, ack });
@@ -2100,7 +2009,17 @@ async function saveCallLog(callData) {
  * Ids and counts only, never the notification body: it carries the message text, and
  * stdout on a hosted platform is a persistent searchable copy outside the database.
  */
-async function notifyGroupMembers(groupId, senderId, notification) {
+/*
+ * Exported for `services/groupMessage.js`.
+ *
+ * It stays here rather than moving to utils because it is genuinely a socket
+ * concern: `onlineAmong` asks the adapter who is currently connected, across
+ * instances, and that question only has an answer in this module. The import
+ * direction — service to socket — is the same one `directMessage.js` already
+ * takes for `getIO`, and the cycle it forms is fine because both are used at
+ * call time rather than while the modules evaluate.
+ */
+export async function notifyGroupMembers(groupId, senderId, notification) {
   const groupKey = groupId.toString();
   try {
     const members = await GroupMember.find({

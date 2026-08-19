@@ -692,21 +692,6 @@ eq(
 
 // ── Send gates (socket.js) ───────────────────────────────────────────────────
 
-/** Slice a `const name = ... };` declaration out of the source. */
-const sliceConst = (name) => {
-  const start = socketSrc.indexOf(`const ${name} = `);
-  if (start < 0) throw new Error(`could not find ${name}`);
-  const end = socketSrc.indexOf("\n};\n", start) + 4;
-  if (end < 4) throw new Error(`could not slice ${name}`);
-  return socketSrc.slice(start, end);
-};
-
-let appSettings = {
-  maintenanceMode: false,
-  maintenanceMessage: "Back soon",
-  directMessagesEnabled: true,
-};
-
 /*
  * The content rules moved to utils/messageContent.js — they were duplicated
  * between socket.js and chatController.js — so they are imported here rather than
@@ -721,50 +706,28 @@ const content = await import("../utils/messageContent.js");
  * extracted into a service, and the slice above stopped finding it. Importing the real module
  * is what should have happened anyway: a text-extracted copy can pass while the shipped
  * function differs, which is the one thing a harness must never allow.
- *
- * `messagingBlockedReason` is still sliced — it remains local to socket.js, where the group
- * send handler uses it.
  */
 const { parseSendPayload } = content;
 const MAX_MEDIA_PER_MESSAGE = content.MAX_MEDIA_PER_MESSAGE;
 
-const sendGates = new Function(
-  "getSettings",
-  `${sliceConst("messagingBlockedReason")}
-   return { messagingBlockedReason };`
-)(async () => appSettings);
-
-const { messagingBlockedReason } = sendGates;
-
-// -- messagingBlockedReason --
-
-const asUser = { userRole: "user" };
-const asAdmin = { userRole: "admin" };
-
-eq("gate: everything on, nothing blocked", await messagingBlockedReason(asUser), null);
-
-appSettings = { ...appSettings, maintenanceMode: true };
-eq("gate: maintenance blocks a user", await messagingBlockedReason(asUser), "Back soon");
-eq("gate: maintenance does not block staff", await messagingBlockedReason(asAdmin), null);
-appSettings = { ...appSettings, maintenanceMessage: "" };
-ok(
-  "gate: maintenance still blocks with an empty admin message",
-  Boolean(await messagingBlockedReason(asUser))
-);
-appSettings = { ...appSettings, maintenanceMessage: "Back soon" };
-eq(
-  "gate: maintenance does not block a super_admin",
-  await messagingBlockedReason({ userRole: "super_admin" }),
-  null
-);
-
-appSettings = { ...appSettings, maintenanceMode: false, directMessagesEnabled: false };
-ok(
-  "gate: messaging kill-switch blocks a user",
-  /temporarily disabled/i.test(await messagingBlockedReason(asUser))
-);
-eq("gate: kill-switch does not block staff", await messagingBlockedReason(asAdmin), null);
-appSettings = { ...appSettings, directMessagesEnabled: true };
+/*
+ * The `messagingBlockedReason` harness used to sit here, with eight assertions.
+ *
+ * That function no longer exists. The maintenance and feature-flag gate now runs
+ * inside services/directMessage.js and services/groupMessage.js, so a bot and an
+ * HTTP caller are gated identically to a socket — rather than the gate being
+ * something only socket.js remembered to apply.
+ *
+ * The assertions are not lost. They are the same checks, made against the real
+ * functions instead of a declaration recovered from a file by string search:
+ *
+ *   test/botDirectMessageService.test.js   the DM gate
+ *   test/groupMessageService.test.js       the group gate
+ *
+ * Which is what should have happened here anyway: a text-extracted copy can pass
+ * while the shipped function differs, the one thing a harness must never allow —
+ * the note above `parseSendPayload` makes the same point.
+ */
 
 // -- parseSendPayload --
 

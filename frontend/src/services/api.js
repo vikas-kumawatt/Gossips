@@ -1064,6 +1064,10 @@ export const chatAPI = {
   sendMessage: (messageData) =>
     api.post("/chats/messages", messageData).then((r) => r.data),
 
+  /** The group counterpart. Same fallback arrangement — see `sendMessage`. */
+  sendGroupMessage: ({ groupId, ...messageData }) =>
+    api.post(`/chats/groups/${groupId}/messages`, messageData).then((r) => r.data),
+
   /*
    * Two different actions, easy to confuse, so the names say which is which:
    *

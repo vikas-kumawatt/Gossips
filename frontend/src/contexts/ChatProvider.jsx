@@ -1625,8 +1625,6 @@ export function ChatProvider({ children }) {
       },
 
       sendGroupMessage: async (messageData) => {
-        if (!socketRef.current) throw new Error("Socket not connected");
-
         const optimistic = {
           ...messageData,
           sender: {
@@ -1642,7 +1640,37 @@ export function ChatProvider({ children }) {
 
         dispatch({ type: "ADD_MESSAGE", payload: optimistic });
         dispatch({ type: "CLEAR_REPLY_MESSAGE" });
-        return emitWithAck("sendGroupMessage", messageData);
+
+        // Socket first, HTTP when it isn't available — see `sendMessage` above
+        // for why the check is `isConnectedRef` rather than `socketRef.current`.
+        if (socketRef.current && isConnectedRef.current) {
+          return emitWithAck("sendGroupMessage", messageData);
+        }
+
+        try {
+          const reply = await chatAPI.sendGroupMessage(messageData);
+          // Settled through the same reconciliation the socket echo uses.
+          if (reply?.message) {
+            dispatch({
+              type: "ADD_MESSAGE_IF_ACTIVE",
+              payload: { ...reply.message, tempId: messageData.tempId, isOwn: true },
+            });
+          }
+          return reply;
+        } catch (error) {
+          const reason = readableError(error, "Couldn't send — check your connection");
+          if (messageData.tempId) {
+            dispatch({
+              type: "UPDATE_MESSAGE",
+              payload: {
+                _id: messageData.tempId,
+                messageStatus: "failed",
+                failedReason: reason,
+              },
+            });
+          }
+          throw new Error(reason);
+        }
       },
 
       startTyping: (receiverId) => {

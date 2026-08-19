@@ -27,6 +27,7 @@ import { signMedia, verifyMedia } from "../utils/mediaToken.js";
 // The single path that creates a direct message. The socket handler calls the
 // same function — see `sendMessage` at the end of this file.
 import { sendDirectMessage } from "../services/directMessage.js";
+import { sendGroupMessage } from "../services/groupMessage.js";
 import { parseReactionEmoji, parseSkinTone } from "../utils/reactions.js";
 import { isUnlockedForRequest, issueUnlockGrant } from "../utils/chatLock.js";
 import {
@@ -3259,8 +3260,58 @@ export const sendMessage = async (req, res) => {
   }
 };
 
+/**
+ * POST /chats/groups/:groupId/messages — send a group message over HTTP.
+ *
+ * The counterpart to `sendMessage`, and the same arrangement: a fallback for
+ * `socket.on("sendGroupMessage")`, both calling `services/groupMessage.js`.
+ *
+ * The group comes from the path rather than the body — it identifies the
+ * resource being posted to, which is what a path segment is for, and it means the
+ * route reads the same way as the `GET` beside it.
+ */
+export const sendGroupMessageHttp = async (req, res) => {
+  try {
+    const result = await sendGroupMessage({
+      // From the session. There is no claimed sender in a group payload to check
+      // against, so this is the only source — as it is on the socket.
+      senderId: req.user._id,
+      groupId: req.params.groupId,
+      content: req.body?.content,
+      media: req.body?.media,
+      messageType: req.body?.messageType ?? "text",
+      replyTo: req.body?.replyTo,
+      // The same optimistic id the socket sends as `tempId`; the idempotency key.
+      clientId: req.body?.tempId,
+      actorRole: req.user.role,
+    });
+
+    if (!result.ok) {
+      /*
+       * 403 for a refusal about standing — not a member, banned, muted, or a role
+       * without permission — and 400 for a malformed payload. `resolveGroupSend`
+       * returns one flat reason string, so the split is drawn here.
+       */
+      const forbidden = /not a member|banned|muted|permission|not allowed|slow mode|can't send|cannot send/i.test(
+        result.error || ""
+      );
+      return res.status(forbidden ? 403 : 400).json({ error: result.error });
+    }
+
+    return res.status(201).json({
+      tempId: req.body?.tempId,
+      messageId: result.message._id.toString(),
+      message: result.messageObject,
+    });
+  } catch (error) {
+    console.error("sendGroupMessageHttp error:", error);
+    return res.status(500).json({ error: "Failed to send group message" });
+  }
+};
+
 export default {
   sendMessage,
+  sendGroupMessageHttp,
   getMessages, getGroupMessages, getChats, getChatPreferences,
   createChatCategory, reorderChatCategories, deleteChatCategory, assignChatCategory,
   toggleFavoriteChat, updateChatTheme, setDisappearingForChat, updateChatState, setChatLockPin,

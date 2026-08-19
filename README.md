@@ -616,6 +616,7 @@ each write:
 | `authoring.js` | `createPost`, `commentOnPost` — reply permissions, quoted snapshots, thread resolution, mention/hashtag indexing, publish effects |
 | `engagement.js` | `likePost`, `repostPost`, `followUser`, `unfollowUser` (private accounts produce a follow request) |
 | `directMessage.js` | `sendDirectMessage` — the only code path that creates a DM |
+| `groupMessage.js` | `sendGroupMessage` — the only code path that creates a group message |
 | `curation.js` | `savePost`, `setNotInterested`, `undoNotInterested`, `favouriteAuthor` |
 | `moderation.js` | `muteUser`, `blockUser`, `reportContent` and their inverses |
 
@@ -809,6 +810,7 @@ the 10-minute window passes or the row is gone.
 | GET | `/chats/call/ice-servers` | Yes | STUN/TURN configuration for a call |
 | POST | `/chats/messages` | Yes | Send a direct message. Fallback for the socket — see the note below |
 | GET | `/chats/messages/:username` | Yes | DM thread |
+| POST | `/chats/groups/:groupId/messages` | Yes | Send a group message. Same fallback arrangement |
 | GET | `/chats/groups/:groupId/messages` | Yes | Group thread |
 | POST | `/chats/messages/mark-read` | Yes | Mark messages read |
 | GET | `/chats/messages/:username/search` | Yes | Search inside one conversation |
@@ -847,8 +849,9 @@ the 10-minute window passes or the row is gone.
 > only because the client uses this path solely while the socket is down, so the two cannot
 > interleave. Making HTTP primary would require the client to sort by `createdAt`.
 >
-> **Group** messages remain socket-only: `sendGroupMessage` still lives inline in `config/socket.js`
-> with no service to call, so there is nothing for an HTTP route to delegate to yet.
+> **Groups work the same way**: `POST /chats/groups/:groupId/messages` falls back for
+> `socket.on("sendGroupMessage")`, both calling `services/groupMessage.js`. The group id is in the
+> path rather than the body, since it identifies the resource being posted to.
 
 ### Groups — `/groups`
 
@@ -1881,7 +1884,7 @@ revalidated.
 
 ### Server
 
-25 test files plus one harness in `server/test/`, written against the Node built-in test runner.
+29 test files plus one harness in `server/test/`, written against the Node built-in test runner.
 
 ```bash
 cd server
@@ -1889,13 +1892,20 @@ npm test                 # node --experimental-test-module-mocks --test
 npm run test:services    # the three service-layer suites only
 ```
 
-Coverage is concentrated on the bot subsystem and on the pure helpers: the action validator, output
-moderation, pacing, rate limits, perception and its budget, the reasoning client, the runner, the
-executor, the key vault, self-hosted endpoint checks, the DM responder, bot models and discovery, the
-three services (engagement, direct message, authoring), the eval harness, plus `attachments`,
-`chatPagination`, `contentSearch`, `otp` and `replyThreading`.
+Coverage is concentrated on the bot subsystem, the service layer and the pure helpers: the action
+validator, output moderation, pacing, rate limits, perception and its budget, the reasoning client,
+the runner, the executor, the key vault, self-hosted endpoint checks, the DM responder, bot models
+and discovery, the services (engagement, direct message, group message, authoring), the eval
+harness, the HTTP middleware and send endpoints, plus `attachments`, `chatPagination`,
+`contentSearch` and its relevance path, `otp` and `replyThreading`.
 
-There are no tests for the HTTP layer, the socket handlers, or most controllers.
+**Every suite is hermetic** — no database, no network, no provider key — and that includes native
+modules. `bcrypt` is stubbed wherever a test reaches it transitively (through `models/User.js`, or
+through `botController` → `chatController`), because loading it means `dlopen`ing a binary built for
+whichever platform last ran `npm install`. Without the stub, a checkout made on Windows cannot run
+those suites on Linux or in CI. Nothing under test needs real hashing.
+
+Still untested: the Socket.IO handlers, and most controllers beyond the two send endpoints.
 
 ### Bot evaluations
 

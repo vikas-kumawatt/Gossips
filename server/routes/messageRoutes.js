@@ -2,6 +2,7 @@ import express from "express";
 import { protect } from "../middleware/authMiddleware.js";
 import {
   sendMessage,
+  sendGroupMessageHttp,
   getMessages,
   getGroupMessages,
   getChats,
@@ -234,6 +235,10 @@ router.delete("/:username", protect, preferenceRateLimit, deleteChat);
  */
 router.post("/messages", canMessage, messageRateLimit, sendMessage);
 router.get("/messages/:username", protect, readRateLimit, getMessages);
+// Fallback for `socket.on("sendGroupMessage")`, alongside the read of the same
+// thread. Same guards as `POST /messages` and as `/share`, which can also target
+// a group.
+router.post("/groups/:groupId/messages", canMessage, messageRateLimit, sendGroupMessageHttp);
 router.get("/groups/:groupId/messages", protect, readRateLimit, getGroupMessages);
 router.post("/messages/mark-read", protect, readRateLimit, markMessagesAsRead);
 

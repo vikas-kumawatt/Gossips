@@ -141,6 +141,23 @@ mock.module("../utils/reservedUsernames.js", {
   namedExports: { isReserved: async () => false },
 });
 
+/*
+ * `bcrypt` is a native module and nothing here reaches the code that uses it —
+ * it arrives through models/User.js, which hashes passwords on save. Loading it
+ * means dlopen'ing a binary built for whichever platform last ran `npm install`,
+ * so a checkout made on Windows cannot run this suite on Linux or in CI.
+ *
+ * Stubbing keeps the suite hermetic: no compiler, no platform binary, nothing to
+ * rebuild after switching machines.
+ */
+mock.module("bcrypt", {
+  defaultExport: {
+    hash: async () => "stub-hash",
+    compare: async () => true,
+    genSalt: async () => "stub-salt",
+  },
+});
+
 const { createBot } = await import("../controllers/botController.js");
 
 /** Captures what the controller answered, in the envelope `utils/respond.js` really produces. */
