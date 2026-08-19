@@ -1,0 +1,30 @@
+# Who gets asked to review what.
+#
+# GitHub requests a review from the owner of any path a pull request touches.
+# With a single maintainer that is simply "everything" — the file earns its place
+# by making the request automatic rather than something to remember, and by being
+# the thing to edit rather than invent when a second person joins.
+#
+# Syntax note: the *last* matching pattern wins, not the most specific one. So
+# anything added below a broader rule overrides it, and order matters.
+
+* @vikas-kumawatt
+
+# ── Paths worth a second look ───────────────────────────────────────────────
+#
+# Listed rather than assigned, because with one owner an extra rule would change
+# nothing. They are here because reviewing them casually is how a subtle problem
+# ships, and because when there is a second reviewer these are the lines that
+# should name them:
+#
+#   server/controllers/authController.js  tokens, sessions, OTP, password reset
+#   server/config/jwt.js                  which token may authenticate a request
+#   server/config/origins.js              CORS and the CSRF guard, one list
+#   server/utils/keyVault.js              BYOK encryption at rest
+#   server/utils/signingSecret.js         the HMAC key and its domain separation
+#   server/bots/actionValidator.js        re-validates everything a model returns
+#   server/bots/outputModeration.js       every string a bot generates
+#   server/bots/selfHosted.js             SSRF defence for owner endpoints
+#   server/middleware/securityHeaders.js  headers on every response
+#   frontend/public/_headers              the browser-facing CSP
+#   .github/workflows/ci.yml              a merge here deploys to production

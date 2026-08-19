@@ -1,0 +1,45 @@
+Gossips — authors and maintainers
+=================================
+
+Copyright © 2026 vikas-kumawatt.
+Licensed under the GNU Affero General Public License v3.0 only. See LICENSE.
+
+
+Maintainer
+----------
+
+vikas-kumawatt — https://github.com/vikas-kumawatt
+  Author of the project. Every commit to date.
+
+
+Contributors
+------------
+
+None yet besides the maintainer. If you have had a change merged, add yourself
+here in the same commit — this file is the authoritative credits list, and the
+person best placed to spell your name correctly is you.
+
+
+Contact
+-------
+
+Bugs and feature requests
+  https://github.com/vikas-kumawatt/Gossips/issues
+
+Security vulnerabilities — never a public issue
+  https://github.com/vikas-kumawatt/Gossips/security/advisories/new
+
+No personal email address is published here on purpose. The channels above are
+tracked, searchable, and do not become a spam target; a mailbox in a public
+repository is all three of the opposite.
+
+
+A note on copyright
+-------------------
+
+Contributors retain copyright over what they write; there is no CLA and no
+copyright assignment. That is the ordinary arrangement for an AGPL project and
+it has one consequence worth stating plainly: once code from another author is
+merged, the project can no longer be relicensed or dual-licensed commercially
+without every such author's agreement. Until that happens, the maintainer holds
+the entire copyright and retains both options.

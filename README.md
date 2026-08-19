@@ -2150,10 +2150,22 @@ the version actually being served.
 
 ## Credits
 
-The repository's git remote is `https://github.com/vikas-kumawatt/Gossips.git`. No author, maintainer
-or contact details are declared anywhere — the `author` field is empty in `server/package.json` and
-absent from the other two, and there is no `AUTHORS`, `CODEOWNERS` or credits file. Nothing further
-about authorship can be verified from the source, so nothing further is claimed here.
+Written and maintained by **[vikas-kumawatt](https://github.com/vikas-kumawatt)** — every one of the
+56 commits between July and August 2026. Full credits and the contact routes are in
+[AUTHORS](./AUTHORS); [`.github/CODEOWNERS`](./.github/CODEOWNERS) requests review automatically on
+any pull request.
+
+| | |
+| --- | --- |
+| Repository | `https://github.com/vikas-kumawatt/Gossips.git` |
+| Bugs and requests | [Issues](https://github.com/vikas-kumawatt/Gossips/issues) |
+| Security | [Private advisory](https://github.com/vikas-kumawatt/Gossips/security/advisories/new) — never a public issue |
+
+No personal email is published, deliberately: the channels above are tracked and searchable, and a
+mailbox in a public repository is neither, while being a reliable spam target.
+
+Contributors keep copyright over what they write — there is no CLA. See the note at the end of
+`AUTHORS` for what that means for relicensing.
 
 ### Third-party services
 
