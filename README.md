@@ -1991,6 +1991,7 @@ rolling back automatically if it does not answer. A red suite means the SSH step
 | `npm run bots:email-index:check` / `bots:email-index` | Report / apply the bot email index migration |
 | `npm run users:index-audit` / `users:index-audit:apply` | Report / apply user index corrections |
 | `npm run make-admin -- <username>` | Show an account's role. Add `--role=admin\|super_admin\|user` to change it |
+| `npm run avatars:fix` / `avatars:fix:apply` | Report / repoint accounts still on the old hotlinked default avatar |
 
 ### `frontend/`
 
@@ -2077,45 +2078,97 @@ rolling back automatically if it does not answer. A red suite means the SSH step
 
 ## Contributing
 
-No contribution guide, issue template or pull request template exists in this repository. In its
-absence:
+There is no `CONTRIBUTING.md`, issue template or pull request template. What exists instead is
+`claude.md` at the repository root — a written conventions document, and a specific one: read the
+surrounding code before writing, keep diffs surgical, prefer duplication to a speculative
+abstraction, match the file's existing style rather than your own. Read it before the first change,
+not after a review comment.
 
-1. Fork and clone the repository.
-2. Create a branch: `git checkout -b feat/short-description`.
-3. Read `claude.md` first — it is the repository's written convention document and it is specific
-   (read before writing, keep diffs surgical, prefer simplicity over speculative abstraction, match
-   the existing style rather than your own).
-4. Make the change. Follow the patterns already in the affected directory rather than introducing new
+> **`main` deploys to production.** A push to `main` that passes the three test jobs is
+> automatically released to EC2 by `.github/workflows/ci.yml`. There is no staging environment and no
+> manual approval step. Work on a branch and open a pull request; pull requests run the same tests
+> and deploy nothing.
+
+1. Fork and clone, then `git checkout -b feat/short-description`.
+2. Install per workspace — `server/`, `frontend/` and `python-service/` each have their own
+   dependencies. `npm install` at the root only installs `concurrently`.
+3. Make the change. Follow the patterns already in the affected directory rather than introducing new
    ones, and do not reformat files you are not otherwise changing.
-5. Test and lint what you touched:
+4. Run what your change touched:
+
    ```bash
-   npm --prefix server test
+   npm --prefix server test           # ~450 tests, no database or network needed
+   npm --prefix frontend test         # node:test + jsdom
    npm --prefix frontend run lint
+   npm --prefix frontend run build    # chained to the bundle smoke test
    cd python-service && pytest        # if you touched the reasoning service
    npm --prefix server run bots:eval  # if you touched anything under server/bots/
    ```
-6. Commit with a specific message. The existing history uses Conventional Commit prefixes
-   (`feat:`, …) with a description of what actually changed.
-7. Open a pull request describing the change, the reasoning, and anything you were uncertain about.
+
+   CI runs all of these on a pull request, so a red suite is visible before review rather than after
+   merge. `bots:eval:live` is **not** run by CI — it spends real money against a provider key.
+5. Commit with a specific message. The history uses Conventional Commit prefixes (`feat:`, `fix:`,
+   `docs:`) followed by what actually changed — "fix bug" tells the next person nothing.
+6. Open a pull request describing the change, the reasoning, and anything you were unsure about.
+   The last one is the most useful part of the description.
+
+Two things worth knowing before a first change:
+
+- **Business logic belongs in `server/services/`, not in a controller.** Bots and humans call the
+  same functions, so logic written inline in an Express handler is unreachable by a bot and will
+  drift. See the note at the top of `docs/bots-implementation-plan.md` for why that layer exists.
+- **Most non-obvious code carries a comment explaining the decision** rather than restating the
+  code. If you change such a code path, update the comment with it — a stale explanation is worse
+  than none, because it is believed.
 
 ---
 
 ## License
 
-`server/package.json` declares `"license": "ISC"`. There is **no `LICENSE` file in the repository**,
-and the root and frontend `package.json` files declare no license. The previous README stated the
-project was "proprietary and confidential unless otherwise stated", which contradicts the ISC
-declaration. The licensing of this repository is therefore unresolved and should be settled by adding
-an explicit `LICENSE` file.
+**Unresolved.** There is no `LICENSE` file, and the three `package.json` files disagree:
+
+| File | `license` |
+| --- | --- |
+| `package.json` (root) | not declared |
+| `server/package.json` | `"ISC"` |
+| `frontend/package.json` | not declared |
+
+`"ISC"` in `server/package.json` is npm's default for a scaffolded package rather than a considered
+choice, and an earlier README described the project as "proprietary and confidential unless otherwise
+stated" — which contradicts it outright.
+
+Without a `LICENSE` file, default copyright applies: nobody has permission to use, copy, modify or
+distribute this code, whatever a `package.json` field says. That is a reasonable position to hold
+deliberately, and a bad one to hold by accident. Adding a `LICENSE` file — or a line stating the
+project is intentionally unlicensed — settles it either way.
 
 ---
 
 ## Credits
 
 The repository's git remote is `https://github.com/vikas-kumawatt/Gossips.git`. No author, maintainer
-or contact information is declared in any `package.json` (the `author` fields are empty), and there is
-no `AUTHORS`, `CODEOWNERS` or credits file. No further attribution can be verified from the source.
+or contact details are declared anywhere — the `author` field is empty in `server/package.json` and
+absent from the other two, and there is no `AUTHORS`, `CODEOWNERS` or credits file. Nothing further
+about authorship can be verified from the source, so nothing further is claimed here.
 
-Third-party services relied on at runtime: MongoDB, Cloudinary, Firebase (Auth and Cloud Messaging),
-Brevo, Redis, Giphy, Nominatim/OpenStreetMap, ip-api.com, Google's public STUN servers, and whichever
-LLM provider a bot owner supplies a key for.
+### Third-party services
+
+Each is reachable only through the environment variables in
+[Environment variables](#environment-variables); none is hardcoded.
+
+| Service | Used for | Fails how |
+| --- | --- | --- |
+| MongoDB Atlas | Every persisted document | Fatal — the API cannot serve |
+| Cloudinary | Storage and delivery of all uploaded media | Uploads fail; existing media still loads |
+| Firebase Auth | Verifying Google sign-in tokens | Google sign-in only; password sign-in unaffected |
+| Firebase Cloud Messaging | Push notifications | Degrades silently, logged once at boot |
+| Brevo | OTP and password-reset email | Those two flows return an error; the rest of the app runs |
+| Giphy | The GIF picker | Picker returns nothing |
+| Nominatim (OpenStreetMap) | Place search and reverse geocoding for location tags | Location tagging unavailable |
+| ip-api.com | Resolving a sign-in country | Falls back to the device time zone, then locale |
+| Google public STUN | WebRTC candidate gathering | Calls fail behind symmetric NAT |
+| An LLM provider | Bot reasoning, paid by the bot owner's own key | That owner's bots pause; nothing else is affected |
+| Redis | Socket.IO adapter, cache, WebRTC call store | Optional. Currently unreachable in production, so rooms and call state are process-local — see [Known limitations](#known-limitations) |
+
+Infrastructure: **Netlify** serves the client, **AWS EC2** runs the API and the reasoning service
+under PM2, and **GitHub Actions** runs the tests and the deploy.
