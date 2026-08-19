@@ -37,14 +37,17 @@
 #     onto the user record at sign-in). blob: and data: are the local preview of
 #     an attachment before it uploads.
 #
-#   connect-src repeats those same three image hosts, and that is not redundant.
-#     The service worker's runtimeCaching does not let the browser load an image
-#     directly — it intercepts the request and re-issues it with fetch(), and
-#     fetch() is governed by connect-src regardless of what the response will be
-#     used for. With them listed only under img-src, every avatar and every piece
-#     of post media failed with "Refused to connect", and Workbox surfaced it as
-#     `no-response`. Anything added to runtimeCaching in vite.config.js has to
-#     appear here too.
+#   connect-src repeats res.cloudinary.com, and that is not redundant with
+#     img-src: src/lib/downloadMedia.js calls fetch() on an attachment's URL for
+#     the download button in chat, and fetch() is governed by connect-src no
+#     matter what the response is used for. The Giphy and Google hosts are listed
+#     alongside it for the same reason should anything ever fetch them.
+#
+#     This is also the directive that broke every avatar in the app when the
+#     service worker had runtimeCaching rules: those make the SW intercept an
+#     image request and re-issue it with fetch(). Those rules are gone (see
+#     vite.config.js), but if they ever come back, every host in them belongs
+#     here as well as in img-src.
 #
 #   connect-src also carries both the https and wss forms of the API origin.
 #     Socket.IO upgrades to a WebSocket, and wss:// is not covered by the https://

@@ -153,62 +153,33 @@ export default defineConfig(({ mode }) => ({
         cleanupOutdatedCaches: true,
         clientsClaim: true,
         /*
-         * Runtime caching, for cross-origin assets only.
+         * No `runtimeCaching`, deliberately.
          *
-         * The precache covers the app shell. These cover the things the shell
-         * then requests from somewhere else, which is where the repeat-visit
-         * cost actually is — the same avatar and the same post image are fetched
-         * on every visit otherwise.
+         * There was some: CacheFirst over Cloudinary, Giphy and Google avatars.
+         * It was removed because it cost more than it bought.
          *
-         * ── What is deliberately absent ────────────────────────────────────
+         * What it bought was close to nothing. Cloudinary already serves those
+         * images with a long, immutable `Cache-Control`, so the browser's own
+         * HTTP cache was doing the same job before Workbox was involved.
          *
-         * Every API response. `/posts/feed`, `/chats`, `/user/:username` and the
-         * rest are per-account and auth-scoped, and a service worker cache is
-         * keyed by URL and shared across everyone who uses this browser profile.
-         * Caching them would mean one account's feed being served to the next
-         * account signed in on the same device — and `GET /chats` is explicitly
-         * marked `no-store` by the server for exactly that reason. The IndexedDB
-         * layers in src/utils already give warm-start rendering, scoped per user
-         * id and always revalidated, which is the correct place for that.
+         * What it cost was a class of failure. A `runtimeCaching` rule makes the
+         * service worker intercept the request and re-issue it with `fetch()`,
+         * and `fetch()` is governed by `connect-src` rather than `img-src` — so
+         * every avatar in the app broke until the CSP listed those hosts under
+         * both. Worse, a service worker captures its CSP when it installs, so
+         * the fix did not take effect for anyone still running the previous
+         * worker: they kept seeing "Refused to connect" against a policy that no
+         * longer existed. And when the SW's fetch fails the image fails outright
+         * — without the interception the browser would simply have loaded it.
+         *
+         * The precache still covers the app shell, and `src/utils/*Cache.js`
+         * still gives warm-start rendering from IndexedDB. Neither of those
+         * intercepts a cross-origin image.
+         *
+         * If runtime caching is ever wanted again: every host added here must
+         * also be added to `connect-src` in `public/_headers`, not just
+         * `img-src`.
          */
-        runtimeCaching: [
-          {
-            /*
-             * Uploaded media. CacheFirst because a Cloudinary URL is
-             * content-addressed in practice — the public id changes when the
-             * asset does — so a cached response cannot go stale, only unused.
-             */
-            urlPattern: ({ url }) => url.hostname === "res.cloudinary.com",
-            handler: "CacheFirst",
-            options: {
-              cacheName: "gossips-media",
-              expiration: { maxEntries: 300, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              // Opaque cross-origin responses are cached as errors otherwise.
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // GIFs are hotlinked from Giphy and never uploaded, so they miss the
-            // rule above. Shorter and smaller: a picker session can pull dozens.
-            urlPattern: ({ url }) => url.hostname.endsWith(".giphy.com"),
-            handler: "CacheFirst",
-            options: {
-              cacheName: "gossips-gifs",
-              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            // Google account avatars, copied onto the user record at sign-in.
-            urlPattern: ({ url }) => url.hostname === "lh3.googleusercontent.com",
-            handler: "StaleWhileRevalidate",
-            options: {
-              cacheName: "gossips-avatars",
-              expiration: { maxEntries: 100, maxAgeSeconds: 60 * 60 * 24 * 7 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-        ],
       },
     }),
   ],
