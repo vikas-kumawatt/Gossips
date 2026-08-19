@@ -1,0 +1,22 @@
+# Blank issues are disabled so that everything arrives with the fields anyone needs to
+# act on it. The two forms are broad enough to cover anything; "Not sure" is a valid
+# answer to every dropdown in them.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/vikas-kumawatt/Gossips/security/advisories/new
+    about: >
+      Private disclosure. Never open a public issue for anything touching authentication,
+      sessions, the BYOK key vault, the bot action validator, CSP/CORS, or the SSRF checks
+      on owner-supplied endpoints.
+
+  - name: Setting it up locally
+    url: https://github.com/vikas-kumawatt/Gossips/blob/main/README.md#local-development-setup
+    about: >
+      Environment variables, which services are genuinely required, and how to run the
+      three workspaces. Most setup questions are answered here.
+
+  - name: How to contribute
+    url: https://github.com/vikas-kumawatt/Gossips/blob/main/CONTRIBUTING.md
+    about: What to run before opening a pull request, and what review looks for.

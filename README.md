@@ -2078,39 +2078,30 @@ rolling back automatically if it does not answer. A red suite means the SSH step
 
 ## Contributing
 
-There is no `CONTRIBUTING.md`, issue template or pull request template. What exists instead is
-`claude.md` at the repository root — a written conventions document, and a specific one: read the
-surrounding code before writing, keep diffs surgical, prefer duplication to a speculative
-abstraction, match the file's existing style rather than your own. Read it before the first change,
-not after a review comment.
+Full guide: **[CONTRIBUTING.md](./CONTRIBUTING.md)** — setup, what to run, and what review looks
+for. Conventions: **[`claude.md`](./claude.md)** — read before the first change, not after a review
+comment. Issue and pull request templates are in [`.github/`](./.github).
 
-> **`main` deploys to production.** A push to `main` that passes the three test jobs is
-> automatically released to EC2 by `.github/workflows/ci.yml`. There is no staging environment and no
-> manual approval step. Work on a branch and open a pull request; pull requests run the same tests
-> and deploy nothing.
+> **`main` deploys to production.** A push to `main` that passes the three test jobs is released to
+> EC2 automatically by `.github/workflows/ci.yml`. There is no staging environment and no manual
+> approval step. Work on a branch and open a pull request — pull requests run the same suites and
+> deploy nothing.
 
-1. Fork and clone, then `git checkout -b feat/short-description`.
-2. Install per workspace — `server/`, `frontend/` and `python-service/` each have their own
-   dependencies. `npm install` at the root only installs `concurrently`.
-3. Make the change. Follow the patterns already in the affected directory rather than introducing new
-   ones, and do not reformat files you are not otherwise changing.
-4. Run what your change touched:
+The short version:
 
-   ```bash
-   npm --prefix server test           # ~450 tests, no database or network needed
-   npm --prefix frontend test         # node:test + jsdom
-   npm --prefix frontend run lint
-   npm --prefix frontend run build    # chained to the bundle smoke test
-   cd python-service && pytest        # if you touched the reasoning service
-   npm --prefix server run bots:eval  # if you touched anything under server/bots/
-   ```
+```bash
+git checkout -b feat/short-description
 
-   CI runs all of these on a pull request, so a red suite is visible before review rather than after
-   merge. `bots:eval:live` is **not** run by CI — it spends real money against a provider key.
-5. Commit with a specific message. The history uses Conventional Commit prefixes (`feat:`, `fix:`,
-   `docs:`) followed by what actually changed — "fix bug" tells the next person nothing.
-6. Open a pull request describing the change, the reasoning, and anything you were unsure about.
-   The last one is the most useful part of the description.
+npm --prefix server test           # ~450 tests, no database or network needed
+npm --prefix frontend test         # node:test + jsdom
+npm --prefix frontend run lint
+npm --prefix frontend run build    # chained to the bundle smoke test
+cd python-service && pytest        # if you touched the reasoning service
+npm --prefix server run bots:eval  # if you touched anything under server/bots/
+```
+
+CI runs all of these on a pull request. `bots:eval:live` is **not** run by CI — it spends real money
+against a provider key.
 
 Two things worth knowing before a first change:
 
@@ -2120,6 +2111,10 @@ Two things worth knowing before a first change:
 - **Most non-obvious code carries a comment explaining the decision** rather than restating the
   code. If you change such a code path, update the comment with it — a stale explanation is worse
   than none, because it is believed.
+
+**Security issues do not go in a public issue.** Use the repository's *Security → Report a
+vulnerability* tab. That covers anything touching authentication, sessions, the BYOK key vault, the
+bot action validator, CSP/CORS, or the SSRF checks on owner-supplied endpoints.
 
 ---
 

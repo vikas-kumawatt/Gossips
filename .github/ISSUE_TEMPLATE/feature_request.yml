@@ -1,0 +1,55 @@
+name: Feature or change request
+description: Propose something new, or a change to how something works
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What is difficult or impossible today. Describe the situation, not the solution —
+        the best fix is often not the one the reporter had in mind.
+      placeholder: |
+        Searching for a partial word finds nothing useful, so finding a post I half
+        remember means scrolling.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: Optional. If you already have a shape for it, describe it here.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which part
+      options:
+        - Web client
+        - Chat and calls
+        - API / server
+        - AI bots
+        - Admin panel
+        - Deployment / CI
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried or considered
+      description: >
+        Existing features that nearly do this, and why they fall short. This is the part
+        that most often shows the feature already exists under another name.
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        A note on scope, so a "no" is not a surprise: this project prefers the smallest
+        thing that solves the actual problem. Configurability, abstractions with one
+        implementation, and features added "in case we need to" are pushed back on by
+        design — see [`claude.md`](../../claude.md). A well-argued request for something
+        small is far likelier to land than a large one.
