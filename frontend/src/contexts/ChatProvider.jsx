@@ -657,6 +657,19 @@ export function ChatProvider({ children }) {
   socketRef.current = socket;
 
   /*
+   * Whether that socket is actually usable, for the same reason and by the same
+   * means as `socketRef`.
+   *
+   * The socket object exists while disconnected — SocketContext never nulls it —
+   * so `socketRef.current` being truthy says only that one was created. `sendMessage`
+   * needs the stronger question to decide between emitting and falling back to
+   * HTTP, and emitting into a disconnected socket buffers the payload until a 15s
+   * timeout rather than failing in a way a person can act on.
+   */
+  const isConnectedRef = React.useRef(isConnected);
+  isConnectedRef.current = isConnected;
+
+  /*
    * The current state, for actions that have to read it.
    *
    * Same reason as `socketRef`: `actions` is memoised once with `[]` so its identities
@@ -1528,8 +1541,6 @@ export function ChatProvider({ children }) {
       },
 
       sendMessage: async (messageData) => {
-        if (!socketRef.current) throw new Error("Socket not connected");
-
         // Build a proper optimistic message so sender/receiver objects exist
         // and the message renders on the correct side immediately.
         const optimistic = {
@@ -1550,7 +1561,67 @@ export function ChatProvider({ children }) {
 
         dispatch({ type: "ADD_MESSAGE", payload: optimistic });
         dispatch({ type: "CLEAR_REPLY_MESSAGE" });
-        return emitWithAck("sendMessage", messageData);
+
+        /*
+         * Socket first, HTTP when it isn't available.
+         *
+         * The guard used to be `if (!socketRef.current) throw` — so a dropped
+         * connection meant the message could not be sent at all, and the composer
+         * failed while `ReconnectBanner` only warned that messages would not
+         * *arrive*. An HTTP POST completes over a connection too unstable to hold
+         * a WebSocket, which is the ordinary state of a phone changing cells.
+         *
+         * `isConnectedRef` rather than `socketRef.current`, because a socket
+         * object exists while disconnected — SocketContext does not null it — and
+         * emitting into that buffers the message until a 15s timeout rather than
+         * failing usefully.
+         *
+         * Ordering is safe *because this is a fallback*: the two paths are never
+         * used at the same moment, so an HTTP send cannot overtake a socket send.
+         * If HTTP ever became primary, the thread would need sorting by
+         * `createdAt` instead of trusting arrival order.
+         */
+        if (socketRef.current && isConnectedRef.current) {
+          return emitWithAck("sendMessage", messageData);
+        }
+
+        try {
+          const reply = await chatAPI.sendMessage(messageData);
+
+          /*
+           * Settle the bubble through the same path the socket echo uses.
+           *
+           * `ADD_MESSAGE_IF_ACTIVE` already knows how to swap an optimistic row for
+           * a real one: it matches on `tempId`, and it *drops* `messageStatus` and
+           * `failedReason` rather than merging them — a plain merge would leave
+           * "sending" on the row forever and the tick would never appear. Reusing it
+           * means the HTTP path inherits that behaviour instead of reimplementing it
+           * slightly differently.
+           *
+           * There is no socket echo to do this here, because the socket is down —
+           * that is why this path ran at all.
+           */
+          if (reply?.message) {
+            dispatch({
+              type: "ADD_MESSAGE_IF_ACTIVE",
+              payload: { ...reply.message, tempId: messageData.tempId, isOwn: true },
+            });
+          }
+          return reply;
+        } catch (error) {
+          const reason = readableError(error, "Couldn't send — check your connection");
+          if (messageData.tempId) {
+            dispatch({
+              type: "UPDATE_MESSAGE",
+              payload: {
+                _id: messageData.tempId,
+                messageStatus: "failed",
+                failedReason: reason,
+              },
+            });
+          }
+          throw new Error(reason);
+        }
       },
 
       sendGroupMessage: async (messageData) => {

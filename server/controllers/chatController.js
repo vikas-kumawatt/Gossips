@@ -24,6 +24,9 @@ import {
 import { escapeRegex } from "../utils/respond.js";
 import { applyPollView, applyPollViews } from "../utils/pollView.js";
 import { signMedia, verifyMedia } from "../utils/mediaToken.js";
+// The single path that creates a direct message. The socket handler calls the
+// same function — see `sendMessage` at the end of this file.
+import { sendDirectMessage } from "../services/directMessage.js";
 import { parseReactionEmoji, parseSkinTone } from "../utils/reactions.js";
 import { isUnlockedForRequest, issueUnlockGrant } from "../utils/chatLock.js";
 import {
@@ -3170,7 +3173,94 @@ export const createPoll = async (req, res) => {
   }
 };
 
+/**
+ * POST /chats/messages — send a direct message over HTTP.
+ *
+ * A fallback for the socket, not a replacement. `socket.on("sendMessage")` stays
+ * the primary path and this changes nothing about it; both call the same
+ * `sendDirectMessage` service, in the same way, so there is one implementation of
+ * what sending a message means.
+ *
+ * ── Why it exists ───────────────────────────────────────────────────────────
+ *
+ * Sending was socket-only, so when the connection dropped a person could not
+ * send at all — `ReconnectBanner` told them messages would not *arrive*, while
+ * the composer silently also stopped working. That is a common state on a phone
+ * moving between cells, and an HTTP POST completes over a connection too unstable
+ * to hold a WebSocket open.
+ *
+ * It also picks up things the socket path does not have. Route middleware applies
+ * `requireActiveAccount` and `requireMessagingEnabled` before the handler runs,
+ * and `messageRateLimit` is keyed per user by `express-rate-limit` — where the
+ * socket's budgets are in-process maps that reset on restart and are not shared
+ * between instances. `/share`, `/forward` and `/polls` already create messages
+ * this way; this is the same shape.
+ *
+ * ── What it deliberately does not do ────────────────────────────────────────
+ *
+ * No `inSendOrder`. The socket serialises a user's sends so two in flight cannot
+ * commit out of order; two concurrent POSTs have no such guarantee. That is
+ * acceptable *because this is a fallback* — the client only uses it while the
+ * socket is down, so the two paths cannot interleave. If this ever became the
+ * primary path, the client would have to sort by `createdAt` rather than trusting
+ * arrival order.
+ *
+ * Direct messages only. Group sending still lives inline in `config/socket.js`
+ * and has no service to call; extracting it is a separate change.
+ */
+export const sendMessage = async (req, res) => {
+  try {
+    const result = await sendDirectMessage({
+      // From the session, never the body — the socket handler refuses a mismatched
+      // `senderId` for the same reason, and here there is nothing to compare.
+      senderId: req.user._id,
+      receiverId: req.body?.receiverId,
+      content: req.body?.content,
+      media: req.body?.media,
+      messageType: req.body?.messageType ?? "text",
+      replyTo: req.body?.replyTo,
+      /*
+       * The same optimistic id the socket sends as `tempId`, and the same job: the
+       * service treats it as an idempotency key, so a client retrying a request it
+       * never saw the response to gets the original message back rather than a
+       * duplicate. That is what makes this path safe to retry at all.
+       */
+      clientId: req.body?.tempId,
+      isEphemeral: req.body?.isEphemeral ?? false,
+      selfDestructTimer: req.body?.selfDestructTimer,
+      // Staff bypass the maintenance and feature-flag gate, as they do in middleware.
+      actorRole: req.user.role,
+    });
+
+    if (!result.ok) {
+      /*
+       * 403 for a refusal about *who* is involved — a block, or a privacy setting
+       * — and 400 for a malformed payload. The service returns one flat string, so
+       * the distinction is drawn here rather than by adding a status to every one
+       * of its return sites.
+       */
+      const forbidden = /blocked|don't accept|not allowed|Unauthorized/i.test(result.error || "");
+      return res.status(forbidden ? 403 : 400).json({ error: result.error });
+    }
+
+    /*
+     * `tempId` echoed back alongside the real id, matching the socket ack exactly,
+     * so the client settles an optimistic bubble the same way whichever path sent it.
+     */
+    return res.status(201).json({
+      tempId: req.body?.tempId,
+      messageId: result.message._id.toString(),
+      message: result.messageObject,
+      receiverOnline: result.receiverOnline,
+    });
+  } catch (error) {
+    console.error("sendMessage error:", error);
+    return res.status(500).json({ error: "Failed to send message" });
+  }
+};
+
 export default {
+  sendMessage,
   getMessages, getGroupMessages, getChats, getChatPreferences,
   createChatCategory, reorderChatCategories, deleteChatCategory, assignChatCategory,
   toggleFavoriteChat, updateChatTheme, setDisappearingForChat, updateChatState, setChatLockPin,

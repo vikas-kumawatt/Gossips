@@ -1,6 +1,7 @@
 import express from "express";
 import { protect } from "../middleware/authMiddleware.js";
 import {
+  sendMessage,
   getMessages,
   getGroupMessages,
   getChats,
@@ -220,6 +221,18 @@ router.post("/:chatId/archive", protect, preferenceRateLimit, archiveChat);
 router.delete("/:username", protect, preferenceRateLimit, deleteChat);
 
 // Message routes
+/*
+ * Sending, as a fallback for the socket.
+ *
+ * `canMessage` and `messageRateLimit` are the same guards `/share` and
+ * `/forward` use — both of which already create messages over HTTP. The socket
+ * remains the primary path and is unchanged; this exists so a dropped connection
+ * stops meaning "cannot send". See the note on the controller.
+ *
+ * Above `/messages/:username`, which is a GET, so there is no conflict — grouped
+ * here to keep the send and the read of a conversation adjacent.
+ */
+router.post("/messages", canMessage, messageRateLimit, sendMessage);
 router.get("/messages/:username", protect, readRateLimit, getMessages);
 router.get("/groups/:groupId/messages", protect, readRateLimit, getGroupMessages);
 router.post("/messages/mark-read", protect, readRateLimit, markMessagesAsRead);

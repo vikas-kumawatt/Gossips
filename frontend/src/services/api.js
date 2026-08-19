@@ -1049,8 +1049,20 @@ export const chatAPI = {
   discardChatMedia: (items) =>
     api.post("/chats/upload/discard", { items }).then((r) => r.data),
 
-  sendMessage: () =>
-    Promise.reject(new Error("Use socket for sending text messages")),
+  /*
+   * The HTTP fallback for sending a direct message.
+   *
+   * This used to reject outright — sending was socket-only, and the rejection was
+   * there to stop anyone reaching for the wrong path. It is now a real request to
+   * `POST /chats/messages`, which calls the same `sendDirectMessage` service the
+   * socket handler does.
+   *
+   * ChatProvider still prefers the socket and only calls this while the connection
+   * is down. `tempId` is the idempotency key: retrying a request whose response
+   * was never seen returns the original message rather than sending a second one.
+   */
+  sendMessage: (messageData) =>
+    api.post("/chats/messages", messageData).then((r) => r.data),
 
   /*
    * Two different actions, easy to confuse, so the names say which is which:

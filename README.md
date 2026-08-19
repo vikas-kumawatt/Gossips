@@ -467,8 +467,8 @@ token` message, clears the stored user instead.
 
 Exported namespaces: `authAPI`, `userAPI`, `postAPI`, `commentAPI`, `chatAPI`, `groupAPI`,
 `notificationAPI`, `searchAPI`, `hashtagAPI`, `shareAPI`, `reportAPI`, `scheduleAPI`,
-`attachmentAPI`, `botAPI`, `adminAPI`. `chatAPI.sendMessage` deliberately rejects with
-`"Use socket for sending text messages"`.
+`attachmentAPI`, `botAPI`, `adminAPI`. `chatAPI.sendMessage` posts to `/chats/messages` and is used
+by `ChatProvider` only when the socket is disconnected — see the note under the Chat endpoints.
 
 **State management.** Context + `useReducer`; no Redux, Zustand or React Query. Providers nest
 in `App.jsx` as `UserContext → SocketProvider → ChatProvider → CallProvider →
@@ -807,6 +807,7 @@ the 10-minute window passes or the row is gone.
 | GET | `/chats/` | Yes | Conversation list (cursor-paginated) |
 | GET | `/chats/unread-count` | Yes | Global unread count |
 | GET | `/chats/call/ice-servers` | Yes | STUN/TURN configuration for a call |
+| POST | `/chats/messages` | Yes | Send a direct message. Fallback for the socket — see the note below |
 | GET | `/chats/messages/:username` | Yes | DM thread |
 | GET | `/chats/groups/:groupId/messages` | Yes | Group thread |
 | POST | `/chats/messages/mark-read` | Yes | Mark messages read |
@@ -836,7 +837,18 @@ the 10-minute window passes or the row is gone.
 | POST | `/chats/:chatId/archive` | Yes | Archive |
 | DELETE | `/chats/:username` | Yes | Delete a conversation |
 
-> There is **no HTTP endpoint that sends a text message.** Sending is Socket.IO only.
+> **Sending is Socket.IO first, HTTP as a fallback.** `socket.on("sendMessage")` is the primary
+> path; `POST /chats/messages` exists so a dropped connection doesn't mean a message cannot be sent
+> at all. Both call the same `services/directMessage.js`, so there is one implementation of what
+> sending means. `tempId` doubles as the idempotency key, which is what makes an HTTP retry safe.
+>
+> The HTTP route deliberately has **no per-user send serialisation** — the socket's `inSendOrder`
+> guarantees two of a user's sends commit in order, and concurrent POSTs do not. That is acceptable
+> only because the client uses this path solely while the socket is down, so the two cannot
+> interleave. Making HTTP primary would require the client to sort by `createdAt`.
+>
+> **Group** messages remain socket-only: `sendGroupMessage` still lives inline in `config/socket.js`
+> with no service to call, so there is nothing for an HTTP route to delegate to yet.
 
 ### Groups — `/groups`
 
