@@ -2120,22 +2120,31 @@ bot action validator, CSP/CORS, or the SSRF checks on owner-supplied endpoints.
 
 ## License
 
-**Unresolved.** There is no `LICENSE` file, and the three `package.json` files disagree:
+**GNU Affero General Public License v3.0 only** (`AGPL-3.0-only`). See [LICENSE](./LICENSE).
 
-| File | `license` |
-| --- | --- |
-| `package.json` (root) | not declared |
-| `server/package.json` | `"ISC"` |
-| `frontend/package.json` | not declared |
+Copyright © 2026 vikas-kumawatt.
 
-`"ISC"` in `server/package.json` is npm's default for a scaffolded package rather than a considered
-choice, and an earlier README described the project as "proprietary and confidential unless otherwise
-stated" — which contradicts it outright.
+All three `package.json` files declare `"license": "AGPL-3.0-only"`. The `"ISC"` that was previously
+in `server/package.json` was npm's scaffolding default rather than a decision, and an earlier README
+described the project as "proprietary and confidential" — neither reflected any intent.
 
-Without a `LICENSE` file, default copyright applies: nobody has permission to use, copy, modify or
-distribute this code, whatever a `package.json` field says. That is a reasonable position to hold
-deliberately, and a bad one to hold by accident. Adding a `LICENSE` file — or a line stating the
-project is intentionally unlicensed — settles it either way.
+### What this means in practice
+
+- Anyone may read, fork, modify and self-host this code.
+- **Anyone who runs a modified version as a network service must publish their modifications**
+  under the same licence. That is the "Affero" clause, and it is the reason this licence rather
+  than MIT: Gossips is a hosted social network, so the case AGPL was written for — someone taking
+  the code, improving it, and running it as a closed service — is exactly the likely one.
+- Copyright stays with the author, who is not bound by the AGPL. Commercial or dual licensing
+  remains available without anyone's permission.
+
+### Section 13, and why the GitHub link in the UI matters
+
+AGPL §13 requires that users *interacting with the software over a network* be offered its source.
+`components/StarOnGithubCard.jsx`, rendered on the home feed, links to the repository — which is
+what satisfies this for the hosted deployment. **Do not remove it without replacing the offer
+elsewhere**, and if the running code ever diverges from what is published, the link has to point at
+the version actually being served.
 
 ---
 

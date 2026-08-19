@@ -21,8 +21,8 @@
     "bots:eval": "node bots/evals/run.mjs",
     "bots:eval:live": "node bots/evals/run.mjs --live"
   },
-  "author": "",
-  "license": "ISC",
+  "author": "vikas-kumawatt",
+  "license": "AGPL-3.0-only",
   "dependencies": {
     "@socket.io/redis-adapter": "^8.3.0",
     "bcrypt": "^5.1.1",
