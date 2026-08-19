@@ -9,6 +9,8 @@
     "start": "node server.js",
     "dev": "nodemon server.js",
     "make-admin": "node scripts/makeAdmin.js",
+    "avatars:fix": "node scripts/fixDefaultAvatars.js",
+    "avatars:fix:apply": "node scripts/fixDefaultAvatars.js --apply",
     "docs:purge:check": "node scripts/purgeDocumentMessages.js",
     "docs:purge": "node scripts/purgeDocumentMessages.js --apply",
     "bots:email-index:check": "node scripts/migrateBotEmailIndex.js",
