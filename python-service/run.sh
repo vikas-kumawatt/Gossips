@@ -15,6 +15,29 @@ set -euo pipefail
 # script was invoked. PM2 sets cwd, a hand-run `./run.sh` from elsewhere does not.
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Load .env, because nothing else does.
+#
+# `main.py` reads os.environ directly and `python-dotenv` is not a dependency, so
+# the .env file next to it is read by exactly nobody unless something exports it
+# first. Under systemd that was the unit file's job; under PM2 it was nobody's,
+# and the service came up with INTERNAL_SERVICE_SECRET unset — which makes it
+# answer every request with `503 {"detail": "Service not configured"}`. The bots
+# surfaced that as "A turn failed — Service not configured".
+#
+# The existing environment wins. A value supplied by the process manager, a
+# container, or the command line is deliberate; a file checked out on disk should
+# not silently override it. That also keeps the Docker image working, where the
+# variables arrive through `env_file` and no .env is present.
+if [ -f .env ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"                       # tolerate a CRLF checkout
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac  # ignore anything not KEY=VALUE
+    key="${line%%=*}"
+    [ -n "${!key:-}" ] || export "$line"
+  done < .env
+fi
+
 # The virtualenv's uvicorn, when there is one.
 #
 # On the EC2 host uvicorn lives in ./venv and is not on PATH — and a PM2 process
