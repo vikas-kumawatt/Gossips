@@ -940,19 +940,24 @@ export const googleLogin = async (req, res) => {
       });
       await UserSettings.create({ user: user._id });
     } else {
-      // update googleId and profile pic in place
+      // update googleId and profile pic (only if default) in place
+      const updateData = {
+        googleId: decodedToken.uid,
+        // Google has now proved the address, whatever the row said before.
+        isEmailVerified: true,
+      };
+
+      if (!user.profilePic || user.profilePic === DEFAULT_AVATAR_URL) {
+        if (picture) {
+          updateData.profilePic = picture;
+          user.profilePic = picture;
+        }
+      }
+
       await User.updateOne(
         { _id: user._id },
-        {
-          $set: {
-            googleId: decodedToken.uid,
-            profilePic: picture || user.profilePic,
-            // Google has now proved the address, whatever the row said before.
-            isEmailVerified: true,
-          },
-        },
+        { $set: updateData },
       );
-      user.profilePic = picture || user.profilePic;
     }
 
     /*
