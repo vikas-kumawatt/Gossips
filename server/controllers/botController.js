@@ -596,7 +596,7 @@ const botSummary = (bot, persona) => ({
 
 export const listBots = async (req, res) => {
   try {
-    const bots = await User.find({ owner: req.user.id, isBot: true })
+    const bots = await User.find({ owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } })
       .select("username name profilePic bio isPrivate apiKey createdAt")
       .sort({ createdAt: -1 })
       .lean();
@@ -638,7 +638,7 @@ export const getBot = async (req, res) => {
   try {
     if (!isId(req.params.id)) return fail(res, "Bot not found", 404);
 
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true })
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } })
       .select("username name profilePic bio isPrivate apiKey createdAt")
       .lean();
     if (!bot) return fail(res, "Bot not found", 404);
@@ -697,7 +697,7 @@ export const createBot = async (req, res) => {
     if (limit <= 0) {
       return fail(res, "Bot accounts are currently disabled", 403);
     }
-    const botCount = await User.countDocuments({ owner: req.user.id, isBot: true });
+    const botCount = await User.countDocuments({ owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } });
     if (botCount >= limit) {
       return fail(res, `You can have at most ${limit} bot${limit === 1 ? "" : "s"}`, 403);
     }
@@ -891,7 +891,7 @@ export const updateBot = async (req, res) => {
   try {
     if (!isId(req.params.id)) return fail(res, "Bot not found", 404);
 
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } });
     if (!bot) return fail(res, "Bot not found", 404);
 
     const body = req.body || {};
@@ -1129,7 +1129,7 @@ export const updateBotAvatar = async (req, res) => {
       return fail(res, "That file isn't an image");
     }
 
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true })
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } })
       .select("profilePic")
       .lean();
     if (!bot) {
@@ -1165,7 +1165,7 @@ export const deleteBot = async (req, res) => {
   try {
     if (!isId(req.params.id)) return fail(res, "Bot not found", 404);
 
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } });
     if (!bot) return fail(res, "Bot not found", 404);
 
     /*
@@ -1209,7 +1209,7 @@ export const getBotActivity = async (req, res) => {
   try {
     if (!isId(req.params.id)) return fail(res, "Bot not found", 404);
 
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true })
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } })
       .select("_id")
       .lean();
     if (!bot) return fail(res, "Bot not found", 404);
@@ -1265,7 +1265,7 @@ export const getBotActivity = async (req, res) => {
 
 export const getBotChats = async (req, res, next) => {
   try {
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } });
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
     // Stash original user and patch for getChats
@@ -1291,7 +1291,7 @@ export const getBotChats = async (req, res, next) => {
 
 export const getBotConversation = async (req, res, next) => {
   try {
-    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true });
+    const bot = await User.findOne({ _id: req.params.id, owner: req.user.id, isBot: true, accountStatus: { $ne: "deleted" } });
     if (!bot) return res.status(404).json({ error: "Bot not found" });
 
     // Stash original user and patch for getMessages
