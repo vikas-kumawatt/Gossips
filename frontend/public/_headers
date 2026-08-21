@@ -21,12 +21,21 @@
   Referrer-Policy: strict-origin-when-cross-origin
   Permissions-Policy: geolocation=(self), camera=(self), microphone=(self), payment=(), usb=(), interest-cohort=()
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  Content-Security-Policy: default-src 'self'; script-src 'self' https://www.gstatic.com; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://res.cloudinary.com https://*.giphy.com https://lh3.googleusercontent.com; media-src 'self' blob: https://res.cloudinary.com; font-src 'self' data:; connect-src 'self' __API_ORIGIN__ __API_WS_ORIGIN__ https://*.googleapis.com https://*.firebaseio.com https://fcmregistrations.googleapis.com https://www.gstatic.com https://res.cloudinary.com https://*.giphy.com https://lh3.googleusercontent.com; frame-src https://*.firebaseapp.com https://accounts.google.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests
+  Content-Security-Policy: default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://res.cloudinary.com https://*.giphy.com https://lh3.googleusercontent.com; media-src 'self' blob: https://res.cloudinary.com; font-src 'self' data:; connect-src 'self' __API_ORIGIN__ __API_WS_ORIGIN__ https://*.googleapis.com https://*.firebaseio.com https://fcmregistrations.googleapis.com https://www.gstatic.com https://res.cloudinary.com https://*.giphy.com https://lh3.googleusercontent.com; frame-src https://*.firebaseapp.com https://accounts.google.com; form-action 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; upgrade-insecure-requests
 
 # Notes on the individual directives, since several look wrong until you know why:
 #
 #   script-src includes www.gstatic.com because firebase-messaging-sw.js pulls the
-#     Firebase compat SDK over importScripts. It is the only third-party script.
+#     Firebase compat SDK over importScripts.
+#
+#     apis.google.com is there for Google sign-in, and it is not optional even
+#     though the code calls signInWithPopup rather than signInWithRedirect. The
+#     popup resolver still initialises Firebase's auth event manager, which loads
+#     the gapi loader (apis.google.com/js/api.js) to host the
+#     <authDomain>/__/auth/iframe bridge that carries the popup's result back.
+#     Without this entry the load is blocked and sign-in fails before the popup
+#     can report anything — the console shows the violation, not an auth error.
+#     The iframe itself is covered by frame-src's *.firebaseapp.com.
 #
 #   style-src needs 'unsafe-inline'. Framer Motion writes animated values to the
 #     style attribute on every frame, and there is no nonce that survives that.
