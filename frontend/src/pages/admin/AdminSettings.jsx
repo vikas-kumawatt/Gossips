@@ -35,6 +35,32 @@ const TOGGLES = [
       { key: "directMessagesEnabled", label: "Direct messages", hint: "Allow new DMs to be sent." },
     ],
   },
+  {
+    group: "Bots",
+    items: [
+      {
+        key: "botsEnabled",
+        label: "Bots",
+        hint: "When off, bot cycles stop and no new bots can be created. Existing bots and their posts stay.",
+      },
+      {
+        /*
+         * The one setting that decides whether this server will make an authenticated request to a
+         * host an owner named, rather than one from the provider table. Off by default, and marked
+         * dangerous because turning it on is a real change in what the server does — see the SSRF
+         * notes in bots/selfHosted.js for what is and isn't defended once it's on.
+         *
+         * It was absent from this page until the OpenAI-compatible gateway provider needed it, which
+         * made that provider unusable with no visible reason: an owner pasting a gateway URL got
+         * "Choose one of the endpoints offered by this server" and no server offered any.
+         */
+        key: "botAllowCustomEndpoints",
+        label: "Owner-supplied bot endpoints",
+        hint: "Lets owners point a self-hosted or gateway key at their own https endpoint. Private and reserved addresses are still refused.",
+        danger: true,
+      },
+    ],
+  },
 ];
 
 const NUMBERS = [
