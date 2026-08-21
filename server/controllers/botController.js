@@ -116,13 +116,36 @@ export const addApiKey = async (req, res) => {
     // branch below. Undefined for the fixed provider table, which resolves
     // normally.
     let endpointAddresses;
+    /*
+     * The model to verify against, for an endpoint that serves no model list.
+     *
+     * Optional, and only meaningful for a provider whose endpoint the owner supplied — which is why
+     * it is read inside this branch rather than beside `provider`. A hosted provider reaching
+     * `checkProviderKey` with one would be a value that could never be used.
+     */
+    let probeModel;
     if (needsEndpoint(provider)) {
       const settings = await getSettings();
       const published = settings?.botSelfHostedEndpoints || [];
       const requested = typeof req.body?.baseUrl === "string" ? req.body.baseUrl.trim() : "";
 
       if (!requested) {
-        return fail(res, "Choose an endpoint for this self-hosted provider");
+        return fail(res, `Choose an endpoint for ${providerOf(provider).label}`);
+      }
+
+      const requestedModel =
+        typeof req.body?.probeModel === "string" ? req.body.probeModel.trim() : "";
+      if (requestedModel) {
+        /*
+         * Checked against the provider's ceiling here, before it is put in a request body. It is
+         * only ever sent to the endpoint the owner nominated, so this is not a privilege boundary —
+         * but it is a value from a request that ends up in JSON we sign with their key, and the
+         * ceiling is the bound that already exists for exactly that.
+         */
+        if (!modelAllowedFor(provider, requestedModel)) {
+          return fail(res, "That doesn't look like a model id");
+        }
+        probeModel = requestedModel;
       }
 
       const normalised = checkEndpointShape(requested, ENDPOINT_SOURCE.OPERATOR);
@@ -149,6 +172,14 @@ export const addApiKey = async (req, res) => {
        * future caller might start honouring, which is how a validated URL becomes an arbitrary one.
        */
       return fail(res, "That provider's endpoint isn't configurable");
+    } else if (req.body?.probeModel) {
+      /*
+       * The same reasoning, so the same treatment. A hosted provider's key is verified against its
+       * own model list and never by a completion, so a `probeModel` here is a field that would be
+       * silently dropped — and the argument above is precisely that silently dropping one is how it
+       * comes to be honoured later.
+       */
+      return fail(res, "That provider doesn't need a model to verify against");
     }
 
     /*
@@ -171,6 +202,7 @@ export const addApiKey = async (req, res) => {
     const check = await checkProviderKey(provider, plaintext, {
       baseUrl: endpoint,
       addresses: endpointAddresses,
+      probeModel,
     });
     if (check.status === "invalid") {
       return fail(res, check.reason || "The provider rejected this key");
@@ -205,6 +237,12 @@ export const addApiKey = async (req, res) => {
        */
       availableModels: check.models,
       modelsFetchedAt: check.models.length ? new Date() : null,
+      /*
+       * Only set when a completion is what proved the key — `checkProviderKey` reports which, rather
+       * than leaving us to infer it from the shape of the models list. Empty for everything verified
+       * the ordinary way, which is what revalidation then keys off.
+       */
+      probedModel: check.probedModel || "",
     });
 
     return created(res, { key: apiKey.toOwnerView() });
@@ -385,6 +423,20 @@ export const revalidateApiKey = async (req, res) => {
     const check = await checkProviderKey(apiKey.provider, plaintext, {
       baseUrl: apiKey.baseUrl,
       addresses: endpointAddresses,
+      /*
+       * The model to fall back to, for an endpoint with no `/models` route. Only ever the one a
+       * completion already succeeded against, so the owner is not asked to re-answer a question they
+       * answered when they added the key.
+       *
+       * It was `availableModels?.[0]` first, and that was wrong twice over. It is set for every
+       * provider, so an Anthropic key whose `/models` briefly 404'd got an OpenAI-shaped completion
+       * request and came back `invalid` — a working key marked dead, its bots paused. And for a
+       * self-hosted key with a real discovered catalogue it is the alphabetically-first entry, which
+       * is not a model anyone claimed this key could serve. `probedModel` is empty unless a
+       * completion is what verified the key, so both cases now send nothing and take the ordinary
+       * path. `checkProviderKey` refuses it for a table-URL provider regardless.
+       */
+      probeModel: apiKey.probedModel || undefined,
     });
 
     // `unknown` leaves the stored state untouched — see providerKeyCheck.js.
@@ -404,6 +456,20 @@ export const revalidateApiKey = async (req, res) => {
     if (check.models.length) {
       apiKey.availableModels = check.models;
       apiKey.modelsFetchedAt = new Date();
+    }
+    /*
+     * Kept in step, but never blanked on a failure.
+     *
+     * A gateway that starts serving `/models` should stop being probed by completion, so a valid
+     * check with a real list clears this. A completion that verified the key records what it used.
+     * Everything else — a 429, a refused model, a plan the owner is about to fix — leaves it alone,
+     * because clearing it would leave the next revalidate with nothing to probe and turn a
+     * retryable failure into "name a model" for a key that already named one.
+     */
+    if (check.probedModel) {
+      apiKey.probedModel = check.probedModel;
+    } else if (check.status === "valid" && check.models.length) {
+      apiKey.probedModel = "";
     }
     await apiKey.save();
 

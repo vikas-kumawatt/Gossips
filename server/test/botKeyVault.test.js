@@ -178,20 +178,26 @@ test("THE POINT: every provider's key shape is scrubbed, not just Anthropic's", 
   /*
    * The prefix-less providers, listed by name so adding one is a decision rather than a default.
    *
-   * It has already done its job once: `self_hosted` arrived in the next phase and this assertion
-   * failed, which is exactly the prompt it exists to give. Both entries are legitimate — Alibaba
-   * issues keys with no distinguishing prefix, and a local runtime usually ignores the key entirely,
-   * so its value is often a placeholder.
+   * It has already done its job twice: `self_hosted` arrived in the next phase and this assertion
+   * failed, then `openai_compatible` did the same. All three entries are legitimate — Alibaba issues
+   * keys with no distinguishing prefix, a local runtime usually ignores the key entirely so its value
+   * is often a placeholder, and a gateway reissues its own credential in whatever shape it likes
+   * (usually `sk-…`, which is three other providers' shape and therefore no evidence at all).
    *
-   * Neither is covered by pattern matching, and that is accepted rather than papered over: a
+   * None is covered by pattern matching, and that is accepted rather than papered over: a
    * catch-all broad enough to match them also eats request ids and ciphertext out of `statusReason`,
    * which is shown to owners. The other two defences carry them — `select: false` and the `toJSON`
    * strip — and for a self-hosted placeholder there is usually no secret to leak in the first place.
+   *
+   * The gateway case is the one worth a second thought, because unlike a placeholder it is a real
+   * credential with real money behind it. It is covered in practice anyway: a gateway key that
+   * happens to be `sk-…` matches OpenAI's pattern, which is in this union — so it is scrubbed by
+   * somebody else's rule rather than its own.
    */
   const prefixless = PROVIDER_IDS.filter((id) => !PROVIDERS[id].keyShape).sort();
   assert.deepEqual(
     prefixless,
-    ["qwen", "self_hosted"],
+    ["openai_compatible", "qwen", "self_hosted"],
     "a new prefix-less provider needs a decision, not a default"
   );
 });

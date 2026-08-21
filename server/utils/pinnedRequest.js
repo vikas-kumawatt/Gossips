@@ -3,7 +3,7 @@ import http from "node:http";
 import net from "node:net";
 
 /**
- * An HTTPS GET that connects to a pre-validated address.
+ * An HTTPS request that connects to a pre-validated address.
  *
  * ── The gap this closes ─────────────────────────────────────────────────────
  *
@@ -79,21 +79,29 @@ const pinnedLookup = (addresses) => (hostname, options, callback) => {
 };
 
 /**
- * GET `url`, optionally pinned to `addresses`.
+ * Request `url`, optionally pinned to `addresses`.
  *
  * @param {string} url
  * @param {object} options
+ * @param {"GET"|"POST"} [options.method]
  * @param {Record<string,string>} [options.headers]
+ * @param {object} [options.body]
+ *   Sent as JSON. Only the POST probe uses it; `content-type` is set here rather
+ *   than left to every caller to remember.
  * @param {string[]} [options.addresses]
  *   Validated addresses for the URL's host. Omitted — as it is for the fixed
  *   provider table, whose hostnames are ours to trust — resolution is ordinary.
  * @param {number} [options.timeoutMs]
- * @returns {Promise<{ok: boolean, status: number, json: () => any}>}
+ * @returns {Promise<{ok: boolean, status: number, text: string, json: () => any}>}
  *   The subset of `Response` that `providerKeyCheck.js` uses. `json()` is
  *   synchronous over an already-buffered body and throws on non-JSON, matching
- *   how the caller treats it.
+ *   how the caller treats it. `text` is exposed as well because a body that is
+ *   *not* JSON is itself a signal — see the WAF note in `providerKeyCheck.js`.
  */
-export const pinnedGet = (url, { headers = {}, addresses, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) =>
+export const pinnedRequest = (
+  url,
+  { method = "GET", headers = {}, body, addresses, timeoutMs = DEFAULT_TIMEOUT_MS } = {}
+) =>
   new Promise((resolve, reject) => {
     let target;
     try {
@@ -122,11 +130,15 @@ export const pinnedGet = (url, { headers = {}, addresses, timeoutMs = DEFAULT_TI
     const succeed = finish(resolve);
     const die = finish(reject);
 
+    const payload = body === undefined ? null : Buffer.from(JSON.stringify(body), "utf8");
+
     const request = transport.request(
       target,
       {
-        method: "GET",
-        headers,
+        method,
+        headers: payload
+          ? { ...headers, "content-type": "application/json", "content-length": payload.length }
+          : headers,
         ...(pinning ? { lookup: pinnedLookup(addresses) } : {}),
         /*
          * A dedicated agent whenever pinning, and this is not optional.
@@ -178,6 +190,7 @@ export const pinnedGet = (url, { headers = {}, addresses, timeoutMs = DEFAULT_TI
           succeed({
             ok: status >= 200 && status < 300,
             status,
+            text,
             json: () => JSON.parse(text),
           });
         });
@@ -193,5 +206,11 @@ export const pinnedGet = (url, { headers = {}, addresses, timeoutMs = DEFAULT_TI
     }, timeoutMs);
 
     request.on("error", die);
-    request.end();
+    request.end(payload ?? undefined);
   });
+
+/** The two shapes anyone needs, so no caller has to spell out `method`. */
+export const pinnedGet = (url, options = {}) => pinnedRequest(url, { ...options, method: "GET" });
+
+export const pinnedPost = (url, body, options = {}) =>
+  pinnedRequest(url, { ...options, method: "POST", body });

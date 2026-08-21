@@ -83,12 +83,28 @@ const apiKeySchema = new Schema(
     modelsFetchedAt: { type: Date, default: null },
 
     /*
-     * The endpoint, for the one provider whose URL is not in the table.
+     * The model a completion actually succeeded against, for the endpoints that publish no list.
+     *
+     * Empty for every key verified the normal way, which is nearly all of them. Some third-party
+     * OpenAI-compatible gateways serve no `/models` route — or answer it with a WAF page — so the
+     * only way to prove such a key works is a one-token completion, and that needs a model id.
+     *
+     * Stored because revalidation needs the same id again, and the alternative was inferring it from
+     * `availableModels[0]`. That looked equivalent and wasn't: for any key with a discovered
+     * catalogue it is the alphabetically-first entry, which nobody claimed this key could reach, and
+     * probing it turned a transient failure into a key marked invalid. What was verified is worth
+     * recording rather than guessing at later.
+     */
+    probedModel: { type: String, default: "" },
+
+    /*
+     * The endpoint, for the providers whose URL is not in the table.
      *
      * Empty for every hosted provider, and that is enforced rather than assumed — a `baseUrl` on an
      * Anthropic key would be a field the caller might one day start honouring, which is how a
-     * validated URL turns back into an arbitrary one. Only `self_hosted` may carry it, and only after
-     * `bots/selfHosted.js` has cleared it.
+     * validated URL turns back into an arbitrary one. Only a provider with no URL in the table may
+     * carry it — `self_hosted` and `openai_compatible` — and only after `bots/selfHosted.js` has
+     * cleared it.
      */
     baseUrl: { type: String, default: "" },
 

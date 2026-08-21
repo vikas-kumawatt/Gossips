@@ -9,21 +9,24 @@
  *
  * The wire format is what actually differs, and most providers share one. OpenAI, xAI, Groq,
  * DeepSeek, Moonshot and Alibaba all speak the OpenAI `chat/completions` shape, so `openai` is one
- * adapter serving six providers — and any future provider that speaks it needs a row here and no
- * code at all. Anthropic and Gemini get their own because their tool-calling config genuinely
+ * adapter serving most of this table — and any future provider that speaks it needs a row here and
+ * no code at all. Anthropic and Gemini get their own because their tool-calling config genuinely
  * differs.
  *
- * ── The base URL never comes from the owner ─────────────────────────────────
+ * ── The base URL does not come from the owner unchecked ─────────────────────
  *
- * An owner picks a provider from this enum; the URL is looked up here. That is not a convenience,
- * it is the SSRF defence: if an owner could type a URL, our server would make authenticated
- * requests to it, and `http://169.254.169.254/` is cloud-metadata credentials while
+ * For all but two providers an owner picks from this enum and the URL is looked up here. That is not
+ * a convenience, it is the SSRF defence: if an owner could type a URL, our server would make
+ * authenticated requests to it, and `http://169.254.169.254/` is cloud-metadata credentials while
  * `http://127.0.0.1:27017` is a port scan of our own host from inside the perimeter.
  *
- * It is also exactly why self-hosted endpoints — Ollama, LM Studio, vLLM — are a separate phase
- * rather than another row. They are the one case where the URL *must* come from the owner, and
- * doing that safely needs scheme allowlisting, private-range rejection after DNS resolution to
- * defeat rebinding, and no redirect following. That is a different piece of work from an adapter.
+ * The two exceptions — `self_hosted` for a local runtime, `openai_compatible` for a third-party
+ * gateway — are the cases where the URL *must* come from outside this file, and they were deferred
+ * to their own phase precisely because doing it safely is a different piece of work from an adapter:
+ * scheme allowlisting, private-range rejection after DNS resolution, connecting to the address that
+ * was checked so the name cannot be re-resolved in between, and no redirect following. All of that
+ * lives in `bots/selfHosted.js` and `utils/pinnedRequest.js`; a `baseUrl` of `null` here is the flag
+ * that says a row goes through it. Every other row's URL is still a constant, and still ours.
  *
  * ── Forced tool use is not optional ─────────────────────────────────────────
  *
@@ -267,6 +270,80 @@ export const PROVIDERS = {
     keyUrl: "https://docs.ollama.com/openai",
   },
 
+  /*
+   * Any third-party gateway that speaks the OpenAI `chat/completions` shape: AgentRouter,
+   * OpenRouter, Together, Fireworks, a self-run LiteLLM proxy.
+   *
+   * The second provider whose `baseUrl` comes from outside this table, and it exists because the
+   * alternative is a row per gateway forever. There are dozens, they appear faster than deploys, and
+   * a curated list's failure mode is an owner holding a working key we refuse to accept.
+   *
+   * ── Why this is not the SSRF hole the table exists to prevent ───────────────
+   *
+   * It reuses `self_hosted`'s machinery unchanged, which means the same operator/owner fork in
+   * `botController.addApiKey` rather than the owner half alone. A URL the operator published in
+   * `AppSettings` is theirs — `http` and private addresses allowed, because they own the network and
+   * there is no privilege to escalate. Anything else is owner-supplied and gets the full check: https
+   * only, no credentials in the URL, every resolved address must be public, and the socket connects
+   * to an address that was validated rather than re-resolving the name (`utils/pinnedRequest.js`).
+   *
+   * A gateway *is* a public internet endpoint, so unlike Ollama it has no legitimate reason to
+   * resolve privately, and the owner path's rules are exactly right for it rather than a compromise.
+   *
+   * The owner path is behind `botAllowCustomEndpoints`, off by default. An operator who does not want
+   * their server making authenticated requests to owner-named hosts does not have to.
+   *
+   * ── What is knowingly weaker than a first-party provider ───────────────────
+   *
+   * `forcesToolUse` is `true` for the *wire format* and unverifiable for the route behind it. A
+   * gateway may silently substitute a model, may not forward `tool_choice`, and may serve a model
+   * that cannot honour it. All three fail the same safe way — no tool block is an empty decision,
+   * which the runner records as `do_nothing` — but an owner should expect a less reliable bot here
+   * than on a direct key, and the activity log is where that shows up.
+   *
+   * Not solved here: the reasoning path hands `base_url` to the Python service as a string, and
+   * `providers.py:endpoint_allowed()` matches the literal hostname without resolving, so the rebind
+   * gap documented in `bots/selfHosted.js` applies to this provider too.
+   */
+  openai_compatible: {
+    id: "openai_compatible",
+    label: "OpenAI-compatible gateway",
+    adapter: "openai",
+    // Resolved per key, from the owner or the operator. Never from a request body unchecked.
+    baseUrl: null,
+    auth: AUTH_STYLES.BEARER,
+    /*
+     * `none`, and this is load-bearing rather than a shrug.
+     *
+     * A gateway reissues its own credentials and most of them are `sk-…`, which is also OpenAI's,
+     * DeepSeek's and Moonshot's shape. Declaring a pattern here would make every gateway key look
+     * like it belongs to somebody else — see the note in `providerKeyCheck`, which is why a
+     * shapeless provider is now exempt from that cross-provider refusal rather than defeated by it.
+     */
+    keyShape: KEY_SHAPES.none,
+    forcesToolUse: true,
+    modelsPath: "/models",
+    /*
+     * As loose as `self_hosted`'s, because a gateway serves every vendor's catalogue: `gpt-4o`,
+     * `claude-opus-4-6`, `glm-4.5-air`, `meta-llama/llama-3.3-70b`. A prefix would be a guess about
+     * which upstreams the gateway happens to carry today.
+     *
+     * The real constraint is the discovered list from `/models`, or — for a gateway that does not
+     * serve one — the single model the owner proved reachable when they added the key.
+     *
+     * No colon, unlike `self_hosted`'s otherwise identical pattern. `providers.py:model_allowed`
+     * bounds a prefix-less provider by the character set `alnum . _ - /`, which has never included
+     * one, so a colon accepted here would be refused there — a 422 from the reasoning service for an
+     * id this file had already approved, which is an error the owner cannot act on. Matching the
+     * narrower side is the version that cannot produce that. (`self_hosted` has the same divergence
+     * and has had it since it was added; it is left alone rather than fixed by widening, because
+     * loosening a ceiling is not a change to make in passing.)
+     */
+    modelCeiling: /^[a-z0-9][a-z0-9._\-/]{1,90}$/i,
+    // No single sign-up page: the gateway is whichever one the owner chose.
+    keyUrl: "",
+  },
+
   qwen: {
     id: "qwen",
     label: "Alibaba Qwen",
@@ -289,7 +366,7 @@ export const DEFAULT_PROVIDER = "anthropic";
 
 export const providerOf = (id) => PROVIDERS[id] || null;
 
-/** Providers whose endpoint is supplied rather than looked up. Currently exactly one. */
+/** Providers whose endpoint is supplied rather than looked up. */
 export const needsEndpoint = (id) => PROVIDERS[id]?.baseUrl === null;
 
 /**
@@ -309,12 +386,18 @@ export const baseUrlFor = (apiKey) => {
 
 /**
  * What an owner is shown when choosing a provider. No URLs, no regexes — those are ours.
+ *
+ * `needsEndpoint` rides along because the form has to know whether to show the endpoint field, and
+ * the client used to answer that by comparing against the string `"self_hosted"`. That was correct
+ * for exactly as long as there was one such provider, and it made adding a second one a hunt for
+ * string literals across two languages. Derived from the table, it cannot go stale.
  */
 export const listProvidersForOwner = () =>
   PROVIDER_IDS.map((id) => ({
     id,
     label: PROVIDERS[id].label,
     keyUrl: PROVIDERS[id].keyUrl,
+    needsEndpoint: needsEndpoint(id),
   }));
 
 /**

@@ -32,7 +32,13 @@ const BotKeysPage = () => {
   const [endpoints, setEndpoints] = useState({ offered: [], allowCustom: false });
 
   const [adding, setAdding] = useState(false);
-  const [form, setForm] = useState({ key: "", label: "", provider: "anthropic", baseUrl: "" });
+  const [form, setForm] = useState({
+    key: "",
+    label: "",
+    provider: "anthropic",
+    baseUrl: "",
+    probeModel: "",
+  });
   const [saving, setSaving] = useState(false);
 
   const [busyId, setBusyId] = useState(null);
@@ -62,7 +68,12 @@ const BotKeysPage = () => {
 
   const set = (name) => (event) => setForm((c) => ({ ...c, [name]: event.target.value }));
   const chosen = providers.find((p) => p.id === form.provider);
-  const needsEndpoint = form.provider === "self_hosted";
+  /*
+   * From the server's table, not a comparison against an id. This used to be
+   * `form.provider === "self_hosted"`, which was true for as long as one provider took an
+   * endpoint and silently wrong the moment a second one did.
+   */
+  const needsEndpoint = Boolean(chosen?.needsEndpoint);
   const providerLabel = (id) => providers.find((p) => p.id === id)?.label || id;
 
   const act = async (id, work, done) => {
@@ -89,14 +100,16 @@ const BotKeysPage = () => {
         key: form.key.trim(),
         label: form.label.trim(),
         provider: form.provider,
-        // Only ever sent for the self-hosted provider; the server refuses it for any other.
-        ...(needsEndpoint ? { baseUrl: form.baseUrl.trim() } : {}),
+        // Only ever sent for a provider that takes an endpoint; the server refuses both for any other.
+        ...(needsEndpoint
+          ? { baseUrl: form.baseUrl.trim(), probeModel: form.probeModel.trim() }
+          : {}),
       });
       /*
        * Cleared the moment it succeeds. The value has done its only job, and a form that keeps it
        * around is a credential sitting in a React tree for as long as the tab is open.
        */
-      setForm({ key: "", label: "", provider: form.provider, baseUrl: "" });
+      setForm({ key: "", label: "", provider: form.provider, baseUrl: "", probeModel: "" });
       setAdding(false);
       toast.success("Key added — Gossips can't show it again, so keep your own copy");
       await load({ quiet: true });
@@ -187,15 +200,39 @@ const BotKeysPage = () => {
                     )}
                     {!endpoints.offered.length && !endpoints.allowCustom && (
                       <span className="text-[12px] text-amber-400">
-                        This server doesn't offer any self-hosted endpoints. Choose another provider.
+                        This server doesn't accept custom endpoints. Choose another provider.
                       </span>
                     )}
                     {endpoints.allowCustom && (
                       <span className="text-[12px] leading-relaxed text-neutral-500">
                         Must be https and reachable from the internet — an address on your own machine
-                        isn't reachable from this server.
+                        isn't reachable from this server. Include the version path, e.g.{" "}
+                        <span className="font-mono">https://agentrouter.org/v1</span>.
                       </span>
                     )}
+                  </label>
+                )}
+
+                {/* Only for an endpoint the owner named, and only ever used if that endpoint has no
+                    model list to read. See the note on `chatProbe` in utils/providerKeyCheck.js. */}
+                {needsEndpoint && (
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-[13px] text-neutral-400">
+                      Model to verify with <span className="text-neutral-600">(optional)</span>
+                    </span>
+                    <input
+                      type="text"
+                      value={form.probeModel}
+                      onChange={set("probeModel")}
+                      spellCheck="false"
+                      placeholder="claude-opus-4-6"
+                      className={`${field} font-mono`}
+                    />
+                    <span className="text-[12px] leading-relaxed text-neutral-500">
+                      Most endpoints publish their own model list and this can stay empty. Some
+                      gateways don't — for those, name one model your plan covers and we'll send it a
+                      one-token request to check the key works.
+                    </span>
                   </label>
                 )}
 

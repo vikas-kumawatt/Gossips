@@ -85,7 +85,7 @@ class _ProviderRequest(BaseModel):
     """
     provider: str = Field(default=DEFAULT_PROVIDER)
 
-    """The endpoint, for the self-hosted provider only.
+    """The endpoint, for the providers whose URL is not in the table.
 
     Absent for every hosted provider, whose URL comes from this service's own table. Present here it
     is still not trusted — `providers.endpoint_allowed` checks it before a request is built.

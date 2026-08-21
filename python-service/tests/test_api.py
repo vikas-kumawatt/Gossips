@@ -207,7 +207,7 @@ def test_a_model_is_checked_against_its_own_provider(monkeypatch):
         )
         assert response.status_code == 200, f"{provider}/{model}"
 
-    # Crossed over, each provider refuses another's model — with one honest exception.
+    # Crossed over, each provider refuses another's model — with the honest exceptions.
     #
     # Groq is excluded, and not because the check is weak there. Groq serves other people's models, so
     # it has no prefix to check against and a legitimate id can look like anything; its ceiling is a
@@ -216,8 +216,14 @@ def test_a_model_is_checked_against_its_own_provider(monkeypatch):
     #
     # The first version of this test asserted Groq refused it too, which was the test over-claiming
     # rather than the code under-delivering.
+    #
+    # `openai_compatible` is excluded for the same reason and more so: a gateway's whole purpose is
+    # serving every vendor's catalogue, so `gemini-2.0-flash` on one is not a mistake to catch. It is
+    # absent from `accepted` too, because it needs a `base_url` the other rows don't — the test below
+    # covers it.
+    prefixless = {"groq", "openai_compatible"}
     for provider, _model in accepted:
-        if provider == "groq":
+        if provider in prefixless:
             continue
         wrong = "gemini-2.0-flash" if provider != "google" else "claude-sonnet-5"
         response = client.post(
@@ -226,6 +232,53 @@ def test_a_model_is_checked_against_its_own_provider(monkeypatch):
             headers={"x-internal-secret": SECRET},
         )
         assert response.status_code == 422, f"{provider} must refuse {wrong}"
+
+
+def test_a_gateway_needs_an_endpoint_and_a_fixed_provider_refuses_one(monkeypatch):
+    """The two halves of `base_url`, asserted together because they are one rule read both ways.
+
+    `openai_compatible` is the second provider whose URL arrives per request, and the first whose
+    hostname is a real public one rather than somebody's LAN. Its catalogue is every vendor's, so the
+    model check cannot carry any weight here — which makes the endpoint rules the only thing standing
+    between a request body and an authenticated call. Both directions matter: a gateway without a URL
+    must be refused rather than defaulted, and a URL against a provider we already know the address of
+    must be refused rather than honoured, because a `base_url` that is quietly ignored is a `base_url`
+    some later version starts using.
+    """
+    monkeypatch.setattr(main, "_call_model", fake_model({"actions": [{"type": "do_nothing"}]}))
+
+    def post(**over):
+        return client.post(
+            "/decide", json=body(**over), headers={"x-internal-secret": SECRET}
+        )
+
+    # A gateway model on a gateway, with an endpoint. `claude-opus-4-6` is not a typo for an
+    # Anthropic id — it is what AgentRouter calls the model it proxies, and the point is that the
+    # provider serving it is the gateway, not Anthropic.
+    assert (
+        post(
+            provider="openai_compatible",
+            model="claude-opus-4-6",
+            base_url="https://agentrouter.org/v1",
+        ).status_code
+        == 200
+    )
+    # Its catalogue really is open: an id from any upstream is legitimate on a gateway.
+    assert (
+        post(
+            provider="openai_compatible",
+            model="gpt-4o",
+            base_url="https://agentrouter.org/v1",
+        ).status_code
+        == 200
+    )
+    # No endpoint, no call.
+    assert post(provider="openai_compatible", model="gpt-4o").status_code == 422
+    # And the mirror: a provider whose URL is in the table does not take one.
+    assert (
+        post(provider="openai", model="gpt-4o", base_url="https://agentrouter.org/v1").status_code
+        == 422
+    )
 
 
 def test_an_unknown_provider_is_refused(monkeypatch):

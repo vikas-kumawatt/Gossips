@@ -1,4 +1,5 @@
 import { redact } from "../utils/keyVault.js";
+import { needsEndpoint } from "./providers.js";
 
 /**
  * The only thing in Node that talks to the Python reasoning service.
@@ -233,11 +234,15 @@ export const decide = ({ bot, persona, perception, memory, apiKey, provider, bas
     memory: memory ?? { self: "", about: {} },
     /*
      * The provider, so the service knows which wire format to use. For every hosted provider it also
-     * knows the endpoint, from its own copy of the table — a URL is only sent for the self-hosted
-     * one, and only after `bots/selfHosted.js` has cleared it.
+     * knows the endpoint, from its own copy of the table — a URL is only sent for the providers whose
+     * endpoint is supplied, and only after `bots/selfHosted.js` has cleared it.
+     *
+     * `needsEndpoint` rather than a comparison against `"self_hosted"`: the service refuses a URL for
+     * a provider that has one in its table, so a literal that missed a second such provider would
+     * have sent the URL for neither and produced a 422 the owner cannot act on.
      */
     provider,
-    base_url: provider === "self_hosted" ? baseUrl : undefined,
+    base_url: needsEndpoint(provider) ? baseUrl : undefined,
     model: persona?.model,
     api_key: apiKey,
   });
@@ -264,7 +269,7 @@ export const replyToConversation = ({
     conversation,
     memory: memory ?? { self: "", about: {} },
     provider,
-    base_url: provider === "self_hosted" ? baseUrl : undefined,
+    base_url: needsEndpoint(provider) ? baseUrl : undefined,
     model: persona?.replyModel,
     api_key: apiKey,
   });

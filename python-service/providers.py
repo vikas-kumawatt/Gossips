@@ -1,4 +1,4 @@
-"""Three wire formats, eight providers, one error taxonomy.
+"""Three wire formats, ten providers, one error taxonomy.
 
 Every provider this service talks to is reached over plain ``httpx``. That is a deliberate
 replacement for the Anthropic SDK, and the reason is the error mapping rather than the request:
@@ -10,8 +10,9 @@ failed. One HTTP status table is a smaller thing to get right.
 ── Three adapters ───────────────────────────────────────────────────────────
 
 * ``anthropic`` — ``POST /messages``, ``tool_choice: {"type": "tool"}``
-* ``openai`` — ``POST /chat/completions``, and six providers speak it: OpenAI, xAI, Groq,
-  DeepSeek, Moonshot, Alibaba. A provider added to the table below with this adapter needs no code.
+* ``openai`` — ``POST /chat/completions``, and eight providers speak it: OpenAI, xAI, Groq,
+  DeepSeek, Moonshot, Alibaba, a self-hosted runtime and any third-party gateway. A provider added
+  to the table below with this adapter needs no code.
 * ``gemini`` — ``POST /models/{model}:generateContent``, ``toolConfig.functionCallingConfig``
 
 ── The table is here as well as in Node, on purpose ─────────────────────────
@@ -22,8 +23,12 @@ compromised or buggy Node cannot spend an owner's key on an arbitrary model, and
 service at an arbitrary host. A ``base_url`` accepted from the request body would be the SSRF hole
 the Node-side table exists to close, reopened one process later.
 
-``tests/test_providers.py`` parses ``server/bots/providers.js`` and asserts the two agree, which is
-the same arrangement that keeps ``tools.py`` and ``actionValidator.js`` in step.
+Nothing currently enforces that agreement. This docstring used to claim ``tests/test_providers.py``
+parses ``server/bots/providers.js`` and asserts the two tables match; that file has never existed, so
+the claim was doing the opposite of its job — a reader checking whether a divergence would be caught
+would have concluded yes. Until it is written, the two tables are kept in step by hand, and the known
+divergence is documented on the Node side: ``model_allowed``'s character set omits ``:``, which is why
+``openai_compatible``'s ceiling there does too.
 """
 
 from __future__ import annotations
@@ -100,6 +105,22 @@ PROVIDERS: dict[str, dict] = {
     # that has it re-check the model. Node is trusted today; "trusted" is a property of a deployment,
     # not of this file.
     "self_hosted": {
+        "adapter": "openai",
+        "base_url": None,
+        "auth": "bearer",
+        "model_prefixes": (),
+    },
+    # A third-party gateway speaking the OpenAI shape: AgentRouter, OpenRouter, LiteLLM, Together.
+    #
+    # Mechanically identical to `self_hosted` from here — same adapter, same per-request URL, same
+    # absence of a prefix, because a gateway serves every upstream's catalogue. The difference is
+    # entirely on the Node side, and it is a difference of expectation rather than of rule: both go
+    # through the same operator/owner fork, but a gateway is a public endpoint, so in practice it
+    # arrives by the owner path (https only, every resolved address public, socket pinned).
+    #
+    # `endpoint_allowed()` below still applies, and still matches the literal hostname without
+    # resolving it. That is the rebind gap `bots/selfHosted.js` documents; it is not made worse here.
+    "openai_compatible": {
         "adapter": "openai",
         "base_url": None,
         "auth": "bearer",
@@ -475,7 +496,7 @@ BILLING_WORDS = ("credit", "balance", "billing details", "payment", "insufficien
 
 
 def classify_status(status: int, message: str) -> tuple[int, str]:
-    """One HTTP status table for all eight providers.
+    """One HTTP status table for every provider.
 
     Returns the status *this service* reports and a detail string, mapped onto the contract Node
     already acts on. Each branch is a decision about somebody's bot:
