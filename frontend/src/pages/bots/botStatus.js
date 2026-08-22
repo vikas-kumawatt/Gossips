@@ -46,6 +46,11 @@ export const statusTone = (status) => STATUS_TONE[status] || "neutral";
  *
  * Resuming *without* changing it will simply pause again on the next cycle, which is why the reason
  * text says what to do first.
+ *
+ * `paused_key_invalid` stays off this list even though the server now accepts `active` alongside a
+ * key change, because there is nothing left for a button to do: assigning a working key resumes the
+ * bot on its own — see `keyLiftsPause` in botController.updateBot. A status-only resume is still
+ * refused, so a button here would still be a button that fails.
  */
 export const canResume = (status) =>
   status === "paused_by_owner" || status === "paused_model_invalid";

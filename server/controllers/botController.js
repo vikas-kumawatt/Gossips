@@ -989,8 +989,45 @@ export const updateBot = async (req, res) => {
      * better than either silently guessing a replacement or accepting a configuration that cannot
      * work.
      */
+    /*
+     * One read of the persona, for the two blocks below that both need it. They used to fetch it
+     * separately — `model, replyModel` here and `status` in the status block — which was two queries
+     * for one document and, more to the point, meant neither block could see what the other knew.
+     * The bug fixed below is exactly that: the key block could not tell it was clearing a pause.
+     */
+    const current =
+      effectiveKey || body.status !== undefined
+        ? await BotPersona.findOne({ bot: bot._id }).select("model replyModel status").lean()
+        : null;
+
+    /*
+     * ── Assigning a working key is what lifts a key pause ─────────────────────
+     *
+     * `revokeApiKey` stops every bot on that key with `paused_key_invalid` and the reason "The API
+     * key this bot used was revoked. Assign another to resume." Assigning another did not resume.
+     *
+     * Nothing else did either, and that is what made it a dead end rather than an inconvenience.
+     * `RESUMABLE` below excludes `paused_key_invalid`, so an owner sending `status: "active"` got a
+     * 409; `canResume` in the frontend excludes it too, so there was no button to press; and
+     * `revalidateApiKey` only resumes bots on the key being revalidated — which is revoked, so it
+     * cannot be revalidated at all. The bot was stopped permanently, having followed the instruction
+     * the product gave it.
+     *
+     * The reasoning that excluded it was sound for a status-only patch: resuming a bot whose key is
+     * still dead just pauses it again next cycle, and a button that always fails is worse than none.
+     * What it missed is the patch that *replaces the key*, where the condition the pause records has
+     * been satisfied in the same request — the key is verified `isValid` a few lines above.
+     *
+     * Deliberately only `paused_key_invalid`. A new key says nothing about a rate limit, a retired
+     * model, an owner's own pause, or an admin's — and silently lifting `paused_by_admin` because an
+     * owner edited a dropdown would be a moderation bypass.
+     */
+    const keyLiftsPause =
+      body.apiKeyId !== undefined &&
+      effectiveKey?.isValid === true &&
+      current?.status === "paused_key_invalid";
+
     if (effectiveKey) {
-      const current = await BotPersona.findOne({ bot: bot._id }).select("model replyModel").lean();
       const providerChanged =
         body.apiKeyId !== undefined &&
         current?.model &&
@@ -1043,8 +1080,14 @@ export const updateBot = async (req, res) => {
        * an owner who may have fixed it on the previous request.
        */
       const RESUMABLE = ["paused_by_owner", "paused_model_invalid"];
-      const current = await BotPersona.findOne({ bot: bot._id }).select("status").lean();
-      if (body.status === "active" && current?.status && !RESUMABLE.includes(current.status)) {
+      /*
+       * `keyLiftsPause` widens this for one request only. An owner editing a stopped bot naturally
+       * changes the key and presses save, and the client sends both fields in one patch — refusing
+       * that with "this bot is paused key invalid and can't simply be resumed" would be refusing the
+       * fix on the grounds that the thing it fixes hasn't been fixed yet.
+       */
+      const resumable = keyLiftsPause || RESUMABLE.includes(current?.status);
+      if (body.status === "active" && current?.status && !resumable) {
         return fail(
           res,
           `This bot is ${current.status.replace(/_/g, " ")} and can't simply be resumed`,
@@ -1054,6 +1097,16 @@ export const updateBot = async (req, res) => {
       personaUpdates.status = body.status;
       personaUpdates.statusReason = "";
       if (body.status === "active") personaUpdates.nextRunAt = new Date();
+    } else if (keyLiftsPause) {
+      /*
+       * No status in the patch, so the key change speaks for itself. Written here rather than left
+       * to the owner to press resume afterwards, because `canResume` hides that button for this
+       * status — and because it matches `revalidateApiKey`, which resumes the same bots when the
+       * same problem is fixed the other way.
+       */
+      personaUpdates.status = "active";
+      personaUpdates.statusReason = "";
+      personaUpdates.nextRunAt = new Date();
     }
 
     if (Object.keys(userUpdates).length) {
