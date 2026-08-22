@@ -10,7 +10,7 @@ import { loadMemories } from "./memory.js";
 import { CYCLE_INTERVAL_MS, isAwake, jittered, nextWakeAt, shouldPostThisCycle } from "./pacing.js";
 import { baseUrlFor, needsEndpoint } from "./providers.js";
 import { ENDPOINT_SOURCE, assertSafeEndpoint } from "./selfHosted.js";
-import { buildPerception, hasAnythingToDo } from "./perception.js";
+import { buildPerception, hasAnythingToDo, markConversationsSeen } from "./perception.js";
 import { cycleBudget, postingQuota, sensitiveActionBudget } from "./rateLimits.js";
 import { FAILURE_KINDS, decide, serviceHealthy } from "./reasoningClient.js";
 
@@ -243,6 +243,13 @@ const runCycle = async (persona) => {
   const key = await loadApiKey(persona, bot);
   if (!key.ok) return pause(persona, bot, "paused_key_invalid", key.reason);
 
+  /*
+   * Taken before the snapshot, not after the cycle. It becomes the read watermark at the end, and
+   * a message arriving during the model call was never in this perception — stamping it with the
+   * finish time would mark it read without the bot ever having seen it. See
+   * `markConversationsSeen`.
+   */
+  const perceivedAt = new Date();
   const { perception, allowedTargets, dropped } = await buildPerception(bot);
 
   /*
@@ -491,6 +498,23 @@ const runCycle = async (persona) => {
       latencyMs: result.decision.usage?.latency_ms ?? 0,
     },
   });
+
+  /*
+   * The bot has now seen every conversation it was shown, whether it answered them or not.
+   *
+   * Written here rather than in the executor's `reply_dm`, because deciding *not* to reply is
+   * still having read the message — and marking only on reply would leave a bot re-reading the
+   * same unanswered conversation every cycle until it eventually changed its mind and answered
+   * something days old. See `markConversationsSeen` for the full note.
+   *
+   * After the actions, so a reply that failed to send has still been read: the message was seen
+   * and judged, and re-answering it next cycle is the behaviour being removed.
+   */
+  await markConversationsSeen(
+    bot._id,
+    (perception.conversations || []).map((conversation) => conversation.id),
+    perceivedAt
+  );
 
   // A cycle that reached here worked, whatever the individual actions did.
   await release(persona._id, new Date(Date.now() + jittered(CYCLE_INTERVAL_MS)), {

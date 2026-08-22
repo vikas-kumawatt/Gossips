@@ -43,6 +43,8 @@ let validateResult = null;
 let replyCalls = [];
 let executed = [];
 let logged = [];
+/** Read-watermark advances, so a test can assert the message was marked seen. */
+let seen = [];
 let typingEvents = [];
 
 const chain = (value) => {
@@ -126,6 +128,23 @@ mock.module("../bots/executor.js", {
   },
 });
 
+/*
+ * The read watermark, stubbed at `perception.js` rather than at the model.
+ *
+ * Unmocked, `markConversationsSeen` reaches a real Mongoose model with no connection behind it and
+ * blocks for the full ten-second buffering timeout. These tests run on real timers around a
+ * four-second debounce, so that stall does not fail its own test — it silently runs into the *next*
+ * one, and two unrelated assertions go red. Worth naming, because "the test that broke is not the
+ * test that changed" cost longer to work out than the fix did.
+ */
+mock.module("../bots/perception.js", {
+  namedExports: {
+    markConversationsSeen: async (botId, conversations, at) => {
+      seen.push({ botId: String(botId), conversations, at });
+    },
+  },
+});
+
 const { onDirectMessage, stopDmResponder } = await import("../bots/dmResponder.js");
 
 /* ── Fixtures ─────────────────────────────────────────────────────────────── */
@@ -168,6 +187,7 @@ const reset = () => {
   replyCalls = [];
   executed = [];
   logged = [];
+  seen = [];
   typingEvents = [];
 };
 
@@ -378,6 +398,46 @@ test("choosing not to reply is a recorded outcome, not a dropped message", async
   assert.equal(executed.length, 0);
 });
 
+test("THE POINT: an answered message is marked read, so it is not answered again", async () => {
+  /*
+   * The bug this pins was the worst-feeling one in the feature. A bot's `lastReadAt` was never
+   * advanced by anything — only `chatController` moved it, and only for a human pressing keys — so
+   * `perception.loadConversations` found the same peer message unread on every cycle and the model
+   * answered it again. Days apart, slightly reworded each time, with nothing new from the person in
+   * between.
+   *
+   * Both paths have to write it. This one replies within seconds; if it didn't mark the message
+   * read, the runner would answer the very same message again on its next cycle — two replies to
+   * one message from the two halves of a design that is supposed to be belt-and-braces.
+   */
+  reset();
+  validateResult = {
+    actions: [{ type: "reply_dm", conversationId: CONVERSATION, text: "morning" }],
+    rejected: [],
+  };
+  incoming();
+
+  assert.ok(await waitFor(() => seen.length > 0));
+  assert.deepEqual(seen[0].conversations, [CONVERSATION]);
+  assert.equal(seen[0].botId, String(BOT_ID));
+  assert.ok(seen[0].at instanceof Date, "and stamped, so a later message stays unread");
+});
+
+test("deciding not to reply still marks the message read", async () => {
+  /*
+   * The half that would have been easy to miss. Marking read only on a reply leaves a bot
+   * re-reading the same unanswered conversation every cycle — paying for the same judgement each
+   * time, and eventually making a different call and answering something hours old.
+   */
+  reset();
+  validateResult = { actions: [{ type: "do_nothing" }], rejected: [] };
+  incoming();
+
+  assert.ok(await waitFor(() => seen.length > 0));
+  assert.deepEqual(seen[0].conversations, [CONVERSATION]);
+  assert.equal(executed.length, 0, "nothing was sent, and it was still read");
+});
+
 test("a transient reply failure is dropped quietly — the runner will pick the message up", async () => {
   /*
    * Best-effort by design. The original message is safely stored and still unread, so the durable
@@ -390,6 +450,7 @@ test("a transient reply failure is dropped quietly — the runner will pick the 
   await new Promise((resolve) => setTimeout(resolve, 5200));
   assert.equal(executed.length, 0);
   assert.equal(replyCalls.length, 1, "it did try");
+  assert.equal(seen.length, 0, "a message that got no decision must stay unread for the runner");
 });
 
 test("a malformed event is ignored rather than throwing into the send path", async () => {

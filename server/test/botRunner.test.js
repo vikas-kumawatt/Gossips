@@ -63,6 +63,9 @@ let notifications = [];
 let logged = [];
 let executed = [];
 let validateArgs = null;
+/** Read-watermark advances, so a test can assert what the cycle marked seen and when. */
+let markedSeen = [];
+let decideAt = null;
 
 const log = (name, payload) => {
   trace.push(name);
@@ -172,6 +175,10 @@ mock.module("../bots/perception.js", {
   namedExports: {
     buildPerception: async () => log("perception", perceptionResult),
     hasAnythingToDo: () => anythingToDo,
+    markConversationsSeen: async (botId, conversations, at) => {
+      log("markSeen");
+      markedSeen.push({ botId: String(botId), conversations, at });
+    },
   },
 });
 
@@ -184,6 +191,8 @@ mock.module("../bots/reasoningClient.js", {
     FAILURE_KINDS,
     decide: async (args) => {
       decideArgs = args;
+      // When the model was called, so a test can prove the read watermark predates it.
+      decideAt = new Date();
       return log("decide", decideResult);
     },
     serviceHealthy: async () => true,
@@ -252,6 +261,8 @@ const reset = () => {
   notifications = [];
   logged = [];
   executed = [];
+  markedSeen = [];
+  decideAt = null;
   validateArgs = null;
   staleClaims = [];
   anythingToDo = true;
@@ -672,6 +683,53 @@ test("the executor is handed the remaining budget and the cycle's real token cos
   assert.equal(executed[0].context.usage.inputTokens, 900);
   assert.equal(executed[0].context.usage.model, "claude-sonnet-5");
   assert.ok(executed[0].context.cycleId.startsWith(PERSONA_ID));
+});
+
+/* ── The read watermark ───────────────────────────────────────────────────── */
+
+test("THE POINT: a cycle marks every conversation it was shown as read", async () => {
+  /*
+   * Nothing advanced a bot's `lastReadAt` — only `chatController` did, and only for a human
+   * pressing keys. So `perception.loadConversations` found the same peer message unread on every
+   * cycle, put the same conversation in front of the model, and the model answered it again. What
+   * that looked like from the outside was a bot re-answering a message from days ago, in slightly
+   * different words each time, with nothing new from the person in between.
+   *
+   * The cycle is the right place for the write because it is the one that saw the conversation.
+   * Marking it in the executor's `reply_dm` instead would only cover the bot that *answered* —
+   * a bot that read a message and decided not to would still be shown it forever.
+   */
+  reset();
+  perceptionResult.perception.conversations = [{ id: "conv-a" }, { id: "conv-b" }];
+  await runOneTick();
+
+  assert.equal(markedSeen.length, 1, "once per cycle, not once per action");
+  assert.deepEqual(markedSeen[0].conversations, ["conv-a", "conv-b"]);
+  assert.equal(markedSeen[0].botId, String(BOT_ID));
+});
+
+test("THE SUBTLE ONE: the watermark is the perception's timestamp, not the cycle's", async () => {
+  /*
+   * A model call takes seconds, and a message that arrives during it was never in the perception.
+   * Stamping the watermark with `new Date()` at the end of the cycle would mark that message read
+   * without the bot ever having seen it — the person's follow-up silently ignored, which is a worse
+   * bug than the repetition being fixed. So the timestamp is taken before the snapshot.
+   */
+  reset();
+  perceptionResult.perception.conversations = [{ id: "conv-a" }];
+  await runOneTick();
+
+  const { at } = markedSeen[0];
+  assert.ok(at instanceof Date);
+  assert.ok(decideAt, "sanity: the model really was called in this cycle");
+  assert.ok(at <= decideAt, "the watermark predates the model call, so a message during it stays unread");
+});
+
+test("a cycle with no conversations marks nothing", async () => {
+  reset();
+  await runOneTick();
+
+  assert.deepEqual(markedSeen[0]?.conversations ?? [], []);
 });
 
 /* ── Reaping ──────────────────────────────────────────────────────────────── */

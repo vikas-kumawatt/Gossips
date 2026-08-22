@@ -12,6 +12,7 @@ import User from "../models/User.js";
 import UserRelation from "../models/UserRelation.js";
 import { ACTIVE_ACCOUNT, blockedIdSet } from "../utils/chatAccess.js";
 import { participantsOfConversation } from "../utils/conversationActivity.js";
+import { markConversationRead } from "../utils/readState.js";
 import { canUserReplyToTarget } from "../utils/replyPermission.js";
 import {
   PERCEPTION_NOTICE,
@@ -468,6 +469,53 @@ const loadConversations = async (botId) => {
   }
 
   return conversations;
+};
+
+/**
+ * Record that the bot has now seen these conversations.
+ *
+ * The counterpart to `loadConversations`, and it lives beside it deliberately: that function
+ * *defines* unread for a bot, and nothing was ever writing the other half of the pair.
+ *
+ * ── The bug this closes ─────────────────────────────────────────────────────
+ *
+ * A bot's `lastReadAt` never moved. Only `chatController` advanced it, and only for the human
+ * pressing keys — so from the watermark's point of view a bot had never read anything in its life.
+ * Every cycle, `loadConversations` found the same peer message still `createdAt > lastReadAt`,
+ * put the same conversation in the perception, and the model answered it again. Forever.
+ *
+ * What that looks like to the person on the other end is a bot re-answering a message they sent
+ * days ago, in slightly different words each time, with no new message from them in between. It
+ * is the single most unnerving thing one of these accounts can do, and it was not rate-limited by
+ * anything except the cycle cadence.
+ *
+ * ── Why "seen", not "replied" ───────────────────────────────────────────────
+ *
+ * Marking read only when a reply is sent would fix the visible half and leave the expensive half:
+ * a bot that reads a message and decides not to answer would be shown it again next cycle, and the
+ * cycle after, paying for the same judgement each time — and eventually making a *different* call
+ * and answering something hours old. Being shown the message and reaching a decision about it is
+ * what reading is; the reply is one possible outcome of it.
+ *
+ * ── The timestamp is not "now" ──────────────────────────────────────────────
+ *
+ * `at` must be when the conversation was *read*, not when the cycle finished. A model call takes
+ * seconds, and a message that arrives in that window was never in the perception. Marking it read
+ * with `new Date()` at the end would swallow it silently — the person's follow-up would be
+ * ignored, which is a worse bug than the one being fixed here. Callers pass the instant they
+ * snapshotted.
+ *
+ * Best-effort: a failed watermark write means the conversation is offered again next cycle, which
+ * is the behaviour this replaces, so it is not worth failing a completed cycle over.
+ */
+export const markConversationsSeen = async (botId, conversationIds, at) => {
+  for (const conversation of new Set((conversationIds || []).filter(Boolean))) {
+    try {
+      await markConversationRead(botId, String(conversation), at);
+    } catch (error) {
+      console.error("bot read watermark failed:", error?.message ?? error);
+    }
+  }
 };
 
 /** Follow requests waiting on this bot, if it is private. */

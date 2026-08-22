@@ -9,6 +9,7 @@ import { getSettings } from "../utils/settings.js";
 import { validateDecision } from "./actionValidator.js";
 import { executeActions, logAction } from "./executor.js";
 import { loadMemories } from "./memory.js";
+import { markConversationsSeen } from "./perception.js";
 import { collectAllowedTargets, shapeActor, shapeMessage } from "./perceptionBudget.js";
 import { baseUrlFor, needsEndpoint } from "./providers.js";
 import { dmReplyBudget } from "./rateLimits.js";
@@ -180,6 +181,11 @@ const replyOnce = async ({ bot, persona, peer, conversationKey }) => {
     if (!checked.ok) return;
   }
 
+  /*
+   * Stamped before the read, for the reason on `markConversationsSeen`: a message that lands while
+   * the model is thinking was not in this conversation and must stay unread.
+   */
+  const seenAt = new Date();
   const conversation = await buildConversation(conversationKey, bot, peer);
   if (!conversation) return;
 
@@ -256,6 +262,12 @@ const replyOnce = async ({ bot, persona, peer, conversationKey }) => {
       reason: "chose not to reply",
       cycleId,
     });
+    /*
+     * Read, even though nothing was said. Choosing not to answer is a decision about the message,
+     * and leaving it unread would hand it straight back to the next cycle — which is how a bot ends
+     * up replying to something from three days ago.
+     */
+    await markConversationsSeen(bot._id, [conversationKey], seenAt);
     return;
   }
 
@@ -282,6 +294,13 @@ const replyOnce = async ({ bot, persona, peer, conversationKey }) => {
       latencyMs: result.decision.usage?.latency_ms ?? 0,
     },
   });
+
+  /*
+   * And the same after answering. Without this the fast path replies now and the *runner* replies
+   * again on its next cycle, because the message it just answered is still unread — two answers to
+   * one message, hours apart, which is exactly what this bug looked like from the outside.
+   */
+  await markConversationsSeen(bot._id, [conversationKey], seenAt);
 };
 
 /**

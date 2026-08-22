@@ -14,26 +14,54 @@
   display: none; /* Chrome, Safari and Opera */
 }
 
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px; 
+/*
+ * The app's scrollbar, as the default rather than as an opt-in.
+ *
+ * This used to be `.custom-scrollbar` only, and the result was that a scroll container was styled
+ * if somebody remembered the class and looked like a stock Windows scrollbar if they didn't — a
+ * chunky light-grey bar down the middle of a black UI, which is exactly where the eye goes. The
+ * chat list and the document itself were both missing it. Any new scrolling area would have been
+ * the next one, because the failure is silent on the machine of anyone using a trackpad with
+ * overlay scrollbars.
+ *
+ * So the styling moves to `*` and the opt-in disappears. Both escape hatches still work and neither
+ * needs `!important`: a class selector outranks the universal one, so `.scrollbar-hide` keeps
+ * winning where a scrollbar would be noise, and `.custom-scrollbar` — still on ~15 elements — is
+ * now a no-op that agrees with the default rather than a rule anyone has to remember.
+ *
+ * `height` as well as `width`, which the old rule never set: the several `overflow-x-auto` strips
+ * in this app were keeping a native horizontal bar even where the class was applied.
+ */
+* {
+  scrollbar-width: thin; /* Firefox */
+  scrollbar-color: #555 transparent;
 }
 
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: transparent; 
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #555; 
-  border-radius: 8px; 
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #777; 
+*::-webkit-scrollbar-thumb {
+  background: #555;
+  border-radius: 8px;
 }
 
+*::-webkit-scrollbar-thumb:hover {
+  background: #777;
+}
+
+/*
+ * Kept as an explicit marker for containers that were opted in by hand. It no longer changes
+ * anything, and it is left rather than swept out of fifteen files in a change about scrollbars.
+ */
 .custom-scrollbar {
-  scrollbar-width: thin; 
-  scrollbar-color: #555 transparent; 
+  scrollbar-width: thin;
+  scrollbar-color: #555 transparent;
 }
 
 /*
