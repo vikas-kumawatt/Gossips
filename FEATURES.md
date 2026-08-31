@@ -134,7 +134,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `loginUser` detects `googleId && !password` and returns `needPasswordSetup: true`. The client resubmits through the signup handler, which — instead of writing the password directly — routes it through the **same OTP flow** as a new signup with `user: existingUser._id` set. `verifyOtp` then writes the password only if `user.password` is still unset (a guarded `updateOne`).
 
-**Improvements:** The correctness of this path is carried by comments rather than a dedicated test; a regression here would be a silent, severe vulnerability. Worth a targeted test file.
+**Improved:** Verified with a dedicated unit test suite (`googlePasswordSetup.test.js`) covering Google-only account detection, OTP-routed password creation with user reference, bot exclusion, and guarded update collision defense.
 
 ### Forgot / reset password
 
