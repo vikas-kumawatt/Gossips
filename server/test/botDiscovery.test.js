@@ -111,6 +111,9 @@ mock.module("../utils/chatAccess.js", {
   namedExports: {
     ACTIVE_ACCOUNT: { accountStatus: { $nin: ["deleted", "deactivated", "suspended", "locked"] } },
     blockedIdSet: async () => blockedIds,
+    audienceAllows: async () => true,
+    privacyOf: async () => ({ readReceipts: true, whoCanSeeOnlineStatus: "everyone" }),
+    invalidatePrivacy: () => {},
   },
 });
 mock.module("../utils/conversationActivity.js", {

@@ -30,7 +30,7 @@ const SecurityTwoFactorModal = ({ isOpen, onClose }) => {
         unrecognizedDeviceAlerts: data.unrecognizedDeviceAlerts,
         endToEndEncryption: data.endToEndEncryption,
       });
-    } catch (err) {
+    } catch {
       toast.error("Failed to load security settings");
     } finally {
       setLoading(false);
@@ -53,7 +53,7 @@ const SecurityTwoFactorModal = ({ isOpen, onClose }) => {
     try {
       await userAPI.updateSecuritySettings({ [key]: next });
       toast.success("Security preferences updated");
-    } catch (err) {
+    } catch {
       setSecuritySettings((s) => ({ ...s, [key]: prev }));
       toast.error("Failed to update security preferences");
     }
@@ -65,7 +65,7 @@ const SecurityTwoFactorModal = ({ isOpen, onClose }) => {
       const data = await userAPI.setupTwoFactor();
       setSetupData(data);
       setSetupStep("setup");
-    } catch (err) {
+    } catch {
       toast.error("Failed to initialize 2FA setup");
     } finally {
       setActionLoading(false);

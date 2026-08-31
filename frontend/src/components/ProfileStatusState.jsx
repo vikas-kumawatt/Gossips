@@ -7,7 +7,6 @@ const ProfileStatusState = ({
   title,
   message,
   actionButton,
-  onAction,
 }) => {
   const navigate = useNavigate();
 
