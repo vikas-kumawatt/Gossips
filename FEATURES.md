@@ -214,7 +214,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `PATCH /user/username` (10/hour/user) re-runs availability, computes the quota from `User.usernameHistory` (the array *is* the counter — no separate field to drift), and performs the rename as one conditional `findOneAndUpdate` keyed on the current username so two concurrent requests can't both spend a quota slot. The same endpoint renames an owned bot via an optional `botId`, re-verifying ownership.
 
-**Improvements:** `usernameHistory` grows unbounded even though only the current window matters. Availability reasons are deliberately collapsed to a generic "unavailable" on the wire so probing can't distinguish taken from cooling-down.
+**Improved:** Bounds `usernameHistory` array growth via MongoDB `$slice: -10` during renames so historical data never expands without limit, while collapsed wire availability reasons (`PUBLIC_REASON`) prevent namespace probing.
 
 ### Reserved usernames
 

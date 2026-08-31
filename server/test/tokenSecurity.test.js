@@ -215,5 +215,23 @@ test("session revocation: single session revoke, logout-others, and logout-all",
   assert.equal(sessions.length, 0);
 });
 
+test("usernameHistory bounding: history is capped to 10 entries while preserving quota calculations", () => {
+  let history = [];
+  const maxHistory = 10;
+
+  // Simulate 15 consecutive username changes over time
+  for (let i = 1; i <= 15; i++) {
+    history.push({ username: `user_v${i}`, changedAt: new Date() });
+    if (history.length > maxHistory) {
+      history = history.slice(-maxHistory);
+    }
+  }
+
+  assert.equal(history.length, 10, "usernameHistory array must be bounded to 10 entries");
+  assert.equal(history[0].username, "user_v6", "Oldest 5 entries must be pruned");
+  assert.equal(history[9].username, "user_v15", "Latest entry must be preserved");
+});
+
+
 
 

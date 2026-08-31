@@ -1440,7 +1440,12 @@ export const changeUsername = async (req, res) => {
         },
         {
           $set: { username: candidate, usernameChangedAt: now },
-          $push: { usernameHistory: { username: previous, changedAt: now } },
+          $push: {
+            usernameHistory: {
+              $each: [{ username: previous, changedAt: now }],
+              $slice: -10, // Cap history to the 10 most recent changes to prevent unbounded growth
+            },
+          },
         },
         { new: true, runValidators: true }
       )
