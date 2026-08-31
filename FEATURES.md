@@ -350,7 +350,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `DELETE /user/followers/:username` does an atomic `findOneAndDelete` on the accepted edge (safe under double-tap), decrements both counters, invalidates the cache, and — matching Instagram — never notifies.
 
-**Improvements:** No frontend entry point was found for this endpoint; either wire it into the followers list or remove it.
+**Improved:** Added vertical three-dots action menu on each follower in the user's followers list (`FollowersModal.jsx`) triggering an Instagram-style warning confirmation dialog (`RemoveFollowerModal.jsx`) that quietly unfollows without notifying them.
 
 ### Block
 
@@ -1849,7 +1849,7 @@ The bot subsystem, and specifically **treating the LLM as an attacker**. The int
 | Area | State |
 | --- | --- |
 | Restrict user | Backend complete; the profile menu item's `onClick` is commented out |
-| Remove follower | Endpoint exists; no frontend entry point found |
+| Remove follower | Wired with 3-dot dropdown menu & confirmation modal in `FollowersModal.jsx` |
 | Pin post | Not implemented at all (no field, no endpoint) |
 | Cover photo / pronouns / birthday | Removed unused fields and virtuals from `User` & `Group` models |
 | Deactivate / delete account | No self-service path; admin-only status changes |
