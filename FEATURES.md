@@ -182,7 +182,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** Each account has its own httpOnly `rt_<userId>` cookie (path `/auth`). `GET /auth/accounts` reads every `rt_*` cookie, validates each (JWT verify + live `UserSession` + account not deleted/deactivated), prunes dead ones, and caps the list. `POST /auth/switch` (40/15min) re-validates the target's cookie, rotates its session, and issues fresh tokens as active. The client keeps a **display-only** local cache (name/avatar/username — never a token) reconciled against the server list, and a successful switch does a **hard page reload** rather than an in-place state swap, deliberately, so per-account caches and sockets can't mix.
 
-**Improvements:** The caps disagree — `authController.js` sets `MAX_SWITCHABLE_ACCOUNTS = 5` claiming to mirror the frontend, while `lib/accounts.js` exports `MAX_ACCOUNTS = 10`, so the UI promises more accounts than the server will make switchable. Third-party-cookie blocking (Safari/Firefox) can make `GET /auth/accounts` return empty in production; the code treats empty as "trust local" rather than "wipe", which is right but silent.
+**Improved:** Aligned `MAX_SWITCHABLE_ACCOUNTS = 10` on the server with `MAX_ACCOUNTS = 10` in frontend `lib/accounts.js`. `reconcileAccounts` explicitly logs third-party cookie blocking diagnostics in debug mode while preserving local switcher state safely.
 
 ### Logout (device-scoped)
 

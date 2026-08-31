@@ -155,8 +155,8 @@ const REFRESH_TOKEN_COOKIE_NAME = "refreshToken";
  */
 const ACCOUNT_COOKIE_PREFIX = "rt_";
 const ACCOUNT_COOKIE_PATH = "/auth";
-// Mirrors MAX_ACCOUNTS in frontend/src/lib/accounts.js.
-const MAX_SWITCHABLE_ACCOUNTS = 5;
+// Mirrors MAX_ACCOUNTS in frontend/src/lib/accounts.js (10 accounts).
+const MAX_SWITCHABLE_ACCOUNTS = 10;
 
 const accountCookieName = (userId) => `${ACCOUNT_COOKIE_PREFIX}${userId}`;
 

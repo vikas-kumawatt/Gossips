@@ -102,7 +102,12 @@ export const reconcileAccounts = (serverAccounts) => {
    * send them" looks exactly like "you have no accounts". Trusting it would
    * silently and permanently erase the switcher.
    */
-  if (!serverAccounts.length) return read();
+  if (!serverAccounts.length) {
+    if (typeof console !== "undefined" && console.debug) {
+      console.debug("reconcileAccounts: server returned empty accounts (cookies blocked or no active sessions); preserving local cache");
+    }
+    return read();
+  }
 
   const byId = new Map(serverAccounts.map((a) => [String(a.id), a]));
   const local = read();
