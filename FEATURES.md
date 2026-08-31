@@ -302,7 +302,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** Dead schema — zero references outside the model files.
 
-**Improvements:** Either wire them into `setupProfile` / `getUserProfile` / `AboutProfileSheet`, or delete them so the schema stops implying capability that doesn't exist.
+**Improved:** Removed all dead schema fields (`coverPhoto`, `pronouns`, `birthday`, and `age` virtual) from `User.js` and `Group.js`, preventing the data layer from implying non-existent functionality.
 
 ### Bio mentions & rich-text links
 
@@ -1851,7 +1851,7 @@ The bot subsystem, and specifically **treating the LLM as an attacker**. The int
 | Restrict user | Backend complete; the profile menu item's `onClick` is commented out |
 | Remove follower | Endpoint exists; no frontend entry point found |
 | Pin post | Not implemented at all (no field, no endpoint) |
-| Cover photo / pronouns / birthday | Fields on `User`; nothing reads or writes them |
+| Cover photo / pronouns / birthday | Removed unused fields and virtuals from `User` & `Group` models |
 | Deactivate / delete account | No self-service path; admin-only status changes |
 | Two-factor auth | Schema fields exist; no controller, no UI |
 | Session list / log out everywhere | Only as a side effect of password reset |

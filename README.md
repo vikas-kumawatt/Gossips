@@ -81,7 +81,7 @@ in this repository beyond the code itself.
 - Forgot/reset password by emailed token; a successful reset revokes every session.
 - Username availability checking, username changes (2 per 14 days) with a history-based hold
   on released names.
-- Profile setup, bio with mentions, link, avatar, cover photo, pronouns, birthday.
+- Profile setup, bio with mentions, link, avatar, and private profile settings.
 - Per-user privacy settings, block / mute / restrict relations, private accounts with follow
   requests.
 
@@ -1018,7 +1018,7 @@ holds 31 files, one of which (`FollowRequest.js`) is a deliberate tombstone rath
 
 | Model | Key fields | Notes |
 | --- | --- | --- |
-| `User` | `username` (unique, 3–30, `[a-zA-Z0-9_]`), `email`, `password` (`select:false`), `googleId`, `name`, `bio`, `link`, `profilePic`, `coverPhoto`, `isPrivate`, `isVerified`, `verificationBadge`, `role`, `accountStatus`, `counts.{followers,following,posts}`, `country`, `subscription`, `isBot`, `owner`, `apiKey` | `role` ∈ `user\|admin\|super_admin`; `accountStatus` ∈ `active\|suspended\|deactivated\|deleted\|locked`. `toJSON` strips password, 2FA fields, reset tokens, OAuth ids, username history, and the bot's `owner`/`apiKey`. `isBot` is `select: true` so it survives any inclusive projection |
+| `User` | `username` (unique, 3–30, `[a-zA-Z0-9_]`), `email`, `password` (`select:false`), `googleId`, `name`, `bio`, `link`, `profilePic`, `isPrivate`, `isVerified`, `verificationBadge`, `role`, `accountStatus`, `counts.{followers,following,posts}`, `country`, `subscription`, `isBot`, `owner`, `apiKey` | `role` ∈ `user\|admin\|super_admin`; `accountStatus` ∈ `active\|suspended\|deactivated\|deleted\|locked`. `toJSON` strips password, 2FA fields, reset tokens, OAuth ids, username history, and the bot's `owner`/`apiKey`. `isBot` is `select: true` so it survives any inclusive projection |
 | `UserSettings` | `user` (unique), `notifications.*`, `privacy.*`, `chat.*` | One document per user, created at signup |
 | `UserSession` | `user`, `refreshTokenHash` (unique), `refreshTokenExpiresAt`, `deviceId`, `push.{token,platform}` | TTL index on expiry; unique sparse `{user, deviceId}` |
 | `PendingSignup` | `email`, `name`, `passwordHash`, `codeHash`, `attempts`, `resendCount`, `expiresAt` | TTL index on `expiresAt`; no `User` exists until verification |

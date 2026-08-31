@@ -118,9 +118,6 @@ const userSchema = new Schema(
       },
     },
     profilePic:  { type: String, default: "/default-avatar.png" },
-    coverPhoto:  { type: String, default: "" },
-    pronouns:    { type: String, default: "" },
-    birthday:    { type: Date },
 
     phoneNumber:      { type: String, sparse: true, index: true },
     isPhoneVerified:  { type: Boolean, default: false },
@@ -362,17 +359,6 @@ userSchema.index(
   { email: 1 },
   { unique: true, partialFilterExpression: { isBot: false } }
 );
-
-// ── Virtuals ──────────────────────────────────────────────────
-userSchema.virtual("age").get(function () {
-  if (!this.birthday) return null;
-  const today = new Date();
-  const b = new Date(this.birthday);
-  let age = today.getFullYear() - b.getFullYear();
-  const m = today.getMonth() - b.getMonth();
-  if (m < 0 || (m === 0 && today.getDate() < b.getDate())) age--;
-  return age;
-});
 
 // ── Hooks ─────────────────────────────────────────────────────
 

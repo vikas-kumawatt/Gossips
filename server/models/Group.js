@@ -15,7 +15,6 @@ const groupSchema = new Schema(
     name:        { type: String, required: true, trim: true, maxlength: 100 },
     description: { type: String, default: "", maxlength: 500 },
     avatar:      { type: String, default: "/default-group-avatar.png" },
-    coverPhoto:  { type: String, default: "" },
 
     type: { type: String, enum: ["public", "private", "secret"], default: "private" },
 
