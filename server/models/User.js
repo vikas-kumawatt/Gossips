@@ -85,8 +85,6 @@ const userSchema = new Schema(
     // ── Auth ──────────────────────────────────────────────────
     password:   { type: String, select: false, minlength: 6 },
     googleId:   { type: String, unique: true, sparse: true, select: false },
-    appleId:    { type: String, unique: true, sparse: true, select: false },
-    facebookId: { type: String, unique: true, sparse: true, select: false },
 
     resetPasswordToken:   { type: String, select: false },
     resetPasswordExpires: { type: Date,   select: false },
@@ -302,8 +300,6 @@ const userSchema = new Schema(
         delete ret.resetPasswordToken;
         delete ret.resetPasswordExpires;
         delete ret.googleId;
-        delete ret.appleId;
-        delete ret.facebookId;
         // Belt and braces: select:false already keeps this out of most reads,
         // but a route that explicitly asks for it must not serialise it by
         // accident. Only the count is ever public.

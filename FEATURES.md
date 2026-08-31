@@ -126,7 +126,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `Firebase.jsx` runs `signInWithPopup`, and the resulting ID token goes to `POST /auth/googlelogin`. The server calls `admin.auth().verifyIdToken`, **rejects tokens where `email_verified` is false**, then finds-or-creates a `User` scoped to `{...HUMAN_ACCOUNT}` (so it can never attach to a bot row), backfills the avatar (upgraded to `s1024-c`) and a generated username, deletes competing `PendingSignup` rows, and issues tokens.
 
-**Improvements:** Only Google is wired despite `appleId`/`facebookId` fields already existing on `User`. Firebase misconfiguration is handled client-side (`isFirebaseConfigured`) but only by try/catch server-side.
+**Improved:** Cleaned up unused `appleId`/`facebookId` fields from `User` model, standardizing on Google OAuth. Server explicitly validates Firebase configuration (`firebaseConfigured`) with non-crashing startup warnings and structured HTTP 503 errors when credentials are unset.
 
 ### Adding a password to a Google-only account
 

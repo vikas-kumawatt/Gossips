@@ -130,12 +130,12 @@ test("unique constraints are never silently removed", () => {
   }
 });
 
-test("the sparse OAuth indexes survive, except the one for a field that's gone", () => {
-  for (const name of ["googleId_1", "appleId_1", "facebookId_1"]) {
-    assert.equal(verdictFor(name).verdict, "keep", `${name} is a live login path`);
+test("the sparse OAuth indexes survive, except those for fields that are gone", () => {
+  assert.equal(verdictFor("googleId_1").verdict, "keep", "googleId_1 is a live login path");
+  // appleId, facebookId, githubId are not in the schema — only Google is used.
+  for (const name of ["appleId_1", "facebookId_1", "githubId_1"]) {
+    assert.equal(verdictFor(name).verdict, "drop", `${name} should be droppable as the field is removed`);
   }
-  // githubId is not in the schema — there is no GitHub login.
-  assert.equal(verdictFor("githubId_1").verdict, "drop");
 });
 
 test("the audit accounts for every live index exactly once", () => {
@@ -148,7 +148,7 @@ test("the audit accounts for every live index exactly once", () => {
   }
 });
 
-test("the drop list is exactly the seven expected, and nothing creeps in", () => {
+test("the drop list is exactly the expected nine, and nothing creeps in", () => {
   /*
    * A regression guard with teeth: if a future schema change makes the classifier newly
    * willing to drop something, this fails and someone has to look at it — which is the
@@ -160,7 +160,9 @@ test("the drop list is exactly the seven expected, and nothing creeps in", () =>
     .sort();
 
   assert.deepEqual(dropping, [
+    "appleId_1",
     "createdAt_1",
+    "facebookId_1",
     "followers_1",
     "following_1",
     "githubId_1",

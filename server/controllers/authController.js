@@ -98,15 +98,34 @@ if (!mailConfigured) {
   });
 }
 
-const serviceAccountKey = {
-  projectId: process.env.FIREBASE_PROJECT_ID,
-  privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-};
+const MISSING_FIREBASE_VARS = [
+  !process.env.FIREBASE_PROJECT_ID && "FIREBASE_PROJECT_ID",
+  !process.env.FIREBASE_PRIVATE_KEY && "FIREBASE_PRIVATE_KEY",
+  !process.env.FIREBASE_CLIENT_EMAIL && "FIREBASE_CLIENT_EMAIL",
+].filter(Boolean);
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccountKey),
-});
+export const firebaseConfigured = MISSING_FIREBASE_VARS.length === 0;
+
+if (firebaseConfigured) {
+  try {
+    const serviceAccountKey = {
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+    };
+    if (admin.apps.length === 0) {
+      admin.initializeApp({
+        credential: admin.credential.cert(serviceAccountKey),
+      });
+    }
+  } catch (error) {
+    console.error("Firebase admin initialization failed:", error?.message);
+  }
+} else {
+  console.warn(
+    `Firebase disabled: missing ${MISSING_FIREBASE_VARS.join(", ")}. Google sign-in will fail; other auth routes run.`
+  );
+}
 
 const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
@@ -962,7 +981,15 @@ export const loginUser = async (req, res) => {
 
 export const googleLogin = async (req, res) => {
   try {
+    if (!firebaseConfigured || admin.apps.length === 0) {
+      return res.status(503).json({
+        error: "Google sign-in is not configured on this server.",
+      });
+    }
     const { token: idToken } = req.body;
+    if (typeof idToken !== "string" || !idToken) {
+      return res.status(400).json({ error: "Google ID token is required" });
+    }
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     let { email, name, picture } = decodedToken;
 
