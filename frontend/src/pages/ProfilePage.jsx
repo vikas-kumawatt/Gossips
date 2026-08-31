@@ -22,6 +22,8 @@ import AboutProfileSheet from "../components/AboutProfileSheet";
 import RichText from "../components/RichText";
 import { buildProfileUrl } from "../lib/profileLink";
 import BotBadge from "../components/BotBadge";
+import ProfileHeaderSkeleton from "../components/ProfileHeaderSkeleton";
+import ProfileStatusState from "../components/ProfileStatusState";
 import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
@@ -662,52 +664,6 @@ const ProfilePage = () => {
     </div>
   );
 
-  const renderProfileSkeleton = () => (
-    <div className="max-w-xl mx-auto px-4">
-      <section className="flex items-center justify-center pt-4">
-        <div className="w-full">
-          <div className="flex justify-between items-center">
-            <div className="flex flex-col">
-              <div className="flex items-center justify-center">
-                <div className="h-6 w-32 bg-neutral-700 rounded animate-pulse" />
-                <div className="ml-2 mt-2 flex gap-2">
-                  <div className="h-4 w-4 bg-neutral-700 rounded-full animate-pulse" />
-                  <div className="h-4 w-4 bg-neutral-700 rounded-full animate-pulse" />
-                </div>
-              </div>
-              <div className="h-5 w-24 bg-neutral-700 rounded mt-2 animate-pulse" />
-            </div>
-            <div className="ml-12">
-              <div className="w-18 h-18 rounded-full border-2 border-neutral-600 bg-neutral-700 animate-pulse" />
-            </div>
-          </div>
-          <div className="h-4 w-3/4 bg-neutral-700 rounded mt-3 animate-pulse" />
-          <div className="pt-4 flex gap-2">
-            <div className="flex -space-x-2">
-              {[...Array(3)].map((_, i) => (
-                <div
-                  key={i}
-                  className="w-6 h-6 rounded-full bg-neutral-700 border-2 border-neutral-950 animate-pulse"
-                />
-              ))}
-            </div>
-            <div className="h-4 w-20 bg-neutral-700 rounded animate-pulse" />
-          </div>
-        </div>
-      </section>
-      <div className="flex justify-center items-center gap-4 mt-2">
-        {profileId === currentUsername ? (
-          <div className="h-8 w-full max-w-xl bg-neutral-700 rounded-lg mt-4 animate-pulse" />
-        ) : (
-          <div className="flex flex-row items-center justify-center gap-2 w-full">
-            <div className="h-10 w-full max-w-xl bg-neutral-700 rounded-lg mt-4 animate-pulse" />
-            <div className="h-10 w-full max-w-xl bg-neutral-700 rounded-lg mt-4 animate-pulse" />
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
   const isOwnProfile = profileId === currentUsername;
   const isFollowing = Boolean(profile.relationship?.isFollowing);
   const canViewPrivateContent = isOwnProfile || isFollowing;
@@ -715,22 +671,16 @@ const ProfilePage = () => {
   return !token ? (
     <Navigate to="/login" />
   ) : (
-    <div className="w-full bg-neutral-950">
+    <div className="w-full bg-neutral-950 min-h-screen">
       <SiteHeader
         layoutContext={layoutContext}
         openCreateModal={() => setIsCreateModalOpen(true)}
         closeCreateModal={() => setIsCreateModalOpen(false)}
       />
       {notFound ? (
-        <div className="max-w-xl mx-auto px-4 py-24 text-center">
-          <h2 className="text-xl font-bold text-white">User not found</h2>
-          <p className="text-neutral-400 mt-2 max-w-sm mx-auto">
-            This page isn't available. The link may be broken, or the page may
-            have been removed.
-          </p>
-        </div>
+        <ProfileStatusState type="not-found" />
       ) : profileLoading ? (
-        renderProfileSkeleton()
+        <ProfileHeaderSkeleton isOwnProfile={isOwnProfile} />
       ) : (
         <>
           <div className="max-w-xl mx-auto px-4 pb-16">
@@ -990,29 +940,19 @@ const ProfilePage = () => {
                 onTabChange={handleTabChange}
               >
                 {profileBlocked ? (
-                  <div className="flex flex-col items-center justify-center py-10 text-center">
-                    <h3 className="text-xl font-semibold text-white mb-2">
-                      You blocked this account
-                    </h3>
-                    <p className="text-neutral-400 max-w-xs mb-4">
-                      Unblock to see their posts and interact with them again.
-                    </p>
-                    <button
-                      onClick={handleToggleBlockProfile}
-                      className="rounded-lg border border-neutral-700 px-5 py-2 font-medium text-white hover:bg-neutral-800 cursor-pointer"
-                    >
-                      Unblock
-                    </button>
-                  </div>
+                  <ProfileStatusState
+                    type="blocked"
+                    actionButton={
+                      <button
+                        onClick={handleToggleBlockProfile}
+                        className="rounded-xl border border-neutral-700 bg-neutral-900 px-5 py-2 font-medium text-white hover:bg-neutral-800 transition-colors"
+                      >
+                        Unblock
+                      </button>
+                    }
+                  />
                 ) : !canViewPosts && profile.isPrivate ? (
-                  <div className="flex flex-col items-center justify-center py-10 text-center">
-                    <h3 className="text-xl font-semibold text-white mb-2">
-                      This profile is private
-                    </h3>
-                    <p className="text-neutral-400 max-w-xs">
-                      Follow this profile to see their posts.
-                    </p>
-                  </div>
+                  <ProfileStatusState type="private" />
                 ) : (
                   <>
                     {activeTab === 0 && renderGossipsTab()}

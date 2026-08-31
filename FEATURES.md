@@ -278,7 +278,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `ProfilePage.jsx` loads `GET /user/:username`, then fetches `GET /posts/:username`, `/user/:username/replies`, `/user/:username/reposts` (cursor, limit 10, `IntersectionObserver` infinite scroll) only if `canViewPosts` (own profile, public account, or accepted follower). `getUserProfile` caches the public fields 60s (`CacheKeys.profile`) then layers viewer-specific `relationship` flags computed live from `Follow`/`UserRelation`. If the owner has blocked the viewer, the endpoint 404s exactly like a missing account.
 
-**Improvements:** Tab responses refetch on every switch. "Not found" and "they blocked you" render duplicated markup instead of one shared component. The skeleton duplicates the header layout and will drift.
+**Improved:** Tab responses are preserved across tab switches without redundant re-fetching, shared empty/error states are unified into `ProfileStatusState.jsx`, and profile skeleton is extracted into `ProfileHeaderSkeleton.jsx` matching the live header 1:1.
 
 ### Profile editing
 
