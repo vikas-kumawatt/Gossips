@@ -100,7 +100,9 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `UserAuthForm.jsx` posts name/email/password to `POST /auth/signup`. The server validates format (name ≤200 chars, `EMAIL_RE`, `PASSWORD_RE`), then `startPendingSignup()` bcrypt-hashes the password (cost 10) and writes a `PendingSignup` row holding an HMAC'd OTP (`hashOtp`, keyed on `JWT_SECRET`), mails the code via Brevo/Nodemailer, and returns a `verificationToken` (a `typ:"verify"` JWT naming the pending row) instead of a session. `VerifyOtpPage.jsx` keeps that ticket in `sessionStorage` and posts the code to `POST /auth/verify-otp`, which deletes the pending row, creates `User` + `UserSettings`, sends a welcome notification, and calls `issueAuthTokens`. Signup is rate-limited to 5/hour/IP.
 
-**Improvements:** No CAPTCHA, so the IP limiter is the only brake on bulk account creation. Verification ticket expiration matches the 10-minute OTP lifetime (and is renewed on resend) to prevent stale tickets. Email delivery failures return HTTP 502 with Retry-After header and retry guidance.
+**Improvements:** No CAPTCHA, so the IP limiter is the only brake on bulk account creation.
+
+**Improved:** No CAPTCHA, so the IP limiter is the only brake on bulk account creation. Verification ticket expiration matches the 10-minute OTP lifetime (and is renewed on resend) to prevent stale tickets. Email delivery failures return HTTP 502 with Retry-After header and retry guidance.
 
 ### OTP resend & attempt limits
 
@@ -108,7 +110,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/resend-otp` → `reissueOtp()` with a **60-second cooldown** and a cap of **5 sends** per pending row (`OTP_MAX_SENDS`); resending deliberately does not reset the guess counter. Verification allows **5 wrong guesses** (`OTP_MAX_ATTEMPTS`), decremented atomically inside a `findOneAndUpdate` filter so concurrent guesses can't both spend the same attempt. `VerifyOtpPage.jsx` runs a live countdown and reconciles it against the server's `retryAfter` on a 429. Per-IP limiters sit on top (verify 30/15min, resend 10/hour).
 
-**Improvements:** `MAX_PENDING_PER_EMAIL` (5) enforces a per-email cap and rejects with HTTP 429 and `Retry-After` once exceeded rather than evicting previous rows, preventing an attacker from continuously cycling a victim's inbox or invalidating existing verification codes.
+**Improved:** `MAX_PENDING_PER_EMAIL` (5) enforces a per-email cap and rejects with HTTP 429 and `Retry-After` once exceeded rather than evicting previous rows, preventing an attacker from continuously cycling a victim's inbox or invalidating existing verification codes.
 
 ### Email/password login
 
@@ -116,7 +118,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/login` → `loginUser` looks the user up with `{...HUMAN_ACCOUNT}` (bot rows excluded by construction), rejects Google-only accounts with `needPasswordSetup: true`, compares via bcrypt, records sign-in country asynchronously, and issues tokens. Rate-limited 10/15min/IP.
 
-**Improvements:** Enforces per-account lockout (5 consecutive failed attempts lock the account for 15 minutes with Retry-After header and password-reset unlock) to defeat distributed credential-stuffing attacks. Tracks trusted devices via `UserSession.isTrusted`.
+**Improved:** Enforces per-account lockout (5 consecutive failed attempts lock the account for 15 minutes with Retry-After header and password-reset unlock) to defeat distributed credential-stuffing attacks. Tracks trusted devices via `UserSession.isTrusted`.
 
 ### Google sign-in
 
