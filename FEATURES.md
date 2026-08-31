@@ -166,7 +166,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `attachAuthInterceptors` (`services/authSession.js`) adds an axios response interceptor: on a 401 that isn't the refresh call itself, it calls `POST /auth/refresh` with the account id and an `X-Device-Id` header, dedupes concurrent refreshes behind one shared promise, and retries the original request once. Server-side, `refreshAccessToken` verifies the cookie (account-scoped `rt_<id>` first, shared `refreshToken` as fallback), asserts the token belongs to the requested account, rotates the `UserSession` row, and only moves the "active account" pointer when the refresh came through the shared cookie — so a background account refreshing can't silently become the foreground one.
 
-**Improvements:** Rotation deletes then recreates the session non-atomically; a crash between the two logs the user out. No refresh-token reuse detection — a leaked token used once looks like normal rotation.
+**Improved:** Rotates refresh tokens atomically in place (`UserSession.findOneAndUpdate`), preventing crash-induced logouts. Implements OAuth 2.0 / RFC 6819 refresh-token reuse detection (`previousRefreshTokenHash`) that immediately revokes all active sessions for the account upon replay of an already-consumed token.
 
 ### Device identification
 

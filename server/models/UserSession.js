@@ -29,6 +29,8 @@ const userSessionSchema = new Schema(
     isTrusted:    { type: Boolean, default: true },
     trustedAt:    { type: Date, default: Date.now },
     lastActiveAt: { type: Date, default: Date.now },
+    previousRefreshTokenHash: { type: String, default: null, index: true },
+    rotatedAt:    { type: Date, default: null },
     revokedAt:    { type: Date, default: null },
   },
   { timestamps: true }

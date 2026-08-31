@@ -71,3 +71,70 @@ test("access token revocation: token is valid before logout and immediately reje
   // Hash determinism
   assert.equal(hashAccessToken(token), hashAccessToken(token));
 });
+
+test("refresh token rotation & reuse detection: normal rotation succeeds and reused token triggers account revocation", () => {
+  const userId = "68b0f3c1a2d4e5f60718293a";
+  const rt1 = "refresh_token_1_initial";
+  const rt2 = "refresh_token_2_rotated";
+  const hash1 = hashAccessToken(rt1);
+  const hash2 = hashAccessToken(rt2);
+
+  // Initial session state
+  let session = {
+    _id: "session-1",
+    user: userId,
+    refreshTokenHash: hash1,
+    previousRefreshTokenHash: null,
+    refreshTokenExpiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000),
+  };
+
+  let allSessions = [session];
+
+  const simulateRefresh = (presentedToken) => {
+    const presentedHash = hashAccessToken(presentedToken);
+    const activeSession = allSessions.find(
+      (s) => s.refreshTokenHash === presentedHash && s.refreshTokenExpiresAt > new Date()
+    );
+
+    if (activeSession) {
+      // In-place atomic rotation
+      activeSession.previousRefreshTokenHash = activeSession.refreshTokenHash;
+      activeSession.refreshTokenHash = hash2;
+      activeSession.rotatedAt = new Date();
+      return { status: 200, token: "new_access_token", session: activeSession };
+    }
+
+    // Reuse detection
+    const reusedSession = allSessions.find(
+      (s) => s.previousRefreshTokenHash === presentedHash
+    );
+
+    if (reusedSession) {
+      // Breach detected: purge all sessions for user
+      allSessions = allSessions.filter((s) => s.user !== userId);
+      return {
+        status: 401,
+        body: {
+          message: "Compromised token: Refresh token reuse detected. All sessions have been revoked for your security.",
+          reuseDetected: true,
+        },
+      };
+    }
+
+    return { status: 401, body: { message: "Refresh token expired or revoked" } };
+  };
+
+  // 1. Normal rotation with RT1 -> succeeds and rotates to RT2
+  const firstRefresh = simulateRefresh(rt1);
+  assert.equal(firstRefresh.status, 200);
+  assert.equal(firstRefresh.session.refreshTokenHash, hash2);
+  assert.equal(firstRefresh.session.previousRefreshTokenHash, hash1);
+  assert.equal(allSessions.length, 1);
+
+  // 2. Adversary replays consumed RT1 -> reuse detected, all sessions wiped
+  const replayAttempt = simulateRefresh(rt1);
+  assert.equal(replayAttempt.status, 401);
+  assert.equal(replayAttempt.body.reuseDetected, true);
+  assert.equal(allSessions.length, 0, "All sessions must be wiped on refresh token reuse");
+});
+

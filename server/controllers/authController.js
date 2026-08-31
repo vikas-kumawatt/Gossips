@@ -1719,30 +1719,93 @@ export const refreshAccessToken = async (req, res) => {
     });
 
     if (!session) {
+      // Refresh token reuse detection (OAuth 2.0 / RFC 6819):
+      // Check if this token was already rotated previously.
+      const reusedSession = await UserSession.findOne({
+        user: decoded.id,
+        previousRefreshTokenHash: tokenHash,
+      });
+
+      if (reusedSession) {
+        // Malicious token reuse detected: an old rotated token was presented again.
+        // Revoke all sessions for this account immediately to terminate the breach.
+        console.warn(
+          `Security Alert: Refresh token reuse detected for user ${decoded.id}. Revoking all sessions.`
+        );
+        await UserSession.deleteMany({ user: decoded.id });
+
+        const baseOptions = {
+          httpOnly: true,
+          secure: process.env.NODE_ENV === "production",
+          sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+        };
+        res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, baseOptions);
+        if (requestedId) {
+          res.clearCookie(accountCookieName(requestedId), {
+            ...baseOptions,
+            path: ACCOUNT_COOKIE_PATH,
+          });
+        }
+
+        return res.status(401).json({
+          message: "Compromised token: Refresh token reuse detected. All sessions have been revoked for your security.",
+          reuseDetected: true,
+        });
+      }
+
       return res
         .status(401)
         .json({ message: "Refresh token expired or revoked" });
     }
 
-    // Rotate: delete old session, issue new tokens
-    await UserSession.deleteOne({ _id: session._id });
-
     const user = await User.findById(decoded.id);
-    if (!user) {
-      return res.status(401).json({ message: "User not found" });
+    if (!user || ["deleted", "deactivated"].includes(user.accountStatus)) {
+      await UserSession.deleteOne({ _id: session._id });
+      return res.status(401).json({ message: "User not found or unavailable" });
     }
 
-    const token = await issueAuthTokens(user._id, res, {
-      /*
-       * A background account refreshing must not become "the active account".
-       * Only a refresh that came through the shared cookie — i.e. was already
-       * the active one — is allowed to rewrite that pointer.
-       */
-      makeActive: refreshToken === sharedCookie,
-      deviceId: requestDeviceId(req),
+    // Atomic in-place rotation: generate new token and update the existing session row
+    const newAccessToken = createAccessToken(user._id);
+    const newRefreshToken = createRefreshToken(user._id);
+    const newTokenHash = hashToken(newRefreshToken);
+    const newExpiresAt = new Date(
+      Date.now() + REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000
+    );
+
+    const updatedSession = await UserSession.findOneAndUpdate(
+      {
+        _id: session._id,
+        refreshTokenHash: tokenHash,
+      },
+      {
+        $set: {
+          refreshTokenHash: newTokenHash,
+          previousRefreshTokenHash: tokenHash,
+          refreshTokenExpiresAt: newExpiresAt,
+          rotatedAt: new Date(),
+          lastActiveAt: new Date(),
+          revokedAt: null,
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedSession) {
+      return res.status(401).json({ message: "Refresh token rotation conflict" });
+    }
+
+    // Set updated cookies
+    const makeActive = refreshToken === sharedCookie;
+    if (makeActive) {
+      res.cookie(REFRESH_TOKEN_COOKIE_NAME, newRefreshToken, getRefreshTokenCookieOptions());
+    }
+    res.cookie(accountCookieName(user._id), newRefreshToken, {
+      ...getRefreshTokenCookieOptions(),
+      path: ACCOUNT_COOKIE_PATH,
     });
+
     // The id goes back so the client can assert it got what it asked for.
-    return res.status(200).json({ token, accountId: user._id });
+    return res.status(200).json({ token: newAccessToken, accountId: user._id });
   } catch (error) {
     console.error("refreshAccessToken error:", error);
     return res.status(500).json({ error: "Failed to refresh token" });
