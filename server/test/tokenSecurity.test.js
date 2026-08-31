@@ -380,6 +380,13 @@ test("two-factor authentication: TOTP secret generation, 6-digit code verificati
   assert.equal(invalidCheck.valid, false);
 });
 
+test("profile constants: BIO_MAX_LENGTH and NAME_MAX_GRAPHEMES are shared constants", async () => {
+  const { BIO_MAX_LENGTH, NAME_MAX_GRAPHEMES } = await import("../utils/profileConstants.js");
+  assert.equal(BIO_MAX_LENGTH, 150);
+  assert.equal(NAME_MAX_GRAPHEMES, 50);
+});
+
+
 
 
 

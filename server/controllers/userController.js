@@ -18,6 +18,7 @@ import {
   verifyTotpCode,
   generateBackupCodes,
 } from "../utils/twoFactor.js";
+import { BIO_MAX_LENGTH, NAME_MAX_GRAPHEMES } from "../utils/profileConstants.js";
 import { io } from "../server.js";
 import {
   buildCursorPageInfo,
@@ -143,8 +144,8 @@ export const setupProfile = async (req, res) => {
   try {
     const { name, bio, link, isPrivate } = req.body;
 
-    if (bio && bio.length > 150) {
-      return res.status(403).json({ error: "Bio should be less than 150 characters" });
+    if (bio && bio.length > BIO_MAX_LENGTH) {
+      return res.status(400).json({ error: `Bio must be ${BIO_MAX_LENGTH} characters or less` });
     }
     if (link) {
       try { new URL(link); } catch {
@@ -224,23 +225,17 @@ export const setupProfile = async (req, res) => {
             type: "follow_request",
           });
 
-          // Notify each requester that their request was auto-accepted
-          followerIds.forEach((followerId) => {
-            /*
-             * The follower's room, not this process's socket list.
-             *
-             * `getUserSocket` is a Map in one instance, so with more than one this update
-             * reached the user only when they happened to be served by the node handling
-             * the request. Every socket joins a room named after its user id on connect.
-             */
-            io.to(followerId.toString()).emit("followStatusUpdate", {
+          // Notify each requester that their request was auto-accepted in a single broadcast
+          const recipientRooms = followerIds.map((id) => id.toString());
+          if (recipientRooms.length > 0 && io) {
+            io.to(recipientRooms).emit("followStatusUpdate", {
               username: user.username,
               action: "follow",
               isPending: false,
               isPrivate: false,
               autoAccepted: true,
             });
-          });
+          }
         }
       }
     }

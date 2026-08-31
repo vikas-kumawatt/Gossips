@@ -5,10 +5,9 @@ import { Toaster, toast } from "react-hot-toast";
 import axios from "axios";
 import { Icons } from "../components/icons";
 import UsernameField from "../components/UsernameField";
+import PublicAccountConfirmModal from "../components/PublicAccountConfirmModal";
 import { clampGraphemes, graphemeLength } from "../lib/graphemes";
-
-// Matches NAME_MAX_GRAPHEMES in the server's setupProfile.
-const NAME_MAX = 50;
+import { BIO_MAX_LENGTH, NAME_MAX_GRAPHEMES } from "../lib/profileConstants";
 
 const ProfileSetup = () => {
   const { userAuth, setUserAuth } = useContext(UserContext);
@@ -21,6 +20,7 @@ const ProfileSetup = () => {
     isVerified: false,
     loading: false,
   });
+  const [isConfirmPublicOpen, setIsConfirmPublicOpen] = useState(false);
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const textareaRef = useRef(null);
@@ -72,7 +72,7 @@ const ProfileSetup = () => {
 
   const handleChange = (e) => {
     const { value } = e.target;
-    if (value.length <= 150) {
+    if (value.length <= BIO_MAX_LENGTH) {
       setProfileData((prev) => ({
         ...prev,
         bio: value,
@@ -192,15 +192,15 @@ const ProfileSetup = () => {
               onChange={(e) =>
                 setProfileData((prev) => ({
                   ...prev,
-                  name: clampGraphemes(e.target.value, NAME_MAX),
+                  name: clampGraphemes(e.target.value, NAME_MAX_GRAPHEMES),
                 }))
               }
             />
             {/* Only once it's worth watching — a counter on an empty field is
                 just clutter. */}
-            {graphemeLength(profileData.name) > NAME_MAX - 10 && (
+            {graphemeLength(profileData.name) > NAME_MAX_GRAPHEMES - 10 && (
               <div className="text-right text-xs text-neutral-400 mt-1">
-                {graphemeLength(profileData.name)}/{NAME_MAX}
+                {graphemeLength(profileData.name)}/{NAME_MAX_GRAPHEMES}
               </div>
             )}
 
@@ -238,7 +238,7 @@ const ProfileSetup = () => {
                 className="w-full rounded-xl p-2 text-white text-sm bg-transparent resize-none outline-none overflow-hidden"
                 ref={textareaRef}
                 placeholder="Write bio"
-                maxLength={150}
+                maxLength={BIO_MAX_LENGTH}
                 rows={1}
                 value={profileData.bio}
                 onChange={handleChange}
@@ -246,7 +246,7 @@ const ProfileSetup = () => {
               />
             </div>
             <div className="text-right text-xs text-neutral-400 mt-1">
-              {profileData.bio.length}/150
+              {profileData.bio.length}/{BIO_MAX_LENGTH}
             </div>
           </div>
 
@@ -287,12 +287,14 @@ const ProfileSetup = () => {
                   type="checkbox"
                   className="sr-only peer"
                   checked={profileData.isPrivate}
-                  onChange={() =>
-                    setProfileData((prev) => ({
-                      ...prev,
-                      isPrivate: !prev.isPrivate,
-                    }))
-                  }
+                  onChange={() => {
+                    if (profileData.isPrivate) {
+                      // Switching from private -> public requires confirmation
+                      setIsConfirmPublicOpen(true);
+                    } else {
+                      setProfileData((prev) => ({ ...prev, isPrivate: true }));
+                    }
+                  }}
                 />
                 <div
                   className={`relative w-11 h-6 bg-neutral-800 rounded-full transition-colors
@@ -330,6 +332,15 @@ const ProfileSetup = () => {
           </button>
         </div>
       </div>
+
+      <PublicAccountConfirmModal
+        isOpen={isConfirmPublicOpen}
+        onClose={() => setIsConfirmPublicOpen(false)}
+        onConfirm={() => {
+          setProfileData((prev) => ({ ...prev, isPrivate: false }));
+          setIsConfirmPublicOpen(false);
+        }}
+      />
     </section>
   );
 };

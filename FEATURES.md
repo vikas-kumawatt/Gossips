@@ -286,7 +286,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `ProfileSetup.jsx` submits multipart `POST /user/profile-setup`. `setupProfile` strips control characters, collapses whitespace, and caps the display name at 50 **graphemes** via `Intl.Segmenter` (so multi-codepoint emoji count as one), validates the link as a URL, and resolves bio mentions through `indexContent` — only newly added mentions notify, so a typo fix doesn't re-ping everyone. Switching private→public bulk-accepts all pending requests: `Follow.updateMany`, counter increments, notification cleanup, and a `followStatusUpdate` emit per accepted follower.
 
-**Improvements:** The auto-accept fires N socket emits in a loop and has no confirmation dialog warning about the side effect. The 150-char bio cap isn't a shared constant.
+**Improved:** Auto-accepted follow requests are broadcast in a single multi-room emit via `io.to(recipientRooms).emit(...)`, switching to a public profile prompts for confirmation (`PublicAccountConfirmModal.jsx`) warning about automatic request acceptance, and `BIO_MAX_LENGTH` (150) / `NAME_MAX_GRAPHEMES` (50) are shared across client and server.
 
 ### Avatar upload & fallback
 

@@ -12,6 +12,7 @@ import OnlineStatusSheet from "../components/OnlineStatusSheet";
 import DeactivateDeleteModal from "../components/DeactivateDeleteModal";
 import SecurityTwoFactorModal from "../components/SecurityTwoFactorModal";
 import AccountDetailsModal from "../components/AccountDetailsModal";
+import PublicAccountConfirmModal from "../components/PublicAccountConfirmModal";
 import { userAPI } from "../services/api";
 import toast from "react-hot-toast";
 import {
@@ -30,6 +31,7 @@ const SettingsPage = () => {
   const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
   const [isDeactivateModalOpen, setIsDeactivateModalOpen] = useState(false);
   const [isAccountDetailsOpen, setIsAccountDetailsOpen] = useState(false);
+  const [isConfirmPublicOpen, setIsConfirmPublicOpen] = useState(false);
   const [accountDetailsMode, setAccountDetailsMode] = useState("personal");
   const [isPrivate, setIsPrivate] = useState(Boolean(userAuth?.isPrivate));
   const [privacySaving, setPrivacySaving] = useState(false);
@@ -40,6 +42,21 @@ const SettingsPage = () => {
 
   const handleTabChange = (index) => {
     setActiveTab(index);
+  };
+
+  const applyPrivacyChange = async (nextValue) => {
+    setIsPrivate(nextValue);
+    setPrivacySaving(true);
+    try {
+      await userAPI.setupProfile({ isPrivate: nextValue });
+      setUserAuth({ ...userAuth, isPrivate: nextValue });
+      toast.success(nextValue ? "Account is now private" : "Account is now public");
+    } catch (err) {
+      setIsPrivate(!nextValue);
+      toast.error(err?.response?.data?.error || "Failed to update privacy setting");
+    } finally {
+      setPrivacySaving(false);
+    }
   };
 
   /*
@@ -136,34 +153,24 @@ const SettingsPage = () => {
         </div>
       )}
 
-      <div className="flex relative items-center gap-4 mb-4 w-full">
-        <Icons.lock className="h-6 w-6" />
-        <div className="flex-1 min-w-0">
+      <div className="flex justify-between items-center w-full mb-4">
+        <div>
           <p className="text-md">Private profile</p>
-          <p className="text-xs text-neutral-500">
-            {isPrivate ? "Only approved followers can see your posts" : "Anyone can see your profile and posts"}
+          <p className="text-xs text-neutral-500 max-w-sm mt-0.5">
+            When private, only accepted followers can view your posts and replies.
           </p>
         </div>
-        
         <button
           type="button"
           role="switch"
           aria-checked={isPrivate}
           aria-label="Private profile"
           disabled={privacySaving}
-          onClick={async () => {
-            const next = !isPrivate;
-            setIsPrivate(next);
-            setPrivacySaving(true);
-            try {
-              await userAPI.setupProfile({ isPrivate: next });
-              setUserAuth({ ...userAuth, isPrivate: next });
-              toast.success(next ? "Account is now private" : "Account is now public");
-            } catch (err) {
-              setIsPrivate(!next);
-              toast.error(err?.response?.data?.error || "Failed to update privacy setting");
-            } finally {
-              setPrivacySaving(false);
+          onClick={() => {
+            if (isPrivate) {
+              setIsConfirmPublicOpen(true);
+            } else {
+              applyPrivacyChange(true);
             }
           }}
           className={`relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:opacity-40 cursor-pointer ${
@@ -383,6 +390,15 @@ const SettingsPage = () => {
         isOpen={isAccountDetailsOpen}
         mode={accountDetailsMode}
         onClose={() => setIsAccountDetailsOpen(false)}
+      />
+      <PublicAccountConfirmModal
+        isOpen={isConfirmPublicOpen}
+        loading={privacySaving}
+        onClose={() => setIsConfirmPublicOpen(false)}
+        onConfirm={() => {
+          setIsConfirmPublicOpen(false);
+          applyPrivacyChange(false);
+        }}
       />
     </div>
   );
