@@ -358,7 +358,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `ProfilePage.jsx` → `requestBlock()` → confirm → `POST /user/block/:username`. `services/moderation.js#blockUser` is idempotent (a duplicate-key hit on the unique `{from,to,kind}` index returns `alreadyBlocked: true` so optimistic UI never wedges), then deletes accepted edges both directions plus pending requests, decrementing only counters for edges that existed. `BlockContext` indexes blocked accounts by **both id and lowercased username** (id survives a rename) and tracks in-flight mutations so a refresh can't clobber an optimistic toggle.
 
-**Improvements:** Unblocking does not restore the destroyed follows — permanent by design, but the confirm dialog should say so.
+**Improved:** Updated the global block confirmation dialog in `BlockContext.jsx` to explicitly inform the user that blocking permanently removes any existing follow relationships and unblocking will not restore them.
 
 ### Mute
 

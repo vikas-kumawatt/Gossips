@@ -317,8 +317,9 @@ export const BlockProvider = ({ children }) => {
           onConfirm={confirmBlock}
           onCancel={() => !working && setPending(null)}
         >
-          They won't be able to find your profile, posts or message you on
-          Gossips. We won't let them know you blocked them.
+          They won't be able to find your profile, posts, or message you on
+          Gossips. We won't let them know you blocked them. Any existing follow
+          relationship will be permanently removed and will not be restored if you unblock them later.
         </ConfirmDialog>
       )}
     </BlockContext.Provider>
