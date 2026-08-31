@@ -42,22 +42,18 @@ const FollowButton = ({
   const { followUpdates, handleFollowUpdate } = useFollow();
 
   const getInitialFollowState = () => {
-    if (initialState?.isFollowing) {
-      return true;
+    if (initialState?.isFollowing !== undefined) {
+      return Boolean(initialState.isFollowing);
     }
 
-    const isFollowingFromProps = Array.isArray(currentUserFollowing) && 
-      currentUserFollowing.some(user => 
-        (typeof user === 'object' && user?.username === username) || user === username
-      );
-
-    const storedAuth = JSON.parse(sessionStorage.getItem('userAuth')) || {};
-    const storedFollowing = Array.isArray(storedAuth.following) ? storedAuth.following : [];
-    const isFollowingFromStorage = storedFollowing.some(user => 
-      (typeof user === 'object' && user?.username === username) || user === username
+    const followingList = currentUserFollowing || userAuth?.following || [];
+    return (
+      Array.isArray(followingList) &&
+      followingList.some(
+        (user) =>
+          (typeof user === "object" && user?.username === username) || user === username
+      )
     );
-
-    return isFollowingFromProps || isFollowingFromStorage;
   };
 
   const refreshFollowStatus = useCallback(async () => {

@@ -318,7 +318,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `FollowButton.jsx` → `POST /user/follow/:username` or `/unfollow/:username`, fully optimistic across React state, a module-level `followStatusCache` and `sessionStorage`. `services/engagement.js#followUser` blocks self-follow (400) and either-direction blocks (403), then either creates a `pending` edge + `follow_request` notification, or an `accepted` edge + counter increments + `follow` notification, and emits `followStatusUpdate` to the actor's room. `unfollowUser` deletes the edge regardless of status (so it doubles as "cancel request"), decrements only if it was accepted, sends no notification, and **deliberately skips the block check** so you can always unfollow someone who blocked you.
 
-**Improvements:** Three places track the same fact (React state, module Map, `sessionStorage`) — consolidate. The confirm dialog appears for unfollowing a private account but not for cancelling a pending request, which is correct but subtle.
+**Improved:** Consolidated follow state tracking into `UserContext` and `FollowContext` (removing duplicate `sessionStorage` scraping across components), while preserving immediate request cancellation without unnecessary confirm dialogs.
 
 ### Follow requests
 
