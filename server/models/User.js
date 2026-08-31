@@ -99,6 +99,9 @@ const userSchema = new Schema(
       default: [],
     },
 
+    failedLoginAttempts: { type: Number, default: 0, select: false },
+    lockoutUntil:        { type: Date, default: null, select: false },
+
     // ── Profile ───────────────────────────────────────────────
     bio:        { type: String, default: "", maxlength: 250 },
     /*

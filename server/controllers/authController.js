@@ -218,6 +218,8 @@ const storeRefreshToken = async (userId, refreshToken, deviceId) => {
         refreshTokenExpiresAt: expiresAt,
         lastActiveAt: new Date(),
         isCurrent: true,
+        isTrusted: true,
+        trustedAt: new Date(),
         revokedAt: null,
       },
     },
@@ -368,6 +370,10 @@ const OTP_MAX_SENDS = 5;
  * many IPs cannot do together what one cannot do alone.
  */
 const MAX_PENDING_PER_EMAIL = 5;
+/** Maximum consecutive failed password attempts before temporary account lockout. */
+const MAX_FAILED_LOGIN_ATTEMPTS = 5;
+/** Duration of temporary lockout following repeated failed login attempts (15 minutes). */
+const ACCOUNT_LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 /*
  * Matches `maxlength` on `User.name` and `PendingSignup.name`. Checked in the
  * handler so an over-long name is a 400 the user can act on rather than a
@@ -856,8 +862,8 @@ export const loginUser = async (req, res) => {
     if (email) query.email = email;
     if (username) query.username = username;
 
-    // password is select:false — must be explicitly requested
-    const user = await User.findOne(query).select("+password +googleId");
+    // password, failedLoginAttempts, and lockoutUntil are select:false — must be explicitly requested
+    const user = await User.findOne(query).select("+password +googleId +failedLoginAttempts +lockoutUntil");
 
     if (!user) {
       return res
@@ -872,27 +878,64 @@ export const loginUser = async (req, res) => {
       });
     }
 
-    const isMatch = await user.comparePassword(password);
-    if (!isMatch) {
-      return res.status(400).json({ error: "Invalid credentials" });
+    // Per-account lockout check: stops distributed credential stuffing across rotating IPs
+    if (user.lockoutUntil && user.lockoutUntil > new Date()) {
+      const remainingSeconds = Math.max(1, Math.ceil((user.lockoutUntil.getTime() - Date.now()) / 1000));
+      res.set("Retry-After", String(remainingSeconds));
+      return res.status(429).json({
+        error: `Account temporarily locked due to repeated failed login attempts. Please try again in ${Math.ceil(remainingSeconds / 60)} minute(s) or reset your password.`,
+        retryAfter: remainingSeconds,
+        locked: true,
+      });
     }
 
-    /*
-     * No email-verification gate here, and that is a property of the design
-     * rather than an omission.
-     *
-     * A row in `users` only exists once its code was entered, so "signed up but
-     * unverified" is not a state this query can return — an abandoned signup
-     * lives in `PendingSignup` and is found by nothing above, which is why the
-     * answer to it is the same "User not found. Please register." it has always
-     * been. Had pending signups been kept as unverified `User` rows, this is
-     * exactly where the gate would have had to go, and forgetting it would have
-     * made the whole verification screen decorative.
-     */
+    const isMatch = await user.comparePassword(password);
+    if (!isMatch) {
+      const attempts = (user.failedLoginAttempts || 0) + 1;
+      if (attempts >= MAX_FAILED_LOGIN_ATTEMPTS) {
+        const lockoutUntil = new Date(Date.now() + ACCOUNT_LOCKOUT_DURATION_MS);
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS, lockoutUntil } }
+        );
+        const retryAfter = Math.ceil(ACCOUNT_LOCKOUT_DURATION_MS / 1000);
+        res.set("Retry-After", String(retryAfter));
+        return res.status(429).json({
+          error: "Too many failed login attempts. Account temporarily locked for 15 minutes. Please try again later or reset your password.",
+          retryAfter,
+          locked: true,
+        });
+      }
+
+      await User.updateOne({ _id: user._id }, { $set: { failedLoginAttempts: attempts } });
+      const attemptsLeft = MAX_FAILED_LOGIN_ATTEMPTS - attempts;
+      return res.status(400).json({
+        error: "Invalid credentials",
+        attemptsLeft,
+      });
+    }
+
+    // Password matched: clear any lingering failed attempt count or lockout
+    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { failedLoginAttempts: 0, lockoutUntil: null } }
+      );
+    }
+
     recordSignInCountry(req, user._id);
 
+    const deviceId = requestDeviceId(req);
+    const existingSession = await UserSession.findOne({
+      user: user._id,
+      deviceId,
+      revokedAt: null,
+      refreshTokenExpiresAt: { $gt: new Date() },
+    }).lean();
+    const isTrustedDevice = Boolean(existingSession?.isTrusted);
+
     const token = await issueAuthTokens(user._id, res, {
-      deviceId: requestDeviceId(req),
+      deviceId,
     });
 
     res.status(200).json({
@@ -908,6 +951,7 @@ export const loginUser = async (req, res) => {
       isVerified: user.isVerified,
       role: user.role,
       counts: user.counts,
+      isTrustedDevice,
       token,
     });
   } catch (error) {
@@ -1503,6 +1547,8 @@ export const resetPassword = async (req, res) => {
     user.password = password; // pre-save hook hashes it
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
+    user.failedLoginAttempts = 0;
+    user.lockoutUntil = null;
     await user.save();
 
     // Revoke all existing sessions on password reset (security best practice)

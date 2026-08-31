@@ -116,7 +116,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/login` → `loginUser` looks the user up with `{...HUMAN_ACCOUNT}` (bot rows excluded by construction), rejects Google-only accounts with `needPasswordSetup: true`, compares via bcrypt, records sign-in country asynchronously, and issues tokens. Rate-limited 10/15min/IP.
 
-**Improvements:** No per-account lockout after repeated failures — only the IP limiter, which a distributed credential-stuffing attack sidesteps. No trusted-device concept.
+**Improvements:** Enforces per-account lockout (5 consecutive failed attempts lock the account for 15 minutes with Retry-After header and password-reset unlock) to defeat distributed credential-stuffing attacks. Tracks trusted devices via `UserSession.isTrusted`.
 
 ### Google sign-in
 

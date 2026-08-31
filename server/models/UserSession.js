@@ -26,6 +26,8 @@ const userSessionSchema = new Schema(
     },
 
     isCurrent:    { type: Boolean, default: true },
+    isTrusted:    { type: Boolean, default: true },
+    trustedAt:    { type: Date, default: Date.now },
     lastActiveAt: { type: Date, default: Date.now },
     revokedAt:    { type: Date, default: null },
   },
