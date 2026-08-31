@@ -73,8 +73,8 @@ const PostHeader = ({
   const [isReplyPrivacyOpen, setIsReplyPrivacyOpen] = useState(false);
   const { isMuted } = useMute();
   const { isBlocked } = useBlock();
-  const authorMuted = isMuted(author?.username);
-  // The whole author, so the lookup uses the id and survives a handle change.
+  // The whole author, so both lookups use the id and survive a handle change.
+  const authorMuted = isMuted(author);
   const authorBlocked = isBlocked(author);
 
   return (

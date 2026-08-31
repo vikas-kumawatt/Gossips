@@ -1072,7 +1072,12 @@ export const getMutedUsers = async (req, res) => {
     const rows = await UserRelation.find({ from: req.user._id, kind: "mute" })
       .populate("to", "username")
       .lean();
-    const muted = rows.map((r) => r.to?.username).filter(Boolean);
+    const muted = rows
+      .filter((r) => r.to)
+      .map((r) => ({
+        _id: r.to._id,
+        username: r.to.username,
+      }));
     res.status(200).json({ muted });
   } catch (error) {
     console.error("getMutedUsers error:", error);

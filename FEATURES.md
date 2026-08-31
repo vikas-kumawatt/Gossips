@@ -366,7 +366,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `POST /user/mute/:username` / `/unmute/:username` on `UserRelation{kind:"mute"}`. Deliberately no notification and no cache invalidation.
 
-**Improvements:** `MuteContext` indexes by username only (unlike `BlockContext`), so a mute breaks if the muted account renames. Align the two.
+**Improved:** Aligned `MuteContext` with `BlockContext` by dual-indexing muted accounts across both immutable user `_id` and lowercased `username`, ensuring mute rules persist seamlessly across username renames.
 
 ### Restrict
 
