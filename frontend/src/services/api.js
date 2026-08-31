@@ -187,6 +187,18 @@ export const authAPI = {
     api
       .post("/auth/logout", accountId ? { accountId } : {}, { _retry: true })
       .then((r) => r.data),
+
+  listSessions: () =>
+    api.get("/auth/sessions", { skipRequestCacheInterceptor: true }).then((r) => r.data),
+
+  revokeSession: (sessionId) =>
+    api.delete(`/auth/sessions/${sessionId}`).then((r) => r.data),
+
+  logoutOthers: () =>
+    api.post("/auth/logout-others", {}, { _retry: true }).then((r) => r.data),
+
+  logoutAll: () =>
+    api.post("/auth/logout-all", {}, { _retry: true }).then((r) => r.data),
 };
 
 // ─── User ────────────────────────────────────────────────────────────────────

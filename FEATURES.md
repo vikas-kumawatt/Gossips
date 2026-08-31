@@ -190,15 +190,15 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/logout` resolves which cookie to act on (`rt_<id>` if an account was named, else the shared cookie), deletes the matching `UserSession` by hash, clears the cookie, and clears the *shared* pointer cookie only if the account being logged out is actually the active one. The client also disables push for the device and purges that account's request/feed/chat caches and chat-unlock grants.
 
-**Improvements:** There is no "log out of all devices" button and no session list UI — the only blanket revoke is the side effect of a password reset.
+**Improved:** Implemented `GET /auth/sessions`, `DELETE /auth/sessions/:sessionId`, `POST /auth/logout-others`, and `POST /auth/logout-all` along with the `ActiveSessionsModal` UI in Settings (Security & Active Logins) for inspecting and managing active devices and logging out everywhere.
 
-### Log out everywhere (only via password reset)
+### Log out everywhere (explicit feature & password reset)
 
-**What it does:** All sessions die, as a side effect of resetting the password.
+**What it does:** Allows users to terminate all active sessions across all devices on demand or automatically during password resets.
 
-**How it works:** `resetPassword` calls `UserSession.deleteMany({ user })`.
+**How it works:** `POST /auth/logout-all` and `resetPassword` invoke `UserSession.deleteMany({ user })`, revoking active tokens and clearing session cookies.
 
-**Improvements:** It's a side effect, not a feature — no per-device revoke, no sessions screen. `UserSettings.security` already defines `loginAlerts` and `unrecognizedDeviceAlerts` that nothing reads or writes, suggesting this was planned.
+**Improved:** Added explicit user-facing "Log Out Everywhere" and "Log Out Other Devices" controls with active session inspection (`ActiveSessionsModal`) in Settings → Security.
 
 ### Username availability check
 

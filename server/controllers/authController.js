@@ -2017,3 +2017,124 @@ export const switchAccount = async (req, res) => {
     return res.status(500).json({ error: "Failed to switch account" });
   }
 };
+
+/**
+ * GET /auth/sessions — List all active sessions/devices for the signed-in user.
+ */
+export const listSessions = async (req, res) => {
+  try {
+    const currentDeviceId = requestDeviceId(req);
+    const sessions = await UserSession.find({
+      user: req.user._id,
+      refreshTokenExpiresAt: { $gt: new Date() },
+      revokedAt: null,
+    })
+      .sort({ lastActiveAt: -1, createdAt: -1 })
+      .select("deviceId deviceType os browser appVersion ipAddress userAgent isTrusted trustedAt lastActiveAt createdAt")
+      .lean();
+
+    const mapped = sessions.map((s) => ({
+      id: s._id,
+      deviceId: s.deviceId,
+      deviceType: s.deviceType || "desktop",
+      os: s.os || "Unknown OS",
+      browser: s.browser || "Browser",
+      ipAddress: s.ipAddress || "",
+      userAgent: s.userAgent || "",
+      isTrusted: Boolean(s.isTrusted),
+      trustedAt: s.trustedAt,
+      lastActiveAt: s.lastActiveAt,
+      createdAt: s.createdAt,
+      isCurrent: s.deviceId === currentDeviceId,
+    }));
+
+    return res.status(200).json({ sessions: mapped });
+  } catch (error) {
+    console.error("listSessions error:", error);
+    return res.status(500).json({ error: "Failed to list sessions" });
+  }
+};
+
+/**
+ * DELETE /auth/sessions/:sessionId — Revoke a specific active device session.
+ */
+export const revokeSession = async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const currentDeviceId = requestDeviceId(req);
+
+    const session = await UserSession.findOne({ _id: sessionId, user: req.user._id });
+    if (!session) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    await UserSession.deleteOne({ _id: session._id });
+
+    const isCurrent = session.deviceId === currentDeviceId;
+    if (isCurrent) {
+      const authHeader = req.headers.authorization;
+      if (authHeader && authHeader.startsWith("Bearer ")) {
+        const accessToken = authHeader.split(" ")[1];
+        await revokeAccessToken(accessToken, req.user._id, null, "revocation");
+      }
+    }
+
+    return res.status(200).json({
+      message: "Session revoked successfully",
+      sessionId,
+      isCurrent,
+    });
+  } catch (error) {
+    console.error("revokeSession error:", error);
+    return res.status(500).json({ error: "Failed to revoke session" });
+  }
+};
+
+/**
+ * POST /auth/logout-others — Sign out of all other devices except this current one.
+ */
+export const logoutOtherDevices = async (req, res) => {
+  try {
+    const currentDeviceId = requestDeviceId(req);
+    await UserSession.deleteMany({
+      user: req.user._id,
+      deviceId: { $ne: currentDeviceId },
+    });
+
+    return res.status(200).json({ message: "Logged out of all other devices successfully" });
+  } catch (error) {
+    console.error("logoutOtherDevices error:", error);
+    return res.status(500).json({ error: "Failed to log out of other devices" });
+  }
+};
+
+/**
+ * POST /auth/logout-all — Sign out of all devices and terminate all sessions.
+ */
+export const logoutAllDevices = async (req, res) => {
+  try {
+    await UserSession.deleteMany({ user: req.user._id });
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const accessToken = authHeader.split(" ")[1];
+      await revokeAccessToken(accessToken, req.user._id, null, "logout_all");
+    }
+
+    const baseOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    };
+    res.clearCookie(REFRESH_TOKEN_COOKIE_NAME, baseOptions);
+    res.clearCookie(accountCookieName(req.user._id), {
+      ...baseOptions,
+      path: ACCOUNT_COOKIE_PATH,
+    });
+
+    return res.status(200).json({ message: "Logged out of all devices successfully" });
+  } catch (error) {
+    console.error("logoutAllDevices error:", error);
+    return res.status(500).json({ error: "Failed to log out of all devices" });
+  }
+};

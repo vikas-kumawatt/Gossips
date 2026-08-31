@@ -7,6 +7,7 @@ import { UserContext } from "../contexts/UserContext";
 import InPageNavigation from "../components/InPageNavigation";
 import BlockedAccountsModal from "../components/BlockedAccountsModal";
 import MentionSettingsSheet from "../components/MentionSettingsSheet";
+import ActiveSessionsModal from "../components/ActiveSessionsModal";
 import {
   disablePushNotifications,
   enablePushNotifications,
@@ -18,6 +19,7 @@ const SettingsPage = () => {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
   const [isMentionsOpen, setIsMentionsOpen] = useState(false);
+  const [isSessionsOpen, setIsSessionsOpen] = useState(false);
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
   const layoutContext = { openCreateModal, closeCreateModal };
@@ -213,9 +215,12 @@ const SettingsPage = () => {
         <Icons.link className="h-5 w-5 absolute right-0"/>
       </div>
 
-    <div className="flex relative w-full items-center gap-4 mb-4">
-        <p className="text-md">Security</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
+    <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsSessionsOpen(true)}
+      >
+        <p className="text-md">Security & Active Logins</p>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
     <div className="flex relative w-full items-center gap-4 mb-4">
@@ -313,6 +318,10 @@ const SettingsPage = () => {
       {isMentionsOpen && (
         <MentionSettingsSheet onClose={() => setIsMentionsOpen(false)} />
       )}
+      <ActiveSessionsModal
+        isOpen={isSessionsOpen}
+        onClose={() => setIsSessionsOpen(false)}
+      />
     </div>
   );
 };

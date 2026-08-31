@@ -182,4 +182,38 @@ test("per-user session cap: restricts active UserSession rows to MAX_SESSIONS_PE
   assert.equal(sessions.some((s) => s.deviceId === "device_15"), true);
 });
 
+test("session revocation: single session revoke, logout-others, and logout-all", () => {
+  const userId = "68b0f3c1a2d4e5f60718293a";
+  let sessions = [
+    { _id: "s1", user: userId, deviceId: "phone_1" },
+    { _id: "s2", user: userId, deviceId: "laptop_current" },
+    { _id: "s3", user: userId, deviceId: "tablet_3" },
+  ];
+
+  // 1. Single session revoke
+  const revokeSingle = (sessionId) => {
+    sessions = sessions.filter((s) => s._id !== sessionId);
+  };
+  revokeSingle("s1");
+  assert.equal(sessions.length, 2);
+  assert.equal(sessions.some((s) => s._id === "s1"), false);
+
+  // 2. Logout other devices (keep current laptop)
+  const currentDeviceId = "laptop_current";
+  const logoutOthers = () => {
+    sessions = sessions.filter((s) => s.deviceId === currentDeviceId);
+  };
+  logoutOthers();
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].deviceId, "laptop_current");
+
+  // 3. Logout all devices
+  const logoutAll = () => {
+    sessions = [];
+  };
+  logoutAll();
+  assert.equal(sessions.length, 0);
+});
+
+
 

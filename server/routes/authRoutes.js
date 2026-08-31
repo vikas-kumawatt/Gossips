@@ -12,7 +12,12 @@ import {
   logoutUser,
   listAccounts,
   switchAccount,
+  listSessions,
+  revokeSession,
+  logoutOtherDevices,
+  logoutAllDevices,
 } from "../controllers/authController.js";
+import { protect } from "../middleware/authMiddleware.js";
 import { requireRegistrationsOpen } from "../middleware/featureGate.js";
 import { isAllowedOrigin } from "../config/origins.js";
 
@@ -109,6 +114,12 @@ router.post("/forgot-password", forgotPasswordLimit, forgotPassword);
 router.post("/reset-password", forgotPasswordLimit, resetPassword);
 router.post("/refresh", sameOriginOnly, refreshAccessToken);
 router.post("/logout", sameOriginOnly, logoutUser);
+router.post("/logout-others", protect, sameOriginOnly, logoutOtherDevices);
+router.post("/logout-all", protect, sameOriginOnly, logoutAllDevices);
+
+// Session management (listing active devices and revoking specific sessions)
+router.get("/sessions", protect, listSessions);
+router.delete("/sessions/:sessionId", protect, revokeSession);
 
 // Multi-account. Both read the per-account refresh cookies, so they must live
 // under /auth — that's the path those cookies are scoped to.
