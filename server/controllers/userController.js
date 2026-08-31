@@ -1085,6 +1085,30 @@ export const getMutedUsers = async (req, res) => {
   }
 };
 
+export const getRestrictedUsers = async (req, res) => {
+  try {
+    const rows = await UserRelation.find({ from: req.user._id, kind: "restrict" })
+      .populate("to", "username name profilePic isVerified verificationBadge")
+      .sort({ createdAt: -1 })
+      .lean();
+    const restricted = rows
+      .filter((r) => r.to)
+      .map((r) => ({
+        _id: r.to._id,
+        username: r.to.username,
+        name: r.to.name || "",
+        profilePic: r.to.profilePic || "",
+        isVerified: Boolean(
+          r.to.isVerified || (r.to.verificationBadge && r.to.verificationBadge !== "none")
+        ),
+      }));
+    res.status(200).json({ restricted });
+  } catch (error) {
+    console.error("getRestrictedUsers error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 export const restrictUser = async (req, res) => {
   try {
     const userToRestrict = await User.findOne({ username: req.params.username }).select("_id");

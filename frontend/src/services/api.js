@@ -345,6 +345,9 @@ export const userAPI = {
   unrestrict: (username) =>
     api.post(`/user/unrestrict/${username}`).then((r) => r.data),
 
+  getRestricted: () =>
+    api.get("/user/restricted", { skipRequestCacheInterceptor: true }).then((r) => r.data),
+
   block: (username) =>
     api.post(`/user/block/${username}`).then((r) => r.data),
 

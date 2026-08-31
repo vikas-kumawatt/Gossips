@@ -13,6 +13,7 @@ import DeactivateDeleteModal from "../components/DeactivateDeleteModal";
 import SecurityTwoFactorModal from "../components/SecurityTwoFactorModal";
 import AccountDetailsModal from "../components/AccountDetailsModal";
 import PublicAccountConfirmModal from "../components/PublicAccountConfirmModal";
+import RestrictedAccountsModal from "../components/RestrictedAccountsModal";
 import { userAPI } from "../services/api";
 import toast from "react-hot-toast";
 import {
@@ -25,6 +26,7 @@ const SettingsPage = () => {
   const { userAuth, setUserAuth } = useContext(UserContext);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
+  const [isRestrictedModalOpen, setIsRestrictedModalOpen] = useState(false);
   const [isMentionsOpen, setIsMentionsOpen] = useState(false);
   const [isOnlineStatusOpen, setIsOnlineStatusOpen] = useState(false);
   const [isSessionsOpen, setIsSessionsOpen] = useState(false);
@@ -203,10 +205,13 @@ const SettingsPage = () => {
         <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
-      <div className="flex relative w-full items-center gap-4 mb-4">
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsRestrictedModalOpen(true)}
+      >
         <Icons.restrict className="h-6 w-6" />
         <p className="text-md">Restricted profiles</p>
-        <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
       <div
@@ -367,6 +372,10 @@ const SettingsPage = () => {
       <BlockedAccountsModal
         isOpen={isBlockedModalOpen}
         onClose={() => setIsBlockedModalOpen(false)}
+      />
+      <RestrictedAccountsModal
+        isOpen={isRestrictedModalOpen}
+        onClose={() => setIsRestrictedModalOpen(false)}
       />
       {isMentionsOpen && (
         <MentionSettingsSheet onClose={() => setIsMentionsOpen(false)} />

@@ -23,6 +23,7 @@ import {
   unmuteUser,
   getMutedUsers,
   getBlockedUsers,
+  getRestrictedUsers,
   getFollowersList,
   removeFollower,
   getFollowingList,
@@ -116,6 +117,7 @@ router.patch("/username", protect, changeLimiter, changeUsername);
 router.get("/users", protect, getUsers);
 router.get("/muted", protect, getMutedUsers);
 router.get("/blocked", protect, getBlockedUsers);
+router.get("/restricted", protect, getRestrictedUsers);
 router.get("/follow-requests", protect, getFollowRequests);
 router.post("/follow-requests/accept-all", protect, acceptAllFollowRequests);
 router.post("/follow-requests/:requestId/accept", protect, acceptFollowRequest);

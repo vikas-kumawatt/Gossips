@@ -374,7 +374,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `POST /user/restrict/:username` and `DELETE /user/unrestrict/:username` toggle `UserRelation{kind:"restrict"}` (400 on double-restrict). The "Restrict" item exists in the `ProfilePage.jsx` dropdown but its `onClick` is commented out.
 
-**Improvements:** Wire the handler (the backend is ready) or hide the menu item. Right now it reads as half-shipped.
+**Improved:** Wired the Restrict / Remove restriction toggle in `ProfilePage.jsx` dropdown and added `GET /user/restricted` along with a dedicated `RestrictedAccountsModal.jsx` connected to Settings.
 
 ### Blocked accounts list
 
@@ -1848,7 +1848,7 @@ The bot subsystem, and specifically **treating the LLM as an attacker**. The int
 
 | Area | State |
 | --- | --- |
-| Restrict user | Backend complete; the profile menu item's `onClick` is commented out |
+| Restrict user | Wired in `ProfilePage.jsx` dropdown & `RestrictedAccountsModal.jsx` in Settings |
 | Remove follower | Wired with 3-dot dropdown menu & confirmation modal in `FollowersModal.jsx` |
 | Pin post | Not implemented at all (no field, no endpoint) |
 | Cover photo / pronouns / birthday | Removed unused fields and virtuals from `User` & `Group` models |

@@ -29,6 +29,7 @@ import { toast } from "react-hot-toast";
 import { useMute } from "../contexts/MuteContext";
 import { useBlock } from "../contexts/BlockContext";
 import { useReport } from "../contexts/ReportContext";
+import { userAPI } from "../services/api";
 import {
   DropdownMenu,
   DropdownMenuTrigger,
@@ -85,6 +86,40 @@ const ProfilePage = () => {
       unblockAccount(blockIdentity).catch(() => {});
     } else {
       requestBlock({ _id: profile?._id, username: profileId, name: profile?.name });
+    }
+  };
+
+  const isRestricted = Boolean(profile?.relationship?.youRestricted);
+
+  const handleToggleRestrictProfile = async () => {
+    const next = !isRestricted;
+    setProfile((prev) => ({
+      ...prev,
+      relationship: {
+        ...(prev.relationship || {}),
+        youRestricted: next,
+      },
+    }));
+    try {
+      if (next) {
+        await userAPI.restrict(profileId);
+        toast.success(`Restricted @${profileId}`);
+      } else {
+        await userAPI.unrestrict(profileId);
+        toast.success(`Removed restriction for @${profileId}`);
+      }
+    } catch (err) {
+      setProfile((prev) => ({
+        ...prev,
+        relationship: {
+          ...(prev.relationship || {}),
+          youRestricted: !next,
+        },
+      }));
+      toast.error(
+        err?.response?.data?.message ||
+          (next ? "Failed to restrict user" : "Failed to remove restriction")
+      );
     }
   };
 
@@ -848,10 +883,10 @@ const ProfilePage = () => {
                         </DropdownMenuItem>
 
                         <DropdownMenuItem
-                          // onClick={(e) => handleIconClick(e, "restrict")}
-                          className="flex justify-between items-center  p-3 mx-2 tracking-normal select-none font-semibold mb-2 cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                          onClick={handleToggleRestrictProfile}
+                          className="flex justify-between items-center p-3 mx-2 tracking-normal select-none font-semibold mb-2 cursor-pointer text-[15px] active:bg-neutral-950 text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
                         >
-                          <span>Restrict</span>
+                          <span>{isRestricted ? "Remove restriction" : "Restrict"}</span>
                           <Icons.restrict />
                         </DropdownMenuItem>
 
