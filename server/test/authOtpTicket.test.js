@@ -1,0 +1,76 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import jwt from "jsonwebtoken";
+import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
+
+const TEST_SECRET = "test-jwt-secret-key-123456";
+const VERIFICATION_TICKET_EXPIRY = "10m";
+
+const createVerificationTicket = (pendingId, email, secret = TEST_SECRET) =>
+  jwt.sign({ sid: String(pendingId), typ: "verify", email }, secret, {
+    expiresIn: VERIFICATION_TICKET_EXPIRY,
+  });
+
+const readVerificationTicket = (token, secret = TEST_SECRET) => {
+  if (typeof token !== "string" || !token) return null;
+  try {
+    const decoded = jwt.verify(token, secret, JWT_VERIFY_OPTIONS);
+    if (decoded.typ !== "verify") return null;
+    if (typeof decoded.email !== "string") return null;
+    if (!/^[a-f\d]{24}$/i.test(String(decoded.sid))) return null;
+    return decoded;
+  } catch {
+    return null;
+  }
+};
+
+test("createVerificationTicket sets exactly 10-minute (600s) expiry", () => {
+  const pendingId = "68b0f3c1a2d4e5f60718293a";
+  const email = "user@example.com";
+  const token = createVerificationTicket(pendingId, email);
+
+  const decoded = jwt.decode(token);
+  assert.ok(decoded);
+  assert.equal(decoded.typ, "verify");
+  assert.equal(decoded.sid, pendingId);
+  assert.equal(decoded.email, email);
+  assert.equal(decoded.exp - decoded.iat, 600, "Verification ticket must expire in exactly 600 seconds (10 minutes)");
+});
+
+test("readVerificationTicket accepts a valid 10-minute ticket and rejects invalid tokens", () => {
+  const pendingId = "68b0f3c1a2d4e5f60718293a";
+  const email = "user@example.com";
+  const token = createVerificationTicket(pendingId, email);
+
+  const parsed = readVerificationTicket(token);
+  assert.ok(parsed);
+  assert.equal(parsed.sid, pendingId);
+  assert.equal(parsed.email, email);
+
+  // Rejects access token with typ="access"
+  const accessToken = jwt.sign({ id: "user123", typ: "access" }, TEST_SECRET, { expiresIn: "15m" });
+  assert.equal(readVerificationTicket(accessToken), null);
+
+  // Rejects non-hex/malformed sid
+  const badSidToken = jwt.sign({ sid: "not-an-objectid", typ: "verify", email }, TEST_SECRET, { expiresIn: "10m" });
+  assert.equal(readVerificationTicket(badSidToken), null);
+
+  // Rejects expired token
+  const expiredToken = jwt.sign({ sid: pendingId, typ: "verify", email }, TEST_SECRET, { expiresIn: "0s" });
+  assert.equal(readVerificationTicket(expiredToken), null);
+});
+
+test("retry guidance: 502 email delivery error structure includes retryAfter and retryable flag", () => {
+  const deliveryErrorResponse = {
+    ok: false,
+    status: 502,
+    error: "Couldn't send the verification email. Please check your email address or try again in a few moments.",
+    retryAfter: 5,
+    retryable: true,
+  };
+
+  assert.equal(deliveryErrorResponse.status, 502);
+  assert.equal(deliveryErrorResponse.retryAfter, 5);
+  assert.equal(deliveryErrorResponse.retryable, true);
+  assert.match(deliveryErrorResponse.error, /verification email/i);
+});

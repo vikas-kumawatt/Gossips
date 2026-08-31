@@ -153,7 +153,7 @@ in this repository beyond the code itself.
 1. Visits the client and signs up with name, email and password (`POST /auth/signup`), or
    signs in with Google.
 2. The server hashes the password, writes a `PendingSignup` row, emails a 6-digit code, and
-   returns a 90-minute verification ticket.
+   returns a 10-minute verification ticket.
 3. The user enters the code (`POST /auth/verify-otp`). The `PendingSignup` is deleted, the
    `User` and `UserSettings` documents are created, and access + refresh tokens are issued.
 4. The client stores the access token in `localStorage` and is redirected to profile setup.
@@ -1112,7 +1112,7 @@ token cannot authenticate an ordinary request.
 | --- | --- | --- | --- |
 | Access | `access` | 15 minutes | `localStorage["user"].token`, sent as `Authorization: Bearer` |
 | Refresh | `refresh` | 7 days | httpOnly cookies `refreshToken` and `rt_<userId>` (path `/auth`); SHA-256 hash stored in `UserSession` |
-| Verification ticket | `verify` | 90 minutes | Returned in the signup response, held by the client during OTP entry |
+| Verification ticket | `verify` | 10 minutes | Returned in the signup response, refreshed on resend, held by the client during OTP entry |
 
 Cookies are `httpOnly`, with `secure` and `sameSite: "none"` in production and `sameSite: "lax"`
 otherwise.

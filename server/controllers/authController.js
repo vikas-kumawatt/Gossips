@@ -382,12 +382,12 @@ const MAX_NAME_LENGTH = 200;
  */
 const SIGNUP_BCRYPT_COST = 10;
 /*
- * Comfortably longer than a pending row can live. Each resend pushes the row's
- * expiry out another ten minutes, so someone who leaves it late four times over
- * can stretch one signup to about fifty — and the ticket dying first would leave
- * them staring at a live code the page has forgotten how to submit.
+ * Matches `OTP_TTL_MS` (10 minutes). Each resend pushes the row's expiry out
+ * another ten minutes and mints a fresh verification ticket, so the client and
+ * database remain strictly synchronized and a user cannot sit on a stale ticket
+ * after an OTP has expired.
  */
-const VERIFICATION_TICKET_EXPIRY = "90m";
+const VERIFICATION_TICKET_EXPIRY = "10m";
 
 /*
  * Bound to `JWT_SECRET` here so `utils/otp.js` stays pure and testable — that
@@ -603,8 +603,20 @@ const reissueOtp = async (pending) => {
     return { ok: false, reason: "cooldown", retryAfter: 1 };
   }
 
-  await sendOtpEmail(updated.email, code);
-  return { ok: true };
+  try {
+    await sendOtpEmail(updated.email, code);
+  } catch (error) {
+    console.error("reissueOtp: verification email failed:", error?.code ?? error?.name);
+    return {
+      ok: false,
+      reason: "delivery_failed",
+      error: "Couldn't send the verification email. Please check your email address or try again in a few moments.",
+      retryAfter: 5,
+      retryable: true,
+    };
+  }
+
+  return { ok: true, row: updated };
 };
 
 /**
@@ -617,7 +629,7 @@ const reissueOtp = async (pending) => {
  *
  * @param {string|null} [args.user] account to attach the password to on success;
  *        null means "create one".
- * @returns {Promise<{ok: true, row: object} | {ok: false, status: number, error: string}>}
+ * @returns {Promise<{ok: true, row: object} | {ok: false, status: number, error: string, retryAfter?: number, retryable?: boolean}>}
  */
 const startPendingSignup = async ({ name, email, password, user = null }) => {
   const address = String(email).toLowerCase();
@@ -681,7 +693,9 @@ const startPendingSignup = async ({ name, email, password, user = null }) => {
     return {
       ok: false,
       status: 502,
-      error: "Couldn't send the verification email. Please try again.",
+      error: "Couldn't send the verification email. Please check your email address or try again in a few moments.",
+      retryAfter: 5,
+      retryable: true,
     };
   }
 
@@ -739,7 +753,16 @@ export const signupUser = async (req, res) => {
           password,
           user: existingUser._id,
         });
-        if (!pending.ok) return res.status(pending.status).json({ error: pending.error });
+        if (!pending.ok) {
+          if (pending.retryAfter) {
+            res.set("Retry-After", String(pending.retryAfter));
+          }
+          return res.status(pending.status).json({
+            error: pending.error,
+            ...(pending.retryAfter ? { retryAfter: pending.retryAfter } : {}),
+            ...(pending.retryable !== undefined ? { retryable: pending.retryable } : {}),
+          });
+        }
 
         return res.status(200).json({
           message: "Verification code sent",
@@ -774,7 +797,16 @@ export const signupUser = async (req, res) => {
     }
 
     const pending = await startPendingSignup({ name, email, password });
-    if (!pending.ok) return res.status(pending.status).json({ error: pending.error });
+    if (!pending.ok) {
+      if (pending.retryAfter) {
+        res.set("Retry-After", String(pending.retryAfter));
+      }
+      return res.status(pending.status).json({
+        error: pending.error,
+        ...(pending.retryAfter ? { retryAfter: pending.retryAfter } : {}),
+        ...(pending.retryable !== undefined ? { retryable: pending.retryable } : {}),
+      });
+    }
 
     /*
      * No account, no settings row, no session — only a ticket naming the pending
@@ -1249,6 +1281,16 @@ export const resendOtp = async (req, res) => {
           retryAfter: sent.retryAfter,
         });
       }
+      if (sent.reason === "delivery_failed") {
+        if (sent.retryAfter) {
+          res.set("Retry-After", String(sent.retryAfter));
+        }
+        return res.status(502).json({
+          error: sent.error,
+          ...(sent.retryAfter ? { retryAfter: sent.retryAfter } : {}),
+          ...(sent.retryable !== undefined ? { retryable: sent.retryable } : {}),
+        });
+      }
       return res.status(429).json({
         error: "Too many codes requested. Please sign up again in a little while.",
         exhausted: true,
@@ -1257,6 +1299,7 @@ export const resendOtp = async (req, res) => {
 
     return res.status(200).json({
       message: "A new code is on its way",
+      verificationToken: createVerificationTicket(sent.row._id, sent.row.email),
       codeLength: OTP_LENGTH,
       expiresInSeconds: OTP_TTL_MS / 1000,
       resendAfterSeconds: OTP_RESEND_COOLDOWN_MS / 1000,

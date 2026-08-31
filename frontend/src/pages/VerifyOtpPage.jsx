@@ -72,7 +72,7 @@ const VerifyOtpPage = () => {
    * ticket, write it to storage again, and show the OTP form for an account that
    * already exists.
    */
-  const [session] = useState(() => {
+  const [session, setSession] = useState(() => {
     const incoming = location.state?.verificationToken ? location.state : null;
     if (incoming && !incoming.verified) return { ...incoming, sentAt: Date.now() };
     return readStored();
@@ -246,7 +246,13 @@ const VerifyOtpPage = () => {
 
       const freshlySentAt = Date.now();
       setSentAt(freshlySentAt);
-      writeStored({ ...session, sentAt: freshlySentAt });
+      const nextSession = {
+        ...session,
+        sentAt: freshlySentAt,
+        ...(data?.verificationToken ? { verificationToken: data.verificationToken } : {}),
+      };
+      setSession(nextSession);
+      writeStored(nextSession);
       setErrorNonce(0);
       setCode("");
       setStatus("idle");
@@ -275,7 +281,9 @@ const VerifyOtpPage = () => {
       if (typeof data?.retryAfter === "number") {
         const corrected = Date.now() - (resendAfterSeconds - data.retryAfter) * 1000;
         setSentAt(corrected);
-        writeStored({ ...session, sentAt: corrected });
+        const nextSession = { ...session, sentAt: corrected };
+        setSession(nextSession);
+        writeStored(nextSession);
       }
 
       toast.error(data?.error || "Couldn't send a new code. Please try again.");
