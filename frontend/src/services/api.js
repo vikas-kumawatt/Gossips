@@ -273,6 +273,24 @@ export const userAPI = {
   deleteAccount: (data) =>
     api.post("/user/delete-account", data).then((r) => r.data),
 
+  getAccountDetails: () =>
+    api.get("/user/account-details", { skipRequestCacheInterceptor: true }).then((r) => r.data),
+
+  getSecuritySettings: () =>
+    api.get("/user/security-settings", { skipRequestCacheInterceptor: true }).then((r) => r.data),
+
+  updateSecuritySettings: (updates) =>
+    api.patch("/user/security-settings", updates).then((r) => r.data),
+
+  setupTwoFactor: () =>
+    api.post("/user/2fa/setup").then((r) => r.data),
+
+  enableTwoFactor: (data) =>
+    api.post("/user/2fa/enable", data).then((r) => r.data),
+
+  disableTwoFactor: (data) =>
+    api.post("/user/2fa/disable", data).then((r) => r.data),
+
   // Uncached: rows carry the viewer's live follow state, and a 60-second
   // stale copy shows "Follow" on someone you just followed.
   getFollowers: (username, params) =>

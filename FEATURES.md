@@ -256,13 +256,13 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **Improved:** Added self-service endpoints (`POST /user/deactivate` and `POST /user/delete-account`) with password/DELETE confirmation, token & session revocation, cookie wiping, automatic sign-in reactivation for deactivated accounts, and the `DeactivateDeleteModal` UI in settings.
 
-### Settings → Account tab (largely unimplemented)
+### Settings → Account & Security Tab
 
-**What it does:** Renders rows for deactivate/delete, Security, Account status, Personal information, Download your information.
+**What it does:** Comprehensive account settings for self-service deactivation/deletion, RFC 6238 TOTP two-factor authentication, security alerts & encryption settings, and live account/personal data inspection.
 
-**How it works:** In `SettingsPage.jsx`, `renderAccountTab()` renders static `div`s with chevrons and **no handlers**. The Privacy tab's "Private profile" checkbox has no `checked` or `onChange` either — the working private toggle lives on `ProfileSetup.jsx`.
+**How it works:** Backed by dedicated endpoints (`GET /user/account-details`, `GET/PATCH /user/security-settings`, `POST /user/2fa/setup`, `POST /user/2fa/enable`, `POST /user/2fa/disable`, `POST /user/deactivate`, `POST /user/delete-account`) and integrated with full-featured UI modals in `SettingsPage.jsx`.
 
-**Improvements:** This is the biggest gap in the account domain: no self-service deactivation, deletion, or 2FA, despite `User.twoFactorEnabled/twoFactorSecret/twoFactorBackupCodes` and `UserSettings.security.*` existing unused. Either wire them or remove the dead rows — a toggle that does nothing is worse than no toggle. **Say this out loud in an interview before someone finds it.**
+**Improved:** Fully wired end-to-end 2FA with Base32 TOTP generation & backup codes verification in `loginUser`, security alerts preferences, account status inspection (`AccountDetailsModal.jsx`), active devices modal (`ActiveSessionsModal.jsx`), and self-service account deactivation & permanent deletion (`DeactivateDeleteModal.jsx`). Removed all dead/unimplemented rows.
 
 ---
 

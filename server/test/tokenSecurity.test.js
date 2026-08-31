@@ -340,6 +340,47 @@ test("account status gating: self-service deactivation, deletion, and login reac
   assert.equal(loginResult.status, 403);
 });
 
+test("two-factor authentication: TOTP secret generation, 6-digit code verification, and single-use backup codes", async () => {
+  const {
+    generateTotpSecret,
+    generateTotpCode,
+    verifyTotpCode,
+    generateBackupCodes,
+    verifyBackupCode,
+  } = await import("../utils/twoFactor.js");
+
+  // 1. Secret generation & TOTP code verification
+  const secret = generateTotpSecret();
+  assert.ok(secret && secret.length >= 16);
+
+  const code = generateTotpCode(secret);
+  assert.equal(/^\d{6}$/.test(code), true);
+  assert.equal(verifyTotpCode(code, secret), true);
+  assert.equal(verifyTotpCode("000000", secret), false);
+
+  // 2. Backup codes generation and consumption
+  const { plainCodes, hashedCodes } = generateBackupCodes(8);
+  assert.equal(plainCodes.length, 8);
+  assert.equal(hashedCodes.length, 8);
+
+  const testCode = plainCodes[0];
+  const firstCheck = verifyBackupCode(testCode, hashedCodes);
+  assert.equal(firstCheck.valid, true);
+  assert.equal(firstCheck.index, 0);
+
+  // Mark as used
+  hashedCodes[0].used = true;
+
+  // Second attempt with same code must fail
+  const secondCheck = verifyBackupCode(testCode, hashedCodes);
+  assert.equal(secondCheck.valid, false);
+
+  // Invalid code must fail
+  const invalidCheck = verifyBackupCode("INVALIDC", hashedCodes);
+  assert.equal(invalidCheck.valid, false);
+});
+
+
 
 
 

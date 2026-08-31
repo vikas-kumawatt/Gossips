@@ -10,6 +10,8 @@ import MentionSettingsSheet from "../components/MentionSettingsSheet";
 import ActiveSessionsModal from "../components/ActiveSessionsModal";
 import OnlineStatusSheet from "../components/OnlineStatusSheet";
 import DeactivateDeleteModal from "../components/DeactivateDeleteModal";
+import SecurityTwoFactorModal from "../components/SecurityTwoFactorModal";
+import AccountDetailsModal from "../components/AccountDetailsModal";
 import { userAPI } from "../services/api";
 import toast from "react-hot-toast";
 import {
@@ -25,7 +27,10 @@ const SettingsPage = () => {
   const [isMentionsOpen, setIsMentionsOpen] = useState(false);
   const [isOnlineStatusOpen, setIsOnlineStatusOpen] = useState(false);
   const [isSessionsOpen, setIsSessionsOpen] = useState(false);
+  const [isSecurityModalOpen, setIsSecurityModalOpen] = useState(false);
   const [isDeactivateModalOpen, setIsDeactivateModalOpen] = useState(false);
+  const [isAccountDetailsOpen, setIsAccountDetailsOpen] = useState(false);
+  const [accountDetailsMode, setAccountDetailsMode] = useState("personal");
   const [isPrivate, setIsPrivate] = useState(Boolean(userAuth?.isPrivate));
   const [privacySaving, setPrivacySaving] = useState(false);
   const openCreateModal = () => setIsCreateModalOpen(true);
@@ -239,44 +244,44 @@ const SettingsPage = () => {
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
       </div>
 
-      <div className="flex relative w-full items-center gap-4 mb-4">
-        <p className="text-md">Fediverse sharing</p>
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsSecurityModalOpen(true)}
+      >
+        <p className="text-md">Security & Two-Factor Authentication</p>
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
+      </div>
+
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsSessionsOpen(true)}
+      >
+        <p className="text-md">Active Logins & Devices</p>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
       <hr className="w-full border-b-0.5 border-neutral-700" strokeColor="#737373"/>
 
-      <div className="flex relative w-full items-center gap-4 mb-4 mt-2">
-        <p className="text-md">Personal information</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
-      </div>
-
-    <div className="flex relative w-full items-center gap-4 mb-4">
-        <p className="text-md">Supervision</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
-      </div>
-
-    <div
-        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
-        onClick={() => setIsSessionsOpen(true)}
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 mt-2 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => {
+          setAccountDetailsMode("personal");
+          setIsAccountDetailsOpen(true);
+        }}
       >
-        <p className="text-md">Security & Active Logins</p>
+        <p className="text-md">Personal information</p>
         <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
-    <div className="flex relative w-full items-center gap-4 mb-4">
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => {
+          setAccountDetailsMode("status");
+          setIsAccountDetailsOpen(true);
+        }}
+      >
         <p className="text-md">Account status</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
-      </div>
-
-    <div className="flex relative w-full items-center gap-4 mb-4">
-        <p className="text-md">Download your information</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
-      </div>
-
-      <div className="flex relative w-full items-center gap-4 mb-4">
-        <p className="text-md">Transfer your information</p>
-        <Icons.link className="h-5 w-5 absolute right-0"/>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
     </div>
   );
@@ -369,6 +374,15 @@ const SettingsPage = () => {
       <DeactivateDeleteModal
         isOpen={isDeactivateModalOpen}
         onClose={() => setIsDeactivateModalOpen(false)}
+      />
+      <SecurityTwoFactorModal
+        isOpen={isSecurityModalOpen}
+        onClose={() => setIsSecurityModalOpen(false)}
+      />
+      <AccountDetailsModal
+        isOpen={isAccountDetailsOpen}
+        mode={accountDetailsMode}
+        onClose={() => setIsAccountDetailsOpen(false)}
       />
     </div>
   );

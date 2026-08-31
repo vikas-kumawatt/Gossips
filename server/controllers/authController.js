@@ -30,6 +30,7 @@ import {
   getVerificationTicketSecret,
 } from "../config/jwt.js";
 import { revokeAccessToken } from "../utils/tokenRevocation.js";
+import { verifyTotpCode, verifyBackupCode } from "../utils/twoFactor.js";
 
 /**
  * Outbound email, and why a missing configuration is no longer fatal.
@@ -909,7 +910,7 @@ export const loginUser = async (req, res) => {
     if (username) query.username = username;
 
     // password, failedLoginAttempts, and lockoutUntil are select:false — must be explicitly requested
-    const user = await User.findOne(query).select("+password +googleId +failedLoginAttempts +lockoutUntil");
+    const user = await User.findOne(query).select("+password +googleId +failedLoginAttempts +lockoutUntil +twoFactorSecret +twoFactorBackupCodes");
 
     if (!user) {
       return res
@@ -988,6 +989,34 @@ export const loginUser = async (req, res) => {
         { $set: { accountStatus: "active", deactivatedAt: null } }
       );
       user.accountStatus = "active";
+    }
+
+    // Two-Factor Authentication gate
+    if (user.twoFactorEnabled) {
+      const { twoFactorCode } = req.body || {};
+      if (!twoFactorCode) {
+        return res.status(200).json({
+          needTwoFactor: true,
+          message: "Please enter your two-factor authentication code or backup code.",
+        });
+      }
+
+      let valid2FA = verifyTotpCode(twoFactorCode, user.twoFactorSecret);
+      if (!valid2FA) {
+        const backupResult = verifyBackupCode(twoFactorCode, user.twoFactorBackupCodes || []);
+        if (backupResult.valid) {
+          valid2FA = true;
+          // Mark backup code as used
+          await User.updateOne(
+            { _id: user._id, "twoFactorBackupCodes.codeHash": user.twoFactorBackupCodes[backupResult.index].codeHash },
+            { $set: { "twoFactorBackupCodes.$.used": true } }
+          );
+        }
+      }
+
+      if (!valid2FA) {
+        return res.status(400).json({ error: "Invalid two-factor authentication code" });
+      }
     }
 
     recordSignInCountry(req, user._id);

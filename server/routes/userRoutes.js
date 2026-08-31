@@ -35,6 +35,12 @@ import {
   deletePushToken,
   deactivateAccount,
   deleteAccount,
+  getAccountDetails,
+  getSecuritySettings,
+  updateSecuritySettings,
+  setupTwoFactor,
+  enableTwoFactor,
+  disableTwoFactor,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import { sameOriginOnly } from "./authRoutes.js";
@@ -79,6 +85,16 @@ router.get("/username-status", protect, getUsernameStatus);
 // Hyphenated, so neither can be mistaken for a profile route.
 router.get("/privacy-settings", protect, getPrivacySettings);
 router.patch("/privacy-settings", protect, updatePrivacySettings);
+
+// Account details & security settings
+router.get("/account-details", protect, getAccountDetails);
+router.get("/security-settings", protect, getSecuritySettings);
+router.patch("/security-settings", protect, sameOriginOnly, updateSecuritySettings);
+
+// Two-Factor Authentication (2FA)
+router.post("/2fa/setup", protect, sameOriginOnly, setupTwoFactor);
+router.post("/2fa/enable", protect, sameOriginOnly, enableTwoFactor);
+router.post("/2fa/disable", protect, sameOriginOnly, disableTwoFactor);
 
 // Self-service account deactivation and deletion
 router.post("/deactivate", protect, sameOriginOnly, deactivateAccount);

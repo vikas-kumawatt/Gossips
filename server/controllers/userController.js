@@ -11,7 +11,13 @@ import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
 import UserSettings from "../models/UserSettings.js";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
 import { revokeAccessToken } from "../utils/tokenRevocation.js";
+import {
+  generateTotpSecret,
+  verifyTotpCode,
+  generateBackupCodes,
+} from "../utils/twoFactor.js";
 import { io } from "../server.js";
 import {
   buildCursorPageInfo,
@@ -1776,5 +1782,205 @@ export const deleteAccount = async (req, res) => {
   } catch (error) {
     console.error("deleteAccount error:", error);
     return res.status(500).json({ error: "Failed to delete account" });
+  }
+};
+
+/**
+ * GET /user/account-details — Personal information & Account status info.
+ */
+export const getAccountDetails = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select(
+      "email username name phoneNumber isEmailVerified isPhoneVerified isVerified role accountStatus createdAt country"
+    ).lean();
+
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    return res.status(200).json({
+      email: user.email,
+      username: user.username,
+      name: user.name,
+      phoneNumber: user.phoneNumber || "",
+      isEmailVerified: Boolean(user.isEmailVerified),
+      isPhoneVerified: Boolean(user.isPhoneVerified),
+      isVerified: Boolean(user.isVerified),
+      role: user.role,
+      accountStatus: user.accountStatus,
+      createdAt: user.createdAt,
+      country: user.country || "",
+    });
+  } catch (error) {
+    console.error("getAccountDetails error:", error);
+    return res.status(500).json({ error: "Failed to load account details" });
+  }
+};
+
+/**
+ * GET /user/security-settings — 2FA status and security alerts.
+ */
+export const getSecuritySettings = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select("twoFactorEnabled").lean();
+    const settings = await UserSettings.findOne({ user: req.user._id }).select("security").lean();
+
+    const sec = settings?.security || {};
+    return res.status(200).json({
+      twoFactorEnabled: Boolean(user?.twoFactorEnabled),
+      loginAlerts: sec.loginAlerts ?? true,
+      unrecognizedDeviceAlerts: sec.unrecognizedDeviceAlerts ?? true,
+      endToEndEncryption: sec.endToEndEncryption ?? true,
+      autoLockMinutes: sec.autoLockMinutes ?? 0,
+    });
+  } catch (error) {
+    console.error("getSecuritySettings error:", error);
+    return res.status(500).json({ error: "Failed to load security settings" });
+  }
+};
+
+/**
+ * PATCH /user/security-settings — Update security alert and encryption preferences.
+ */
+export const updateSecuritySettings = async (req, res) => {
+  try {
+    const allowedKeys = [
+      "loginAlerts",
+      "unrecognizedDeviceAlerts",
+      "endToEndEncryption",
+      "autoLockMinutes",
+    ];
+
+    const updates = {};
+    for (const key of allowedKeys) {
+      if (key in req.body) {
+        updates[`security.${key}`] = req.body[key];
+      }
+    }
+
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ error: "No valid security settings to update" });
+    }
+
+    const settings = await UserSettings.findOneAndUpdate(
+      { user: req.user._id },
+      { $set: updates, $setOnInsert: { user: req.user._id } },
+      { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+    ).select("security").lean();
+
+    return res.status(200).json({
+      message: "Security preferences saved",
+      ...settings?.security,
+    });
+  } catch (error) {
+    console.error("updateSecuritySettings error:", error);
+    return res.status(500).json({ error: "Failed to update security settings" });
+  }
+};
+
+/**
+ * POST /user/2fa/setup — Generate a new TOTP secret and backup codes.
+ */
+export const setupTwoFactor = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const secret = generateTotpSecret();
+    const { plainCodes, hashedCodes } = generateBackupCodes(8);
+    const otpauthUrl = `otpauth://totp/Gossips:${encodeURIComponent(user.email)}?secret=${secret}&issuer=Gossips`;
+
+    return res.status(200).json({
+      secret,
+      otpauthUrl,
+      backupCodes: plainCodes,
+    });
+  } catch (error) {
+    console.error("setupTwoFactor error:", error);
+    return res.status(500).json({ error: "Failed to generate 2FA setup" });
+  }
+};
+
+/**
+ * POST /user/2fa/enable — Verify initial token and activate 2FA.
+ */
+export const enableTwoFactor = async (req, res) => {
+  try {
+    const { secret, code, backupCodes } = req.body || {};
+    if (!secret || !code) {
+      return res.status(400).json({ error: "Secret and verification code are required" });
+    }
+
+    const isValid = verifyTotpCode(code, secret);
+    if (!isValid) {
+      return res.status(400).json({ error: "Invalid 6-digit authentication code" });
+    }
+
+    let hashedCodes = [];
+    if (Array.isArray(backupCodes) && backupCodes.length) {
+      hashedCodes = backupCodes.map((c) => ({
+        codeHash: crypto.createHash("sha256").update(String(c).trim().toUpperCase()).digest("hex"),
+        used: false,
+      }));
+    } else {
+      hashedCodes = generateBackupCodes(8).hashedCodes;
+    }
+
+    await User.updateOne(
+      { _id: req.user._id },
+      {
+        $set: {
+          twoFactorEnabled: true,
+          twoFactorSecret: secret,
+          twoFactorBackupCodes: hashedCodes,
+        },
+      }
+    );
+
+    return res.status(200).json({
+      message: "Two-factor authentication enabled successfully",
+      twoFactorEnabled: true,
+    });
+  } catch (error) {
+    console.error("enableTwoFactor error:", error);
+    return res.status(500).json({ error: "Failed to enable two-factor authentication" });
+  }
+};
+
+/**
+ * POST /user/2fa/disable — Disable 2FA with password confirmation.
+ */
+export const disableTwoFactor = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select("+password");
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const { password } = req.body || {};
+    if (user.password) {
+      if (!password) {
+        return res.status(400).json({ error: "Password is required to disable 2FA" });
+      }
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(400).json({ error: "Incorrect password" });
+      }
+    }
+
+    await User.updateOne(
+      { _id: req.user._id },
+      {
+        $set: {
+          twoFactorEnabled: false,
+          twoFactorSecret: null,
+          twoFactorBackupCodes: [],
+        },
+      }
+    );
+
+    return res.status(200).json({
+      message: "Two-factor authentication disabled",
+      twoFactorEnabled: false,
+    });
+  } catch (error) {
+    console.error("disableTwoFactor error:", error);
+    return res.status(500).json({ error: "Failed to disable two-factor authentication" });
   }
 };
