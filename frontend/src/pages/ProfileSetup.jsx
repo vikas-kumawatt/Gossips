@@ -6,6 +6,7 @@ import axios from "axios";
 import { Icons } from "../components/icons";
 import UsernameField from "../components/UsernameField";
 import PublicAccountConfirmModal from "../components/PublicAccountConfirmModal";
+import AvatarCropModal from "../components/AvatarCropModal";
 import { clampGraphemes, graphemeLength } from "../lib/graphemes";
 import { BIO_MAX_LENGTH, NAME_MAX_GRAPHEMES } from "../lib/profileConstants";
 
@@ -21,6 +22,8 @@ const ProfileSetup = () => {
     loading: false,
   });
   const [isConfirmPublicOpen, setIsConfirmPublicOpen] = useState(false);
+  const [isCropModalOpen, setIsCropModalOpen] = useState(false);
+  const [rawImageSource, setRawImageSource] = useState(null);
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const textareaRef = useRef(null);
@@ -61,13 +64,17 @@ const ProfileSetup = () => {
       return;
     }
 
-    setImageFile(file);
-
     const reader = new FileReader();
     reader.onloadend = () => {
-      setImagePreview(reader.result);
+      setRawImageSource(reader.result);
+      setIsCropModalOpen(true);
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleCropComplete = ({ file, previewUrl }) => {
+    setImageFile(file);
+    setImagePreview(previewUrl);
   };
 
   const handleChange = (e) => {
@@ -340,6 +347,12 @@ const ProfileSetup = () => {
           setProfileData((prev) => ({ ...prev, isPrivate: false }));
           setIsConfirmPublicOpen(false);
         }}
+      />
+      <AvatarCropModal
+        isOpen={isCropModalOpen}
+        imageSource={rawImageSource}
+        onClose={() => setIsCropModalOpen(false)}
+        onCropComplete={handleCropComplete}
       />
     </section>
   );

@@ -22,6 +22,7 @@ import AboutProfileSheet from "../components/AboutProfileSheet";
 import RichText from "../components/RichText";
 import { buildProfileUrl } from "../lib/profileLink";
 import BotBadge from "../components/BotBadge";
+import Avatar from "../components/Avatar";
 import ProfileHeaderSkeleton from "../components/ProfileHeaderSkeleton";
 import ProfileStatusState from "../components/ProfileStatusState";
 import { toast } from "react-hot-toast";
@@ -717,18 +718,11 @@ const ProfilePage = () => {
                     </h1>
                   </div>
                   <div className="ml-12">
-                    {profile.profilePic ? (
-                      <img
-                        src={profile.profilePic}
-                        alt="Profile"
-                        className="w-18 h-18 rounded-full border-2 border-neutral-600"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <div className="w-20 h-20 rounded-full border-2 border-neutral-600 bg-gray-700 flex items-center justify-center text-white">
-                        No Image
-                      </div>
-                    )}
+                    <Avatar
+                      src={profile.profilePic}
+                      name={profile.name || profile.username}
+                      className="w-18 h-18 rounded-full border-2 border-neutral-600"
+                    />
                   </div>
                 </div>
                 <p className="text-white pt-3 max-w-200 whitespace-pre-line">

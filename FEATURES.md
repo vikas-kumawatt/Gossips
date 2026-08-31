@@ -294,7 +294,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** Client validates type/size, server uploads via `uploadToCloudinary` and stores the secure URL on `User.profilePic`.
 
-**Improvements:** Fallbacks are inconsistent — `PostCard.jsx` uses `/default-avatar.png` while `ProfilePage.jsx` renders a "No Image" text box. No client-side crop/resize before upload.
+**Improved:** Standardized avatar fallback handling via shared `Avatar.jsx` with `/default-avatar.png` and initial fallback across all profile/post surfaces, and added client-side image square crop and downscaling (`imageCrop.js` and `AvatarCropModal.jsx`) before upload.
 
 ### Unused profile fields
 
