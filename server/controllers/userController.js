@@ -115,7 +115,6 @@ const normalizeDisplayName = (name) =>
  * pointing at the screen, including a flag or a family emoji built from several
  * code points.
  */
-const NAME_MAX_GRAPHEMES = 50;
 
 const graphemeCount = (value) => {
   try {
