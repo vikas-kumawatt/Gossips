@@ -21,13 +21,16 @@ import { encodeOffsetCursor, decodeOffsetCursor } from "./activitySort.js";
  *
  * Sorts:
  *  - "latest" / "earliest"  — by when the follow happened (edge createdAt),
- *    cursor-paginated on the edge's own createdAt + _id. The old code encoded
- *    the *user's signup date* in the cursor and then filtered edges with it,
- *    so page two skipped or repeated rows; anchoring both sides to the edge
- *    fixes that.
+ *    cursor-paginated on the edge's own createdAt + _id (stable keyset pagination).
+ *    Anchoring both sides to the edge guarantees zero drift, skipping, or repetition
+ *    across pages even under concurrent writes.
  *  - "default" — the people who matter to the viewer first: accounts they
- *    message, then mutuals, then the rest. Not chronological, so it pages with
- *    an offset cursor like the activity lists do.
+ *    message, then mutuals, then verified accounts, then follower count.
+ *    Because the multi-dimensional rank is computed dynamically (and changes as
+ *    interaction counts and follower counts shift), it intentionally uses an
+ *    offset cursor (`encodeOffsetCursor`). Under high concurrent inserts/unfollows,
+ *    an offset window can experience slight drift across page boundaries, which
+ *    is an acceptable design trade-off for rich contextual relevance scoring.
  */
 
 export const FOLLOW_LIST_SORTS = ["default", "latest", "earliest"];

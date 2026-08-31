@@ -334,7 +334,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `FollowersModal.jsx` → `GET /user/:username/followers|following` with `{q, sort, cursor, limit=20}`. `authorizeListView` 404s a blocked relationship and 403s a private account's lists to non-followers. `utils/followList.js` runs search-then-paginate as a single aggregation. Sorts: `default` (ranked by 90-day interaction frequency, then mutuals, then verified, then follower count — offset cursor) or `latest`/`earliest` (true keyset cursor on edge `createdAt`). Each row's viewer-relative flags are batch-attached with three queries per page.
 
-**Improvements:** The `default` sort's offset cursor can skip or repeat rows under concurrent inserts, unlike the other two — document it or move to a stable composite cursor.
+**Improved:** `latest`/`earliest` sorts provide zero-drift keyset pagination tied to edge `createdAt + _id`, while the trade-offs of the `default` dynamic relevance ranking using an offset cursor are explicitly documented in `server/utils/followList.js`.
 
 ### "Follows you" badge
 
