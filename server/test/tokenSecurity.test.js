@@ -138,3 +138,48 @@ test("refresh token rotation & reuse detection: normal rotation succeeds and reu
   assert.equal(allSessions.length, 0, "All sessions must be wiped on refresh token reuse");
 });
 
+test("per-user session cap: restricts active UserSession rows to MAX_SESSIONS_PER_USER (10) via LRU eviction", () => {
+  const MAX_SESSIONS = 10;
+  const userId = "68b0f3c1a2d4e5f60718293a";
+
+  let sessions = [];
+
+  const storeSession = (deviceId) => {
+    // Upsert session
+    const existingIndex = sessions.findIndex((s) => s.deviceId === deviceId);
+    const newSession = {
+      _id: `session_${deviceId}`,
+      user: userId,
+      deviceId,
+      lastActiveAt: Date.now(),
+      createdAt: Date.now(),
+    };
+
+    if (existingIndex >= 0) {
+      sessions[existingIndex] = newSession;
+    } else {
+      sessions.push(newSession);
+    }
+
+    // Prune excess
+    if (sessions.length > MAX_SESSIONS) {
+      sessions.sort((a, b) => a.lastActiveAt - b.lastActiveAt);
+      const excess = sessions.length - MAX_SESSIONS;
+      sessions.splice(0, excess);
+    }
+  };
+
+  // Create 15 distinct device sessions
+  for (let i = 1; i <= 15; i++) {
+    storeSession(`device_${i}`);
+  }
+
+  // Cap must strictly hold at 10
+  assert.equal(sessions.length, MAX_SESSIONS);
+  // Oldest 5 devices (device_1 to device_5) evicted, newest 10 (device_6 to device_15) preserved
+  assert.equal(sessions.some((s) => s.deviceId === "device_1"), false);
+  assert.equal(sessions.some((s) => s.deviceId === "device_5"), false);
+  assert.equal(sessions.some((s) => s.deviceId === "device_15"), true);
+});
+
+

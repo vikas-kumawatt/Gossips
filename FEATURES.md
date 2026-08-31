@@ -174,7 +174,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** The client mints `crypto.randomUUID()` into `localStorage.deviceId` and sends it as `X-Device-Id`. The server accepts it if it matches `^[A-Za-z0-9_-]{8,64}$`, else mints a per-request `srv_<hex>`. `UserSession` has a unique `{user, deviceId}` index, and `storeRefreshToken` guards against an undefined device id collapsing every device into one shared session.
 
-**Improvements:** Nothing stops a client fabricating a new device id per request to spawn unbounded `UserSession` rows; rows expire by TTL on `refreshTokenExpiresAt`, not by count.
+**Improved:** Enforces `MAX_SESSIONS_PER_USER = 10` per user account in `storeRefreshToken`, pruning the oldest device session rows via LRU eviction when exceeded to prevent unbounded session row accumulation.
 
 ### Multi-account switching
 

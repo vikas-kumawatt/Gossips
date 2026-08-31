@@ -249,6 +249,26 @@ const storeRefreshToken = async (userId, refreshToken, deviceId) => {
     },
     { upsert: true, new: true },
   );
+
+  // Enforce per-user active session cap: prune the oldest excess sessions
+  try {
+    const sessionCount = await UserSession.countDocuments({ user: userId });
+    if (sessionCount > MAX_SESSIONS_PER_USER) {
+      const excessCount = sessionCount - MAX_SESSIONS_PER_USER;
+      const oldestSessions = await UserSession.find({ user: userId })
+        .sort({ lastActiveAt: 1, createdAt: 1 })
+        .limit(excessCount)
+        .select("_id")
+        .lean();
+
+      if (oldestSessions.length > 0) {
+        const oldestIds = oldestSessions.map((s) => s._id);
+        await UserSession.deleteMany({ _id: { $in: oldestIds } });
+      }
+    }
+  } catch (err) {
+    console.error("storeRefreshToken: session cap enforcement error:", err?.message);
+  }
 };
 
 /**
@@ -394,6 +414,8 @@ const OTP_MAX_SENDS = 5;
  * many IPs cannot do together what one cannot do alone.
  */
 const MAX_PENDING_PER_EMAIL = 5;
+/** Maximum active device sessions allowed per user account before LRU eviction. */
+const MAX_SESSIONS_PER_USER = 10;
 /** Maximum consecutive failed password attempts before temporary account lockout. */
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 /** Duration of temporary lockout following repeated failed login attempts (15 minutes). */
