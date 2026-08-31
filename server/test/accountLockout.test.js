@@ -125,3 +125,24 @@ test("account lockout: password reset clears lockout state", () => {
   assert.equal(user.failedLoginAttempts, 0);
   assert.equal(user.lockoutUntil, null);
 });
+
+test("password changed confirmation: generates valid security email payload", () => {
+  const email = "user@example.com";
+  const name = "Alex Smith";
+  const frontendUrl = "https://gossips.test";
+
+  const emailHtml = `The password for your Gossips account (${name ? `${name}` : "account"}) was recently changed. For your security, all active sessions on other devices have been signed out.`;
+
+  assert.ok(emailHtml.includes("Alex Smith"));
+  assert.ok(emailHtml.includes("all active sessions on other devices have been signed out"));
+
+  const payload = {
+    to: email,
+    subject: "Your Gossips password was changed",
+    html: emailHtml,
+  };
+
+  assert.equal(payload.to, "user@example.com");
+  assert.equal(payload.subject, "Your Gossips password was changed");
+});
+

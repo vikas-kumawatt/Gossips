@@ -1544,6 +1544,86 @@ export const forgotPassword = async (req, res) => {
   }
 };
 
+const passwordChangedEmailHtml = (name) => `
+  <div style="margin:0;padding:0;background-color:#fafafa;">
+    <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#fafafa;padding:40px 16px;">
+      <tr>
+        <td align="center">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:460px;">
+
+            <!-- Logo + brand name above card -->
+            <tr>
+              <td align="center" style="padding-bottom:20px;">
+                <img
+                  src="${process.env.FRONTEND_URL}/images/logo-light.png"
+                  alt="Gossips"
+                  width="52"
+                  height="52"
+                  style="display:block;margin:0 auto 10px;border-radius:12px;"
+                />
+                <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:18px;font-weight:700;color:#1a1a1a;letter-spacing:-0.3px;">Gossips</div>
+              </td>
+            </tr>
+
+            <!-- Card -->
+            <tr>
+              <td style="background:#ffffff;border:1px solid #dbdbdb;border-radius:4px;padding:36px 32px;">
+                <table width="100%" cellpadding="0" cellspacing="0" border="0">
+
+                  <!-- Heading -->
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:16px;font-weight:600;color:#1a1a1a;padding-bottom:14px;">
+                      Your password was changed
+                    </td>
+                  </tr>
+
+                  <!-- Body text -->
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:14px;color:#737373;line-height:1.75;padding-bottom:24px;">
+                      The password for your <strong style="color:#1a1a1a;">Gossips</strong> account (${name ? `<strong>${name}</strong>` : "account"}) was recently changed. For your security, all active sessions on other devices have been signed out.
+                    </td>
+                  </tr>
+
+                  <!-- Divider -->
+                  <tr>
+                    <td style="padding-bottom:18px;">
+                      <div style="height:1px;background:#efefef;"></div>
+                    </td>
+                  </tr>
+
+                  <!-- Security warning -->
+                  <tr>
+                    <td style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:13px;color:#8e8e8e;line-height:1.7;">
+                      If you did not make this change, please <a href="${process.env.FRONTEND_URL}/forgot-password" style="color:#1a1a1a;font-weight:600;text-decoration:underline;">reset your password immediately</a> to secure your account.
+                    </td>
+                  </tr>
+
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td align="center" style="padding-top:20px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;font-size:12px;color:#a8a8a8;line-height:1.6;">
+                &copy; ${new Date().getFullYear()} Gossips &middot; All rights reserved
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </div>
+`;
+
+const sendPasswordChangedEmail = (email, name) =>
+  transporter.sendMail({
+    from: process.env.BREVO_EMAIL,
+    to: email,
+    subject: "Your Gossips password was changed",
+    html: passwordChangedEmailHtml(name),
+  });
+
 export const resetPassword = async (req, res) => {
   try {
     const { token, password } = req.body;
@@ -1580,6 +1660,11 @@ export const resetPassword = async (req, res) => {
 
     // Revoke all existing sessions on password reset (security best practice)
     await UserSession.deleteMany({ user: user._id });
+
+    // Send security confirmation email asynchronously (do not fail reset if email transport fails)
+    sendPasswordChangedEmail(user.email, user.name || user.username).catch((err) =>
+      console.error("resetPassword: confirmation email failed:", err?.code ?? err?.name)
+    );
 
     res.status(200).json({ message: "Password reset successfully" });
   } catch (error) {

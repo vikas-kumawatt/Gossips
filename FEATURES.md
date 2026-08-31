@@ -142,7 +142,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/forgot-password` always returns the same generic message whether or not the email exists (scoped to human accounts), generates a 32-byte random token, stores only its SHA-256 hash with a 1-hour expiry, and emails the raw token. `ResetPassword.jsx` (`/reset-password/:token`) posts to `POST /auth/reset-password`, which re-hashes to match, validates the password, saves it (hashed by the pre-save hook), clears the reset fields, and **deletes every `UserSession` row for that user**. Both endpoints share a 5/hour limiter.
 
-**Improvements:** No "your password was changed" confirmation email — a security-relevant event the user should be told about, especially since sessions vanish silently.
+**Improved:** Sends an asynchronous "Your password was changed" security notification email to the user upon successful password reset, confirming session revocation and providing an immediate account recovery link.
 
 ### Show/hide password toggle
 
