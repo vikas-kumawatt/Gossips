@@ -23,7 +23,13 @@ import {
   otpMatches,
   hashOtp as hashOtpWith,
 } from "../utils/otp.js";
-import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
+import {
+  JWT_VERIFY_OPTIONS,
+  getAccessTokenSecret,
+  getRefreshTokenSecret,
+  getVerificationTicketSecret,
+} from "../config/jwt.js";
+import { revokeAccessToken } from "../utils/tokenRevocation.js";
 
 /**
  * Outbound email, and why a missing configuration is no longer fatal.
@@ -169,16 +175,15 @@ const getRefreshTokenCookieOptions = () => ({
   maxAge: REFRESH_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000,
 });
 
-// The two tokens share a secret, so without a type claim a refresh token would
-// authenticate every protected route for its full lifetime — which would let a
-// user walk straight past a suspension or a forced sign-out.
+// Different token types use distinct derived secrets (cryptographic domain separation)
+// so a signature from one type cannot verify against another.
 const createAccessToken = (userId) =>
-  jwt.sign({ id: userId, typ: "access" }, process.env.JWT_SECRET, {
+  jwt.sign({ id: userId, typ: "access" }, getAccessTokenSecret(), {
     expiresIn: ACCESS_TOKEN_EXPIRY,
   });
 
 const createRefreshToken = (userId) =>
-  jwt.sign({ id: userId, typ: "refresh" }, process.env.JWT_SECRET, {
+  jwt.sign({ id: userId, typ: "refresh" }, getRefreshTokenSecret(), {
     expiresIn: `${REFRESH_TOKEN_EXPIRY_DAYS}d`,
   });
 
@@ -290,7 +295,7 @@ const readAccountSession = async (req, userId) => {
 
   let decoded;
   try {
-    decoded = jwt.verify(refreshToken, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+    decoded = jwt.verify(refreshToken, getRefreshTokenSecret(), JWT_VERIFY_OPTIONS);
   } catch {
     return null;
   }
@@ -435,14 +440,14 @@ const hashOtp = (pendingId, code) => hashOtpWith(process.env.JWT_SECRET, pending
  * without checking `typ` first.
  */
 const createVerificationTicket = (pendingId, email) =>
-  jwt.sign({ sid: String(pendingId), typ: "verify", email }, process.env.JWT_SECRET, {
+  jwt.sign({ sid: String(pendingId), typ: "verify", email }, getVerificationTicketSecret(), {
     expiresIn: VERIFICATION_TICKET_EXPIRY,
   });
 
 const readVerificationTicket = (token) => {
   if (typeof token !== "string" || !token) return null;
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+    const decoded = jwt.verify(token, getVerificationTicketSecret(), JWT_VERIFY_OPTIONS);
     // An access or refresh token presented here must not be usable as a ticket,
     // which is the mirror image of the bug `isAccessToken` fixes.
     if (decoded.typ !== "verify") return null;
@@ -1693,7 +1698,7 @@ export const refreshAccessToken = async (req, res) => {
 
     let decoded;
     try {
-      decoded = jwt.verify(refreshToken, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+      decoded = jwt.verify(refreshToken, getRefreshTokenSecret(), JWT_VERIFY_OPTIONS);
     } catch {
       return res.status(401).json({ message: "Invalid refresh token" });
     }
@@ -1772,13 +1777,25 @@ export const logoutUser = async (req, res) => {
     let loggedOutId = requestedId || null;
     if (typeof target === "string" && target) {
       try {
-        const decoded = jwt.verify(target, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+        const decoded = jwt.verify(target, getRefreshTokenSecret(), JWT_VERIFY_OPTIONS);
         loggedOutId = decoded?.id || loggedOutId;
       } catch {
         // An unverifiable token still gets its cookie cleared below.
       }
       // By hash, so only this device's session dies — other devices keep theirs.
       await UserSession.deleteOne({ refreshTokenHash: hashToken(target) });
+    }
+
+    // Immediately revoke the active bearer access token if present in the request
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const accessToken = authHeader.split(" ")[1];
+      try {
+        const decodedAccess = jwt.verify(accessToken, getAccessTokenSecret(), JWT_VERIFY_OPTIONS);
+        await revokeAccessToken(accessToken, decodedAccess?.id, decodedAccess?.exp, "logout");
+      } catch {
+        await revokeAccessToken(accessToken, null, null, "logout");
+      }
     }
 
     const baseOptions = {

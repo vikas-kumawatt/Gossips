@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import User from "../models/User.js";
-import { JWT_VERIFY_OPTIONS, isAccessToken } from "../config/jwt.js";
+import { JWT_VERIFY_OPTIONS, isAccessToken, getAccessTokenSecret } from "../config/jwt.js";
+import { isTokenRevoked } from "../utils/tokenRevocation.js";
 
 // Attaches req.user if a valid Bearer token is present; otherwise continues unauthenticated.
 export const optionalProtect = async (req, res, next) => {
@@ -9,8 +10,8 @@ export const optionalProtect = async (req, res, next) => {
     if (authHeader && authHeader.startsWith("Bearer ")) {
       const token = authHeader.split(" ")[1];
       try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
-        if (isAccessToken(decoded)) {
+        const decoded = jwt.verify(token, getAccessTokenSecret(), JWT_VERIFY_OPTIONS);
+        if (isAccessToken(decoded) && !(await isTokenRevoked(token))) {
           const user = await User.findById(decoded.id).select("-password");
           if (user) req.user = user;
         }
@@ -38,7 +39,7 @@ export const protect = async (req, res, next) => {
     let decoded;
 
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+      decoded = jwt.verify(token, getAccessTokenSecret(), JWT_VERIFY_OPTIONS);
     } catch {
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
     }
@@ -49,6 +50,11 @@ export const protect = async (req, res, next) => {
     // See `isAccessToken` for why this is an allow-list.
     if (!isAccessToken(decoded)) {
       return res.status(401).json({ message: "Unauthorized: Invalid token" });
+    }
+
+    // Revocation check: blocks logged out or explicitly revoked access tokens immediately
+    if (await isTokenRevoked(token)) {
+      return res.status(401).json({ message: "Unauthorized: Token has been revoked" });
     }
 
     const user = await User.findById(decoded.id).select("-password");

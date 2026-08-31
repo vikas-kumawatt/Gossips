@@ -10,7 +10,8 @@ import UserSettings from "../models/UserSettings.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
-import { JWT_VERIFY_OPTIONS, isAccessToken } from "./jwt.js";
+import { JWT_VERIFY_OPTIONS, isAccessToken, getAccessTokenSecret } from "./jwt.js";
+import { isTokenRevoked } from "../utils/tokenRevocation.js";
 import { ALLOWED_ORIGINS } from "./origins.js";
 import { getSettings } from "../utils/settings.js";
 import { parseReactionEmoji, parseSkinTone } from "../utils/reactions.js";
@@ -398,13 +399,13 @@ export const initializeSocket = (server) => {
         return next(new Error("Authentication error"));
       }
 
-      const decoded = jwt.verify(token, process.env.JWT_SECRET, JWT_VERIFY_OPTIONS);
+      const decoded = jwt.verify(token, getAccessTokenSecret(), JWT_VERIFY_OPTIONS);
 
       // The socket layer must apply the same rules as HTTP, or a suspended
       // account keeps messaging in real time after being cut off everywhere
       // else. Same allow-list as `protect`: only an access token gets a socket,
       // so neither a refresh token nor a verification ticket can open one.
-      if (!isAccessToken(decoded)) {
+      if (!isAccessToken(decoded) || (await isTokenRevoked(token))) {
         return next(new Error("Authentication error"));
       }
 

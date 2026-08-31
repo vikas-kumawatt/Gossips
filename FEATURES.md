@@ -158,7 +158,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `issueAuthTokens()` mints a 15-minute `typ:"access"` token and a 7-day `typ:"refresh"` token; only the refresh token's SHA-256 hash is stored, upserted onto `UserSession` keyed `{user, deviceId}`. `protect`/`optionalProtect` verify with `JWT_VERIFY_OPTIONS` (algorithm pinned to HS256) and reject anything failing `isAccessToken` — refresh and verify tokens are explicitly not allow-listed.
 
-**Improvements:** Both token types share one secret and are separated only by a claim plus an allow-list call; an endpoint that checks `decoded.id` without `isAccessToken` reintroduces the original bug. No revocation list for access tokens — a stolen one stays valid for its full 15 minutes after logout.
+**Improved:** Enforces cryptographic domain separation by signing access, refresh, and verification tokens with distinct derived secrets (`getAccessTokenSecret`, `getRefreshTokenSecret`, `getVerificationTicketSecret`), preventing cross-token verification even if `typ` checks are omitted. Implements access token revocation (`RevokedToken` model + in-memory cache) so logged-out or revoked tokens are immediately rejected across HTTP and WebSocket channels.
 
 ### Silent token refresh
 
