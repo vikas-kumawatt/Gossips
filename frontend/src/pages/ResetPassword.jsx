@@ -1,12 +1,13 @@
 import React, { useState, useRef } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, Link } from "react-router-dom";
 import InputBox from "../components/InputBox";
 import { Toaster, toast } from "react-hot-toast";
 import axios from "axios";
 import { Loader2 } from "lucide-react";
+import { Icons } from "../components/icons";
 
 const ResetPassword = () => {
-  const { token } = useParams(); 
+  const { token } = useParams();
   const navigate = useNavigate();
   const formRef = useRef(null);
   const [loading, setLoading] = useState(false);
@@ -18,6 +19,10 @@ const ResetPassword = () => {
     const form = new FormData(formRef.current);
     const formData = Object.fromEntries(form.entries());
     const { password, confirmPassword } = formData;
+
+    if (!password) {
+      return toast.error("Please enter a new password");
+    }
 
     if (!passwordRegex.test(password)) {
       return toast.error(
@@ -49,24 +54,31 @@ const ResetPassword = () => {
       <Toaster />
       <form
         ref={formRef}
+        onSubmit={handleResetPassword}
         className="w-[80%] max-w-[400px] flex flex-col items-center"
       >
-        <img
-          src="../images/logo.png"
-          alt="Gossips Logo"
-          className="w-20 h-20 mb-4 mx-auto"
+        <Icons.logo className="w-20 h-20 mb-4 mx-auto" />
+        <h1 className="text-white font-bold text-2xl mb-6">Set New Password</h1>
+
+        <InputBox
+          name="password"
+          type="password"
+          placeholder="New Password"
+          icon="fi-rr-key"
+          autoComplete="new-password"
         />
-        <h1 className="text-white font-bold mb-4">Set New Password</h1>
-        <InputBox name="password" type="password" placeholder="New Password" />
+
         <InputBox
           name="confirmPassword"
           type="password"
           placeholder="Confirm Password"
+          icon="fi-rr-key"
+          autoComplete="new-password"
         />
+
         <button
           type="submit"
-          className="w-[100%] rounded-xl p-4 text-black font-medium bg-white border border-transparent cursor-pointer flex items-center justify-center gap-2"
-          onClick={handleResetPassword}
+          className="w-full rounded-xl p-4 text-black font-medium bg-white hover:bg-neutral-200 transition-colors border border-transparent cursor-pointer flex items-center justify-center gap-2 mt-2"
           disabled={loading}
         >
           {loading ? (
@@ -78,6 +90,13 @@ const ResetPassword = () => {
             "Reset Password"
           )}
         </button>
+
+        <p className="mt-6 text-neutral-400 text-sm">
+          Remember your password?{" "}
+          <Link to="/login" className="text-white underline hover:text-neutral-300">
+            Log in
+          </Link>
+        </p>
       </form>
     </section>
   );

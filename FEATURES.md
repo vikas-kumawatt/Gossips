@@ -150,7 +150,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `InputBox.jsx` flips the input's `type` between `password` and `text` from local state.
 
-**Improvements:** Worth a visual check on `ResetPassword.jsx`, which has two adjacent password fields where mismatch errors are common.
+**Improved:** `ResetPassword.jsx` upgraded with individual show/hide eye toggles across both adjacent password inputs, proper `autoComplete="new-password"` attributes, key icons, empty input guarding, and standardized brand layout.
 
 ### Access/refresh token issuance & rotation
 
