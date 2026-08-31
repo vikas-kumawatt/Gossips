@@ -33,8 +33,11 @@ import {
   updatePrivacySettings,
   setPushToken,
   deletePushToken,
+  deactivateAccount,
+  deleteAccount,
 } from "../controllers/userController.js";
 import { protect } from "../middleware/authMiddleware.js";
+import { sameOriginOnly } from "./authRoutes.js";
 import upload from "../config/multerConfig.js";
 
 const router = Router();
@@ -76,6 +79,10 @@ router.get("/username-status", protect, getUsernameStatus);
 // Hyphenated, so neither can be mistaken for a profile route.
 router.get("/privacy-settings", protect, getPrivacySettings);
 router.patch("/privacy-settings", protect, updatePrivacySettings);
+
+// Self-service account deactivation and deletion
+router.post("/deactivate", protect, sameOriginOnly, deactivateAccount);
+router.post("/delete-account", protect, sameOriginOnly, deleteAccount);
 
 /*
  * Push registration (CF30b).

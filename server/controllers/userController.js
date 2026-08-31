@@ -6,9 +6,12 @@ import UserRelation from "../models/UserRelation.js";
 import Notification from "../models/Notification.js";
 import Repost from "../models/Repost.js";
 import User from "../models/User.js";
+import UserSession from "../models/UserSession.js";
 import Post from "../models/Post.js";
 import Comment from "../models/Comment.js";
 import UserSettings from "../models/UserSettings.js";
+import bcrypt from "bcrypt";
+import { revokeAccessToken } from "../utils/tokenRevocation.js";
 import { io } from "../server.js";
 import {
   buildCursorPageInfo,
@@ -1655,5 +1658,123 @@ export const deletePushToken = async (req, res) => {
   } catch (error) {
     console.error("deletePushToken error:", error);
     return res.status(500).json({ error: "Failed to unregister" });
+  }
+};
+
+/**
+ * POST /user/deactivate — Self-service temporary account deactivation.
+ *
+ * Marks accountStatus as "deactivated", logs out of all devices, and revokes active tokens.
+ * The user can reactivate at any time simply by signing in.
+ */
+export const deactivateAccount = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select("+password");
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const { password } = req.body || {};
+    if (user.password) {
+      if (!password) {
+        return res.status(400).json({ error: "Password is required to deactivate your account." });
+      }
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(400).json({ error: "Incorrect password." });
+      }
+    }
+
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { accountStatus: "deactivated", deactivatedAt: new Date() } }
+    );
+
+    await UserSession.deleteMany({ user: user._id });
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const accessToken = authHeader.split(" ")[1];
+      await revokeAccessToken(accessToken, user._id, null, "self_deactivate");
+    }
+
+    const baseOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    };
+    res.clearCookie("refreshToken", baseOptions);
+    res.clearCookie(`gossips_acc_${user._id}`, { ...baseOptions, path: "/auth" });
+
+    return res.status(200).json({
+      message: "Your account has been deactivated. You can reactivate anytime by logging in.",
+    });
+  } catch (error) {
+    console.error("deactivateAccount error:", error);
+    return res.status(500).json({ error: "Failed to deactivate account" });
+  }
+};
+
+/**
+ * POST /user/delete-account — Self-service permanent account deletion.
+ *
+ * Marks accountStatus as "deleted", removes profile details, terminates all active sessions,
+ * and clears session cookies.
+ */
+export const deleteAccount = async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id).select("+password");
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const { password, confirmation } = req.body || {};
+    if (confirmation !== "DELETE") {
+      return res.status(400).json({
+        error: "Please type DELETE to confirm permanent account deletion.",
+      });
+    }
+
+    if (user.password) {
+      if (!password) {
+        return res.status(400).json({ error: "Password is required to delete your account." });
+      }
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(400).json({ error: "Incorrect password." });
+      }
+    }
+
+    await User.updateOne(
+      { _id: user._id },
+      {
+        $set: {
+          accountStatus: "deleted",
+          deletedAt: new Date(),
+          name: "Deleted User",
+          bio: "",
+          link: "",
+        },
+      }
+    );
+
+    await UserSession.deleteMany({ user: user._id });
+
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const accessToken = authHeader.split(" ")[1];
+      await revokeAccessToken(accessToken, user._id, null, "self_delete");
+    }
+
+    const baseOptions = {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    };
+    res.clearCookie("refreshToken", baseOptions);
+    res.clearCookie(`gossips_acc_${user._id}`, { ...baseOptions, path: "/auth" });
+
+    return res.status(200).json({
+      message: "Your account has been permanently deleted.",
+    });
+  } catch (error) {
+    console.error("deleteAccount error:", error);
+    return res.status(500).json({ error: "Failed to delete account" });
   }
 };

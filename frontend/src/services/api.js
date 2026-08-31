@@ -267,6 +267,12 @@ export const userAPI = {
   updatePrivacySettings: (updates) =>
     api.patch("/user/privacy-settings", updates).then((r) => r.data),
 
+  deactivateAccount: (data) =>
+    api.post("/user/deactivate", data).then((r) => r.data),
+
+  deleteAccount: (data) =>
+    api.post("/user/delete-account", data).then((r) => r.data),
+
   // Uncached: rows carry the viewer's live follow state, and a 60-second
   // stale copy shows "Follow" on someone you just followed.
   getFollowers: (username, params) =>

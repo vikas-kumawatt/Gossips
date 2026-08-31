@@ -254,7 +254,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `User.accountStatus` is `active|suspended|deactivated|deleted|locked`. `protect` and `readAccountSession` reject `deleted`/`deactivated` with a 401; `requireActiveAccount` handles `suspended` separately, returning the reason and end date in a 403 so a suspended user sees why rather than being logged out.
 
-**Improvements:** No self-service path puts an account into `deactivated` or `deleted` — only admin action can.
+**Improved:** Added self-service endpoints (`POST /user/deactivate` and `POST /user/delete-account`) with password/DELETE confirmation, token & session revocation, cookie wiping, automatic sign-in reactivation for deactivated accounts, and the `DeactivateDeleteModal` UI in settings.
 
 ### Settings → Account tab (largely unimplemented)
 

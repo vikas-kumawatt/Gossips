@@ -969,6 +969,27 @@ export const loginUser = async (req, res) => {
       );
     }
 
+    if (user.accountStatus === "deleted") {
+      return res.status(403).json({ error: "This account has been permanently deleted." });
+    }
+
+    if (user.accountStatus === "suspended") {
+      return res.status(403).json({
+        error: "Account suspended",
+        reason: user.suspensionReason || "Violation of community guidelines",
+        endsAt: user.suspensionEndsAt,
+      });
+    }
+
+    if (user.accountStatus === "deactivated") {
+      // Self-service login restores deactivated account to active status
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { accountStatus: "active", deactivatedAt: null } }
+      );
+      user.accountStatus = "active";
+    }
+
     recordSignInCountry(req, user._id);
 
     const deviceId = requestDeviceId(req);
@@ -1086,6 +1107,24 @@ export const googleLogin = async (req, res) => {
           updateData.profilePic = picture;
           user.profilePic = picture;
         }
+      }
+
+      if (user.accountStatus === "deleted") {
+        return res.status(403).json({ error: "This account has been permanently deleted." });
+      }
+
+      if (user.accountStatus === "suspended") {
+        return res.status(403).json({
+          error: "Account suspended",
+          reason: user.suspensionReason || "Violation of community guidelines",
+          endsAt: user.suspensionEndsAt,
+        });
+      }
+
+      if (user.accountStatus === "deactivated") {
+        updateData.accountStatus = "active";
+        updateData.deactivatedAt = null;
+        user.accountStatus = "active";
       }
 
       await User.updateOne(

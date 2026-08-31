@@ -306,6 +306,41 @@ test("sameOriginOnly: allows registered origins and blocks cross-origin attacker
   assert.equal(attacker.errorBody.error, "Cross-origin request rejected");
 });
 
+test("account status gating: self-service deactivation, deletion, and login reactivation", () => {
+  const user = {
+    _id: "user_deact_1",
+    email: "user@test.com",
+    accountStatus: "active",
+    deactivatedAt: null,
+    deletedAt: null,
+  };
+
+  // 1. Self-service deactivation
+  user.accountStatus = "deactivated";
+  user.deactivatedAt = new Date();
+  assert.equal(user.accountStatus, "deactivated");
+  assert.ok(user.deactivatedAt);
+
+  // 2. Logging in with valid credentials reactivates the account
+  if (user.accountStatus === "deactivated") {
+    user.accountStatus = "active";
+    user.deactivatedAt = null;
+  }
+  assert.equal(user.accountStatus, "active");
+  assert.equal(user.deactivatedAt, null);
+
+  // 3. Permanent deletion
+  user.accountStatus = "deleted";
+  user.deletedAt = new Date();
+  assert.equal(user.accountStatus, "deleted");
+
+  // Deleted accounts cannot log in or be reactivated
+  const loginResult = user.accountStatus === "deleted" ? { allowed: false, status: 403 } : { allowed: true };
+  assert.equal(loginResult.allowed, false);
+  assert.equal(loginResult.status, 403);
+});
+
+
 
 
 

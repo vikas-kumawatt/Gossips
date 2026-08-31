@@ -9,6 +9,7 @@ import BlockedAccountsModal from "../components/BlockedAccountsModal";
 import MentionSettingsSheet from "../components/MentionSettingsSheet";
 import ActiveSessionsModal from "../components/ActiveSessionsModal";
 import OnlineStatusSheet from "../components/OnlineStatusSheet";
+import DeactivateDeleteModal from "../components/DeactivateDeleteModal";
 import { userAPI } from "../services/api";
 import toast from "react-hot-toast";
 import {
@@ -24,6 +25,7 @@ const SettingsPage = () => {
   const [isMentionsOpen, setIsMentionsOpen] = useState(false);
   const [isOnlineStatusOpen, setIsOnlineStatusOpen] = useState(false);
   const [isSessionsOpen, setIsSessionsOpen] = useState(false);
+  const [isDeactivateModalOpen, setIsDeactivateModalOpen] = useState(false);
   const [isPrivate, setIsPrivate] = useState(Boolean(userAuth?.isPrivate));
   const [privacySaving, setPrivacySaving] = useState(false);
   const openCreateModal = () => setIsCreateModalOpen(true);
@@ -229,7 +231,10 @@ const SettingsPage = () => {
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
       </div>
 
-      <div className="flex relative w-full items-center gap-4 mb-4">
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsDeactivateModalOpen(true)}
+      >
         <p className="text-md">Deactivate or delete profile</p>
         <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
       </div>
@@ -360,6 +365,10 @@ const SettingsPage = () => {
       <ActiveSessionsModal
         isOpen={isSessionsOpen}
         onClose={() => setIsSessionsOpen(false)}
+      />
+      <DeactivateDeleteModal
+        isOpen={isDeactivateModalOpen}
+        onClose={() => setIsDeactivateModalOpen(false)}
       />
     </div>
   );
