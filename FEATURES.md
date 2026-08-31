@@ -326,7 +326,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `/followrequests` → `GET /user/follow-requests`. Accept (`POST /user/follow-requests/:requestId/accept`) flips to `accepted`, increments both counters, clears the request notification and sends `follow_request_accepted`. Reject (`.../reject`) deletes the edge silently — the requester is never told. Cancel (`DELETE /user/follow-request/:username`) deletes from the requester's side and emits `followStatusUpdate`.
 
-**Improvements:** `FollowRequests.jsx` uses `alert()` instead of the app's toast pattern. No bulk "accept all".
+**Improved:** Replaced raw `alert()` dialogs with standard `react-hot-toast` notifications and added a bulk `POST /user/follow-requests/accept-all` endpoint alongside an "Accept All" action in `FollowRequests.jsx`.
 
 ### Followers / following lists
 

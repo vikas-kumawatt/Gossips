@@ -771,6 +771,62 @@ export const getFollowRequests = async (req, res) => {
   }
 };
 
+export const acceptAllFollowRequests = async (req, res) => {
+  try {
+    const pending = await Follow.find({
+      following: req.user._id,
+      status: "pending",
+    })
+      .select("follower")
+      .lean();
+
+    if (pending.length === 0) {
+      return res.status(200).json({ message: "No pending follow requests", acceptedCount: 0 });
+    }
+
+    const followerIds = pending.map((f) => f.follower);
+
+    await Follow.updateMany(
+      { following: req.user._id, status: "pending" },
+      { $set: { status: "accepted" } }
+    );
+
+    await User.updateOne(
+      { _id: req.user._id },
+      { $inc: { "counts.followers": pending.length } }
+    );
+    await User.updateMany(
+      { _id: { $in: followerIds } },
+      { $inc: { "counts.following": 1 } }
+    );
+
+    await Notification.deleteMany({
+      recipient: req.user._id,
+      sender: { $in: followerIds },
+      type: "follow_request",
+    });
+
+    const recipientRooms = followerIds.map((id) => id.toString());
+    if (recipientRooms.length > 0 && io) {
+      io.to(recipientRooms).emit("followStatusUpdate", {
+        username: req.user.username,
+        action: "follow",
+        isPending: false,
+        isPrivate: req.user.isPrivate,
+        autoAccepted: true,
+      });
+    }
+
+    res.status(200).json({
+      message: `Accepted ${pending.length} follow request${pending.length === 1 ? "" : "s"}`,
+      acceptedCount: pending.length,
+    });
+  } catch (error) {
+    console.error("acceptAllFollowRequests error:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+};
+
 export const acceptFollowRequest = async (req, res) => {
   try {
     const edge = await Follow.findById(req.params.requestId);

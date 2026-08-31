@@ -321,6 +321,9 @@ export const userAPI = {
 
   getFollowRequests: () => cachedGet("/user/follow-requests"),
 
+  acceptAllFollowRequests: () =>
+    api.post("/user/follow-requests/accept-all").then((r) => r.data),
+
   acceptFollowRequest: (requestId) =>
     api.post(`/user/follow-requests/${requestId}/accept`).then((r) => r.data),
 
