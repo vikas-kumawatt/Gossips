@@ -1497,15 +1497,29 @@ export const changeUsername = async (req, res) => {
 // Privacy settings
 // ─────────────────────────────────────────────────────────────────────────────
 
+const audienceEnum = ["everyone", "followers", "followers_following", "none"];
+const profileAudienceEnum = ["everyone", "followers", "followers_following"];
+
 /**
- * The subset of UserSettings.privacy this app currently exposes.
+ * The subset of UserSettings.privacy this app exposes.
  *
- * An allow-list rather than a pass-through: `privacy` holds two dozen fields,
- * most of them for features that don't exist yet, and a PATCH that accepts
- * whatever it's given would let a crafted request write all of them.
+ * An allow-list rather than an unconstrained pass-through: validates types and enum values
+ * against their allowed configurations before updating MongoDB.
  */
 const EDITABLE_PRIVACY = {
   whoCanMention: ["everyone", "following", "none"],
+  whoCanMessage: audienceEnum,
+  whoCanCall: audienceEnum,
+  whoCanSeeOnlineStatus: audienceEnum,
+  whoCanSeeLastSeen: audienceEnum,
+  whoCanSeeReadReceipts: audienceEnum,
+  whoCanSeeProfile: profileAudienceEnum,
+  whoCanSeeFollowers: profileAudienceEnum,
+  whoCanSeeFollowing: profileAudienceEnum,
+  readReceipts: [true, false],
+  typingIndicator: [true, false],
+  screenshotNotifications: [true, false],
+  screenRecordingNotifications: [true, false],
 };
 
 /** GET /user/privacy-settings */
@@ -1517,9 +1531,19 @@ export const getPrivacySettings = async (req, res) => {
 
     const privacy = settings?.privacy || {};
     return res.status(200).json({
-      // Defaults, not undefined: an account created before a setting existed
-      // has no value for it, and the client shouldn't have to know that.
       whoCanMention: privacy.whoCanMention || "everyone",
+      whoCanMessage: privacy.whoCanMessage || "everyone",
+      whoCanCall: privacy.whoCanCall || "everyone",
+      whoCanSeeOnlineStatus: privacy.whoCanSeeOnlineStatus || "everyone",
+      whoCanSeeLastSeen: privacy.whoCanSeeLastSeen || "everyone",
+      whoCanSeeReadReceipts: privacy.whoCanSeeReadReceipts || "everyone",
+      whoCanSeeProfile: privacy.whoCanSeeProfile || "everyone",
+      whoCanSeeFollowers: privacy.whoCanSeeFollowers || "everyone",
+      whoCanSeeFollowing: privacy.whoCanSeeFollowing || "everyone",
+      readReceipts: privacy.readReceipts ?? true,
+      typingIndicator: privacy.typingIndicator ?? true,
+      screenshotNotifications: privacy.screenshotNotifications ?? false,
+      screenRecordingNotifications: privacy.screenRecordingNotifications ?? false,
     });
   } catch (error) {
     console.error("getPrivacySettings error:", error);
@@ -1562,9 +1586,22 @@ export const updatePrivacySettings = async (req, res) => {
      */
     invalidatePrivacy(req.user._id);
 
+    const privacy = settings?.privacy || {};
     return res.status(200).json({
       message: "Settings saved",
-      whoCanMention: settings?.privacy?.whoCanMention || "everyone",
+      whoCanMention: privacy.whoCanMention || "everyone",
+      whoCanMessage: privacy.whoCanMessage || "everyone",
+      whoCanCall: privacy.whoCanCall || "everyone",
+      whoCanSeeOnlineStatus: privacy.whoCanSeeOnlineStatus || "everyone",
+      whoCanSeeLastSeen: privacy.whoCanSeeLastSeen || "everyone",
+      whoCanSeeReadReceipts: privacy.whoCanSeeReadReceipts || "everyone",
+      whoCanSeeProfile: privacy.whoCanSeeProfile || "everyone",
+      whoCanSeeFollowers: privacy.whoCanSeeFollowers || "everyone",
+      whoCanSeeFollowing: privacy.whoCanSeeFollowing || "everyone",
+      readReceipts: privacy.readReceipts ?? true,
+      typingIndicator: privacy.typingIndicator ?? true,
+      screenshotNotifications: privacy.screenshotNotifications ?? false,
+      screenRecordingNotifications: privacy.screenRecordingNotifications ?? false,
     });
   } catch (error) {
     console.error("updatePrivacySettings error:", error);

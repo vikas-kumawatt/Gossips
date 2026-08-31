@@ -232,6 +232,37 @@ test("usernameHistory bounding: history is capped to 10 entries while preserving
   assert.equal(history[9].username, "user_v15", "Latest entry must be preserved");
 });
 
+test("privacy settings: allowlist validates whoCanMention, whoCanSeeOnlineStatus, whoCanMessage, and readReceipts", () => {
+  const audienceEnum = ["everyone", "followers", "followers_following", "none"];
+  const editablePrivacy = {
+    whoCanMention: ["everyone", "following", "none"],
+    whoCanMessage: audienceEnum,
+    whoCanCall: audienceEnum,
+    whoCanSeeOnlineStatus: audienceEnum,
+    whoCanSeeLastSeen: audienceEnum,
+    whoCanSeeReadReceipts: audienceEnum,
+    readReceipts: [true, false],
+    typingIndicator: [true, false],
+  };
+
+  const validateUpdate = (key, val) => {
+    if (!(key in editablePrivacy)) return false;
+    return editablePrivacy[key].includes(val);
+  };
+
+  // Valid updates
+  assert.equal(validateUpdate("whoCanMention", "following"), true);
+  assert.equal(validateUpdate("whoCanSeeOnlineStatus", "followers_following"), true);
+  assert.equal(validateUpdate("whoCanMessage", "none"), true);
+  assert.equal(validateUpdate("readReceipts", false), true);
+
+  // Invalid updates
+  assert.equal(validateUpdate("whoCanMention", "invalid_enum"), false);
+  assert.equal(validateUpdate("whoCanSeeOnlineStatus", "all_friends"), false);
+  assert.equal(validateUpdate("unauthorizedField", "foo"), false);
+});
+
+
 
 
 

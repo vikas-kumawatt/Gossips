@@ -8,6 +8,9 @@ import InPageNavigation from "../components/InPageNavigation";
 import BlockedAccountsModal from "../components/BlockedAccountsModal";
 import MentionSettingsSheet from "../components/MentionSettingsSheet";
 import ActiveSessionsModal from "../components/ActiveSessionsModal";
+import OnlineStatusSheet from "../components/OnlineStatusSheet";
+import { userAPI } from "../services/api";
+import toast from "react-hot-toast";
 import {
   disablePushNotifications,
   enablePushNotifications,
@@ -15,11 +18,14 @@ import {
 } from "../services/pushNotifications";
 
 const SettingsPage = () => {
-  const { userAuth } = useContext(UserContext);
+  const { userAuth, setUserAuth } = useContext(UserContext);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isBlockedModalOpen, setIsBlockedModalOpen] = useState(false);
   const [isMentionsOpen, setIsMentionsOpen] = useState(false);
+  const [isOnlineStatusOpen, setIsOnlineStatusOpen] = useState(false);
   const [isSessionsOpen, setIsSessionsOpen] = useState(false);
+  const [isPrivate, setIsPrivate] = useState(Boolean(userAuth?.isPrivate));
+  const [privacySaving, setPrivacySaving] = useState(false);
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);
   const layoutContext = { openCreateModal, closeCreateModal };
@@ -125,32 +131,62 @@ const SettingsPage = () => {
 
       <div className="flex relative items-center gap-4 mb-4 w-full">
         <Icons.lock className="h-6 w-6" />
-        <p className="text-md">Private profile</p>
+        <div className="flex-1 min-w-0">
+          <p className="text-md">Private profile</p>
+          <p className="text-xs text-neutral-500">
+            {isPrivate ? "Only approved followers can see your posts" : "Anyone can see your profile and posts"}
+          </p>
+        </div>
         
-        <label className="inline-flex items-center cursor-pointer absolute top-1/2 right-0 transform -translate-y-1/2">
-                <input
-                  type="checkbox"
-                  className="sr-only peer"
-                  
-                />
-                <div className="w-10 h-6 bg-gray-200 rounded-full peer peer-focus:ring-4 peer-focus:ring-blue-300 dark:peer-focus:ring-blue-800 peer-checked:bg-blue-600"></div>
-                <span className="absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform duration-300 transform peer-checked:translate-x-full"></span>
-              </label>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={isPrivate}
+          aria-label="Private profile"
+          disabled={privacySaving}
+          onClick={async () => {
+            const next = !isPrivate;
+            setIsPrivate(next);
+            setPrivacySaving(true);
+            try {
+              await userAPI.setupProfile({ isPrivate: next });
+              setUserAuth({ ...userAuth, isPrivate: next });
+              toast.success(next ? "Account is now private" : "Account is now public");
+            } catch (err) {
+              setIsPrivate(!next);
+              toast.error(err?.response?.data?.error || "Failed to update privacy setting");
+            } finally {
+              setPrivacySaving(false);
+            }
+          }}
+          className={`relative h-6 w-10 shrink-0 rounded-full transition-colors disabled:opacity-40 cursor-pointer ${
+            isPrivate ? "bg-blue-600" : "bg-neutral-700"
+          }`}
+        >
+          <span
+            className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white transition-transform duration-300 ${
+              isPrivate ? "translate-x-4" : "translate-x-0"
+            }`}
+          />
+        </button>
       </div>
 
       <div
-        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer"
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
         onClick={() => setIsMentionsOpen(true)}
       >
         <Icons.mentions className="h-6 w-6" />
         <p className="text-md">Mentions</p>
-        <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
-      <div className="flex relative w-full items-center gap-4 mb-4">
+      <div
+        className="flex relative w-full items-center gap-4 mb-4 cursor-pointer hover:opacity-80 transition-opacity"
+        onClick={() => setIsOnlineStatusOpen(true)}
+      >
         <Icons.onlineStatus className="h-6 w-6" />
         <p className="text-md">Online status</p>
-        <Icons.chevronRight className="h-6 w-6 absolute right-0" strokeColor="#737373"/>
+        <Icons.chevronRight className="h-5 w-5 absolute right-0" strokeColor="#737373"/>
       </div>
 
       <div className="flex relative w-full items-center gap-4 mb-4">
@@ -317,6 +353,9 @@ const SettingsPage = () => {
       />
       {isMentionsOpen && (
         <MentionSettingsSheet onClose={() => setIsMentionsOpen(false)} />
+      )}
+      {isOnlineStatusOpen && (
+        <OnlineStatusSheet onClose={() => setIsOnlineStatusOpen(false)} />
       )}
       <ActiveSessionsModal
         isOpen={isSessionsOpen}

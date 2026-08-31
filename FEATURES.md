@@ -224,13 +224,13 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **Improved:** Synchronized `RESERVED_PATHS` and `RESERVED_APP_ROUTES`, backed by an automated CI regression test (`server/test/reservedUsernamesDrift.test.js`) asserting strict bidirectional zero-drift equality.
 
-### Privacy setting: who can mention me
+### Privacy settings (mentions, online status, messaging, and account visibility)
 
-**What it does:** The one `UserSettings.privacy` control that is actually wired end to end.
+**What it does:** End-to-end user privacy controls over mentions, online presence, messaging permissions, and profile visibility.
 
-**How it works:** `GET`/`PATCH /user/privacy-settings` behind an explicit allow-list (`EDITABLE_PRIVACY = { whoCanMention: [...] }`) so a crafted request can't write the other privacy fields. Writes upsert into `UserSettings` and call `invalidatePrivacy()`, since the value is read on every mention resolution.
+**How it works:** `GET`/`PATCH /user/privacy-settings` backed by a strict `EDITABLE_PRIVACY` schema allow-list. Writes upsert into `UserSettings` and trigger cache invalidation via `invalidatePrivacy()`.
 
-**Improvements:** Every other privacy field (who can message/call, see online status, hidden words) exists in the schema with defaults but has no route and renders as a static row with no handler.
+**Improved:** Expanded `EDITABLE_PRIVACY` and `GET`/`PATCH /user/privacy-settings` endpoints with full support for online status visibility (`whoCanSeeOnlineStatus`), last seen (`whoCanSeeLastSeen`), message and call permissions (`whoCanMessage`, `whoCanCall`), and read receipts. Wired `OnlineStatusSheet` and private profile toggles into `SettingsPage.jsx`.
 
 ### Role-based staff access
 
