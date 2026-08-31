@@ -310,7 +310,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `RichText.jsx` tokenises via `lib/richText.js` and links only handles present in the server-resolved `mentionUsernames` list. `utils/mentions.js#resolveAllowedMentions` caps at 20 mentions, excludes suspended/blocked accounts, and honours each target's `whoCanMention` (`everyone`/`following`/`none`); self-mentions always link but never notify. Hashtags in a bio render but are deliberately not indexed for tag search (spam prevention).
 
-**Improvements:** Permissions freeze at write time by design — tightening `whoCanMention` doesn't retroactively unlink old mentions. Worth saying so in the settings copy.
+**Improved:** Permissions freeze at write time by design; added explicit clarification in `MentionSettingsSheet.jsx` explaining that permission changes govern future mentions and edits while existing mentions remain preserved.
 
 ### Follow / unfollow
 

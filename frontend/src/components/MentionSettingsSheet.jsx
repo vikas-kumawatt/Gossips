@@ -62,8 +62,11 @@ const MentionSettingsSheet = ({ onClose }) => {
       <div className="px-5 py-5">
         <h2 className="text-[17px] font-bold text-white">Allow @mentions from</h2>
         <p className="mt-2 text-[14px] leading-relaxed text-neutral-400">
-          Choose who can @mention you to link your profile in their posts, replies or
-          bio. When people try to @mention you, they'll see you don't allow @mentions.
+          Choose who can @mention you to link your profile in their posts, replies, or
+          bio. When people you haven't allowed try to @mention you, their text won't create a clickable link.
+        </p>
+        <p className="mt-2 text-[13px] text-neutral-500 leading-relaxed">
+          Note: Changes apply to new posts and edits going forward. Mentions in previously published posts or bios are not retroactively unlinked.
         </p>
 
         {error ? (
