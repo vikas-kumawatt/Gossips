@@ -16,7 +16,7 @@ const USERNAME_PATTERN = /^[a-zA-Z0-9_]{3,30}$/;
  * pages rather than profiles. Without this a QR for "/settings" would parse as
  * a profile named "settings" and the scanner would claim it found an account.
  */
-const RESERVED_PATHS = new Set([
+export const RESERVED_PATHS = new Set([
   "login",
   "signup",
   "search",
@@ -37,6 +37,9 @@ const RESERVED_PATHS = new Set([
   "ai-labels",
   "ai-bots",
   "tag",
+  "tags",
+  "hashtag",
+  "hashtags",
 ]);
 
 // Long enough for any real link, short enough that a malformed payload can't be

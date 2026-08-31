@@ -20,10 +20,9 @@ import { getSettings } from "./settings.js";
  * enough to spell out.
  */
 
-const RESERVED_USERNAMES = new Set([
+export const RESERVED_APP_ROUTES = new Set([
   // ── 1. Routes the SPA owns ────────────────────────────────────────────────
-  // Mirrors RESERVED_PATHS in frontend/src/lib/profileLink.js. If a route is
-  // added there, add it here too or the handle can shadow the page.
+  // Mirrors RESERVED_PATHS in frontend/src/lib/profileLink.js.
   "login",
   "signup",
   "search",
@@ -42,18 +41,15 @@ const RESERVED_USERNAMES = new Set([
   "privacy",
   "cookies",
   "ai-labels",
-  /*
-   * Hyphenated, so `validateUsernameFormat` already rejects it — usernames are
-   * `[a-z0-9_]{3,30}`. Listed anyway, for the same reason `ai-labels` and
-   * `reset-password` are: this file is the record of which single-segment paths
-   * the app owns, and a reader shouldn't have to re-derive that a hyphen makes
-   * one safe.
-   */
   "ai-bots",
   "tag",
   "tags",
   "hashtag",
   "hashtags",
+]);
+
+export const RESERVED_USERNAMES = new Set([
+  ...RESERVED_APP_ROUTES,
 
   // ── 2. Platform identity and support-desk impersonation ───────────────────
   "gossip",

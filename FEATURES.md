@@ -222,7 +222,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** A static `Set` (route names, platform/support terms, infra names, generic words) plus regex patterns for impersonation shapes like `gossips_support`, merged at check time with admin-configured additions from `AppSettings`.
 
-**Improvements:** The list mirrors `RESERVED_PATHS` in `lib/profileLink.js` by hand — a CI test asserting the two never drift is the obvious fix.
+**Improved:** Synchronized `RESERVED_PATHS` and `RESERVED_APP_ROUTES`, backed by an automated CI regression test (`server/test/reservedUsernamesDrift.test.js`) asserting strict bidirectional zero-drift equality.
 
 ### Privacy setting: who can mention me
 
