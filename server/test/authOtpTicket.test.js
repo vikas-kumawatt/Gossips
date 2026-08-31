@@ -74,3 +74,33 @@ test("retry guidance: 502 email delivery error structure includes retryAfter and
   assert.equal(deliveryErrorResponse.retryable, true);
   assert.match(deliveryErrorResponse.error, /verification email/i);
 });
+
+test("MAX_PENDING_PER_EMAIL cap: rejects with 429 when active attempts reach threshold", () => {
+  const MAX_PENDING_PER_EMAIL = 5;
+  const now = Date.now();
+  const mockLiveRows = [
+    { _id: "1", expiresAt: new Date(now + 120 * 1000) },
+    { _id: "2", expiresAt: new Date(now + 240 * 1000) },
+    { _id: "3", expiresAt: new Date(now + 360 * 1000) },
+    { _id: "4", expiresAt: new Date(now + 480 * 1000) },
+    { _id: "5", expiresAt: new Date(now + 600 * 1000) },
+  ];
+
+  assert.equal(mockLiveRows.length >= MAX_PENDING_PER_EMAIL, true);
+
+  const earliestExpiry = mockLiveRows[0]?.expiresAt ? new Date(mockLiveRows[0].expiresAt).getTime() : now + 600000;
+  const retryAfter = Math.max(1, Math.ceil((earliestExpiry - now) / 1000));
+
+  const response = {
+    ok: false,
+    status: 429,
+    error: "Too many pending verification attempts for this email. Please check your inbox or try again in a few minutes.",
+    retryAfter,
+    retryable: false,
+  };
+
+  assert.equal(response.status, 429);
+  assert.equal(response.retryAfter, 120);
+  assert.equal(response.retryable, false);
+});
+

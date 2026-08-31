@@ -108,7 +108,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `POST /auth/resend-otp` → `reissueOtp()` with a **60-second cooldown** and a cap of **5 sends** per pending row (`OTP_MAX_SENDS`); resending deliberately does not reset the guess counter. Verification allows **5 wrong guesses** (`OTP_MAX_ATTEMPTS`), decremented atomically inside a `findOneAndUpdate` filter so concurrent guesses can't both spend the same attempt. `VerifyOtpPage.jsx` runs a live countdown and reconciles it against the server's `retryAfter` on a 429. Per-IP limiters sit on top (verify 30/15min, resend 10/hour).
 
-**Improvements:** `MAX_PENDING_PER_EMAIL` (5) evicts the oldest pending row rather than rejecting, so an attacker willing to pay the IP limit can keep cycling a victim's inbox. No per-email lockout independent of the per-row counter.
+**Improvements:** `MAX_PENDING_PER_EMAIL` (5) enforces a per-email cap and rejects with HTTP 429 and `Retry-After` once exceeded rather than evicting previous rows, preventing an attacker from continuously cycling a victim's inbox or invalidating existing verification codes.
 
 ### Email/password login
 

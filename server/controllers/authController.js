@@ -638,22 +638,26 @@ const startPendingSignup = async ({ name, email, password, user = null }) => {
    * Bound the codes in flight for one address — each is somebody's inbox getting
    * mail they may not have asked for.
    *
-   * The oldest is evicted rather than the newest rejected, and that direction is
-   * the whole point. Rejecting caps the address, which means five requests from
-   * one IP lock the real owner out of registering entirely for ten minutes and
-   * keep doing so for as long as anyone cares to pay for it — trading the squat
-   * this design removed for a cheaper one. Evicting holds the same ceiling
-   * without ever telling a genuine signup no, and it makes the count advisory,
-   * so the read-then-write below cannot fail in a way that matters: overshoot by
-   * a request or two and the next call trims it back.
+   * When an email address already has MAX_PENDING_PER_EMAIL active pending rows,
+   * new signup attempts for that email are rejected with a 429 rather than
+   * evicting existing rows. This prevents an attacker from cycling and spamming
+   * a victim's inbox indefinitely or invalidating their live verification codes.
    */
   const live = await PendingSignup.find({ email: address, expiresAt: { $gt: new Date() } })
-    .sort({ createdAt: 1 })
-    .select("_id")
+    .sort({ expiresAt: 1 })
+    .select("_id expiresAt")
     .lean();
-  const excess = live.length - (MAX_PENDING_PER_EMAIL - 1);
-  if (excess > 0) {
-    await PendingSignup.deleteMany({ _id: { $in: live.slice(0, excess).map((r) => r._id) } });
+
+  if (live.length >= MAX_PENDING_PER_EMAIL) {
+    const earliestExpiry = live[0]?.expiresAt ? new Date(live[0].expiresAt).getTime() : Date.now() + OTP_TTL_MS;
+    const retryAfter = Math.max(1, Math.ceil((earliestExpiry - Date.now()) / 1000));
+    return {
+      ok: false,
+      status: 429,
+      error: "Too many pending verification attempts for this email. Please check your inbox or try again in a few minutes.",
+      retryAfter,
+      retryable: false,
+    };
   }
 
   /*
