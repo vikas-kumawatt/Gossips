@@ -206,7 +206,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `UsernameField.jsx` debounces 400ms into `GET /user/username-availability` (60/min/user). `checkUsernameAvailability()` runs format validation, the reserved-word list (static + admin-configurable, 30s-memoised), the live unique index, and a 14-day hold on handles another account released.
 
-**Improvements:** Advisory by design, so there's a TOCTOU window closed only by the unique index at write time — the green tick can lie in the final moment.
+**Improved:** Handles the inherent advisory TOCTOU window by catching database duplicate key collisions (11000) on write and immediately transitioning `UsernameField` UI from green tick to red warning with the conflict reason.
 
 ### Username change (quota + hold)
 

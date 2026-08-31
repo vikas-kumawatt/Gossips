@@ -164,6 +164,12 @@ const UsernameField = ({ botId = null, onRenamed = null }) => {
       toast.success("Username updated");
     } catch (error) {
       setConfirming(false);
+      if (error?.response?.status === 409) {
+        setCheck({
+          available: false,
+          message: error?.response?.data?.error || "This username is no longer available",
+        });
+      }
       toast.error(error?.response?.data?.error || "Couldn't change your username");
     } finally {
       setSaving(false);
