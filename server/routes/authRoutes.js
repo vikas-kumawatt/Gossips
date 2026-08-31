@@ -37,7 +37,7 @@ const router = Router();
  * requiring it to be one of ours is enough. A missing Origin means a
  * same-origin or non-browser caller, which CORS wasn't protecting anyway.
  */
-const sameOriginOnly = (req, res, next) => {
+export const sameOriginOnly = (req, res, next) => {
   const origin = req.get("origin");
   if (!origin) return next();
 
@@ -96,22 +96,14 @@ const otpResendLimit = rateLimit({
   legacyHeaders: false,
 });
 
-router.post("/signup", signupLimit, requireRegistrationsOpen, signupUser);
-/*
- * Not behind `requireRegistrationsOpen`. Closing signups should stop new ones
- * starting, not strand the people already holding a code — and the account this
- * finishes was created while registrations were open.
- */
-// `sameOriginOnly` because verify-otp sets the session cookies. Signup and login
-// predate that guard; new cookie-setting routes get it.
+// All state-changing auth endpoints use `sameOriginOnly` to prevent cross-site CSRF/Origin attacks
+router.post("/signup", sameOriginOnly, signupLimit, requireRegistrationsOpen, signupUser);
 router.post("/verify-otp", sameOriginOnly, otpVerifyLimit, verifyOtp);
 router.post("/resend-otp", sameOriginOnly, otpResendLimit, resendOtp);
-router.post("/login", loginLimit, loginUser);
-router.post("/googlelogin", loginLimit, googleLogin);
-router.post("/forgot-password", forgotPasswordLimit, forgotPassword);
-// Same limiter as forgot-password: this endpoint is a token-guessing oracle
-// otherwise, and it was the only auth route without one.
-router.post("/reset-password", forgotPasswordLimit, resetPassword);
+router.post("/login", sameOriginOnly, loginLimit, loginUser);
+router.post("/googlelogin", sameOriginOnly, loginLimit, googleLogin);
+router.post("/forgot-password", sameOriginOnly, forgotPasswordLimit, forgotPassword);
+router.post("/reset-password", sameOriginOnly, forgotPasswordLimit, resetPassword);
 router.post("/refresh", sameOriginOnly, refreshAccessToken);
 router.post("/logout", sameOriginOnly, logoutUser);
 router.post("/logout-others", protect, sameOriginOnly, logoutOtherDevices);
@@ -119,7 +111,7 @@ router.post("/logout-all", protect, sameOriginOnly, logoutAllDevices);
 
 // Session management (listing active devices and revoking specific sessions)
 router.get("/sessions", protect, listSessions);
-router.delete("/sessions/:sessionId", protect, revokeSession);
+router.delete("/sessions/:sessionId", protect, sameOriginOnly, revokeSession);
 
 // Multi-account. Both read the per-account refresh cookies, so they must live
 // under /auth — that's the path those cookies are scoped to.

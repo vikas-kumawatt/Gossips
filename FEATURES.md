@@ -244,9 +244,9 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **What it does:** Blocks cross-site forgery against auth endpoints, needed because session cookies are `SameSite=none` in production (SPA and API are different origins).
 
-**How it works:** `sameOriginOnly` checks the `Origin` header against the allow-list on `/verify-otp`, `/resend-otp`, `/refresh`, `/logout`, `/accounts`, `/switch`.
+**How it works:** `sameOriginOnly` verifies the `Origin` header against the CORS allow-list across all state-changing auth endpoints (`/signup`, `/login`, `/googlelogin`, `/verify-otp`, `/resend-otp`, `/forgot-password`, `/reset-password`, `/refresh`, `/logout`, `/logout-others`, `/logout-all`, `/accounts`, `/switch`, `DELETE /sessions/:id`).
 
-**Improvements:** `/login` and `/signup` are excluded "because they predate the guard" — and they also set cookies via `issueAuthTokens`. A reviewer will flag that the oldest routes missed the fix.
+**Improved:** Applied `sameOriginOnly` across all state-changing auth routes — including `/signup`, `/login`, `/googlelogin`, `/forgot-password`, and `/reset-password` — preventing cross-origin CSRF attacks against cookie-setting and ticket-generating endpoints.
 
 ### Account status gating
 

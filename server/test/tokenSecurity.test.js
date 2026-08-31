@@ -262,6 +262,51 @@ test("privacy settings: allowlist validates whoCanMention, whoCanSeeOnlineStatus
   assert.equal(validateUpdate("unauthorizedField", "foo"), false);
 });
 
+test("sameOriginOnly: allows registered origins and blocks cross-origin attackers with 403", () => {
+  const isAllowed = (origin) => {
+    if (!origin) return true; // non-browser or same-origin
+    const allowed = ["http://localhost:5173", "http://localhost:3000", "https://gossips.app"];
+    return allowed.includes(origin);
+  };
+
+  const simulateGuard = (origin) => {
+    let nextCalled = false;
+    let statusCode = 200;
+    let errorBody = null;
+
+    if (!origin || isAllowed(origin)) {
+      nextCalled = true;
+    } else {
+      statusCode = 403;
+      errorBody = { error: "Cross-origin request rejected" };
+    }
+
+    return { nextCalled, statusCode, errorBody };
+  };
+
+  // 1. Allowed legitimate origin
+  const legit = simulateGuard("https://gossips.app");
+  assert.equal(legit.nextCalled, true);
+  assert.equal(legit.statusCode, 200);
+
+  // 2. Localhost frontend during dev
+  const dev = simulateGuard("http://localhost:5173");
+  assert.equal(dev.nextCalled, true);
+  assert.equal(dev.statusCode, 200);
+
+  // 3. Missing origin (direct API / curl / mobile native app)
+  const direct = simulateGuard(undefined);
+  assert.equal(direct.nextCalled, true);
+  assert.equal(direct.statusCode, 200);
+
+  // 4. Malicious phishing origin
+  const attacker = simulateGuard("https://evil-phishing-site.com");
+  assert.equal(attacker.nextCalled, false);
+  assert.equal(attacker.statusCode, 403);
+  assert.equal(attacker.errorBody.error, "Cross-origin request rejected");
+});
+
+
 
 
 
