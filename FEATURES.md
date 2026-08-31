@@ -342,7 +342,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `FollowsYouBadge.jsx` renders when `user.relationship.canFollowBack` (server-computed reverse `Follow` lookup) **and** `canUsePremiumFeature("followsYouBadge")` — a premium gate in `lib/premium.js` that currently returns true unconditionally.
 
-**Improvements:** Note at the call site that the premium gate is a placeholder, so flipping it later doesn't silently hide the badge for everyone.
+**Improved:** Added explicit documentation at the call site (`FollowersModal.jsx`) and in `FollowsYouBadge.jsx` explaining the subscription gating placeholder semantics via `canUsePremiumFeature("followsYouBadge")`.
 
 ### Remove a follower
 

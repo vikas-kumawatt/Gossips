@@ -56,6 +56,8 @@ const UserRow = ({ user, isSelf, onNavigate, onFollowStatusChange }) => (
             <Icons.verified />
           </span>
         )}
+        {/* "Follows you" badge is gated through canUsePremiumFeature inside <FollowsYouBadge />.
+            Currently ungated for all users; turning on followsYouBadge in lib/premium.js will restrict it to subscribers. */}
         {user.relationship?.canFollowBack && !isSelf && <FollowsYouBadge />}
       </div>
       {user.name && <p className="truncate text-sm text-neutral-500">{user.name}</p>}
