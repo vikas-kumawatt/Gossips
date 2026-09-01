@@ -146,9 +146,9 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **What it does:** Lets a Google-signup user add a password later without that becoming an account-takeover vector.
 
-**How it works:** `loginUser` detects `googleId && !password` and returns `needPasswordSetup: true`. The client resubmits through the signup handler, which — instead of writing the password directly — routes it through the **same OTP flow** as a new signup with `user: existingUser._id` set. `verifyOtp` then writes the password only if `user.password` is still unset (a guarded `updateOne`).
+**How it works:** `loginUser` detects `googleId && !password` and returns `needPasswordSetup: true`. The client resubmits through the signup handler, which — instead of writing the password directly — routes it through the **same OTP flow** as a new signup with `user: existingUser._id` set. `verifyOtp` then writes the password only if `user.password` is still unset (a guarded `updateOne`), and refuses with 409 if the account gained one during the ten minutes the code was in flight, or 410 if it was deleted or deactivated. The lookup is scoped by `HUMAN_ACCOUNT` so a bot row sharing its owner's address can never be the account attached to.
 
-**Improved:** Verified with a dedicated unit test suite (`googlePasswordSetup.test.js`) covering Google-only account detection, OTP-routed password creation with user reference, bot exclusion, and guarded update collision defense.
+**How it's verified.** `test/googlePasswordSetup.test.js` imports the real `loginUser`, `signupUser` and `verifyOtp` and drives them end to end — signup, read the code out of the mailed message, verify. It asserts the negative that matters: no write ever puts a password on a `User` row before the code is entered. See **Testing the auth handlers** below for the harness and the mutation results.
 
 ### Forgot / reset password
 
@@ -172,7 +172,9 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `issueAuthTokens()` mints a 15-minute `typ:"access"` token and a 7-day `typ:"refresh"` token; only the refresh token's SHA-256 hash is stored, upserted onto `UserSession` keyed `{user, deviceId}`. `protect`/`optionalProtect` verify with `JWT_VERIFY_OPTIONS` (algorithm pinned to HS256) and reject anything failing `isAccessToken` — refresh and verify tokens are explicitly not allow-listed.
 
-**Improved:** Enforces cryptographic domain separation by signing access, refresh, and verification tokens with distinct derived secrets (`getAccessTokenSecret`, `getRefreshTokenSecret`, `getVerificationTicketSecret`), preventing cross-token verification even if `typ` checks are omitted. Implements access token revocation (`RevokedToken` model + in-memory cache) so logged-out or revoked tokens are immediately rejected across HTTP and WebSocket channels.
+**Cryptographic domain separation.** Access, refresh and verification tokens are signed with distinct derived secrets (`getAccessTokenSecret`, `getRefreshTokenSecret`, `getVerificationTicketSecret`), so one cannot verify against another's site even if a `typ` check is omitted. Access-token revocation (`RevokedToken` model plus an in-memory cache) rejects logged-out tokens immediately across both HTTP and WebSocket.
+
+**Every token carries a `jti` nonce.** Without one the payload is `{ id, typ, iat, exp }` — entirely determined by the account and the current *second* — so two tokens minted for one account inside the same second were byte-identical. That broke two things. `UserSession.refreshTokenHash` is uniquely indexed, so signing in on a second device within a second of the first produced a duplicate key and a 500; and rotation inside that second was a no-op, leaving `refreshTokenHash === previousRefreshTokenHash` so a replayed token still matched the *current* hash and reuse detection could not fire — precisely in the window where a thief is racing the legitimate client. Found by converting `tokenSecurity.test.js` to run against the real handler: the first assertion that a rotated token differs from its predecessor failed immediately.
 
 ### Silent token refresh
 
@@ -276,7 +278,45 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** Backed by dedicated endpoints (`GET /user/account-details`, `GET/PATCH /user/security-settings`, `POST /user/2fa/setup`, `POST /user/2fa/enable`, `POST /user/2fa/disable`, `POST /user/deactivate`, `POST /user/delete-account`) and integrated with full-featured UI modals in `SettingsPage.jsx`.
 
-**Improved:** Fully wired end-to-end 2FA with Base32 TOTP generation & backup codes verification in `loginUser`, security alerts preferences, account status inspection (`AccountDetailsModal.jsx`), active devices modal (`ActiveSessionsModal.jsx`), and self-service account deactivation & permanent deletion (`DeactivateDeleteModal.jsx`). Removed all dead/unimplemented rows.
+2FA is wired end to end — Base32 TOTP generation and backup-code verification in `loginUser` — alongside security-alert preferences, account status inspection (`AccountDetailsModal.jsx`), the active devices modal (`ActiveSessionsModal.jsx`), and self-service deactivation and permanent deletion (`DeactivateDeleteModal.jsx`). Enabling or disabling 2FA calls `untrustAllDevices()`, so trust granted under a previous secret never carries into a new one. Dead and unimplemented rows have been removed.
+
+### Testing the auth handlers
+
+**What it does:** Runs the shipped auth handlers — not a description of them — against in-memory Mongo, bcrypt, SMTP and Firebase.
+
+**How it works:** `test/authHarness.mjs` registers `mock.module` fakes and then dynamically imports `authController`, so the suites call the real `signupUser`, `verifyOtp`, `resendOtp` and `loginUser`. The fake models record every write, which is what lets a test assert something did *not* happen — usually the interesting assertion on these paths. Suites drive whole flows (sign up → read the code out of the mailed subject → verify) rather than poking at branches.
+
+Three things the fakes must get right, each of which otherwise makes a suite pass or fail for the wrong reason: the filter matcher needs `$ne`, because `HUMAN_ACCOUNT` is `{ isBot: { $ne: true } }` and an equality-only matcher would miss every row predating the field; reads must return copies, or `reissueOtp`'s rollback restores already-overwritten values over themselves and a correct controller looks broken; and `create` must apply schema defaults, since `claimAttempt` filters on `attempts: { $lt: 5 }` and an undefined field does not satisfy it. There is also one rule for suite authors, documented at the top of the harness: never statically import a module that touches a model, because the hoisted import binds the real model before the mocks register.
+
+**Why it was rewritten.** Every auth suite used to be `simulate*` helpers defined inside the test file — a local re-implementation of a branch, asserted against itself, with `authController` never imported. They could not fail. On paths whose failure mode is a silent takeover or a bypassed lockout, that is worse than no test: it converts "untested" into "believed tested".
+
+**Mutation results.** Each of these was applied to the source and reverted, confirming the suites bite:
+
+| Mutation | Cases failed |
+|---|---|
+| `signupUser` writes the password directly | 4 |
+| Drop the `{ password: { $exists: false } }` guard | 1 |
+| Remove `HUMAN_ACCOUNT` from the signup lookup | 1 |
+| Delete the 409 already-has-a-password check | 1 |
+| Remove the per-account lockout | 2 |
+| Make the two-factor gate always pass | 8 |
+| Restore the always-true `deviceIsTrusted` | 9 |
+| Disable the post-insert row-cap enforcement | 1 |
+| Remove the per-address send cap | 1 |
+| Drop the resend rollback | 2 |
+| Stop charging an attempt for a wrong 2FA code | 2 |
+| Remove refresh-token reuse detection | 2 |
+| Stop recording the consumed refresh hash | 3 |
+| Remove the `jti` token nonce | 4 |
+| `revokeSession` stops scoping to the caller | 1 |
+| `listSessions` reports trust without checking expiry | 1 |
+| `logout-others` also clears the current device | 1 |
+
+The row-cap mutation is worth noting: it initially failed *nothing*, because every test reached the cap sequentially and was stopped by the cheap pre-insert count. The post-insert enforcement — the part that actually holds under concurrency — was untested until a `Promise.all` case was added. Without the trim that case now produces 12 live rows against a cap of 5.
+
+**What the conversion found.** Running the real `refreshAccessToken` immediately failed the first assertion that a rotated token differs from its predecessor, which is what surfaced the missing `jti` nonce described under *Access/refresh token issuance & rotation*. A simulation of rotation could not have found it: the bug lived in `createRefreshToken`, which a simulation replaces.
+
+**What is deliberately still simulated.** `tokenSecurity.test.js` keeps shape checks for `usernameHistory` bounding, the privacy-settings allowlist and shared profile constants. Those rules live in other controllers and are low-stakes, so they are cheap illustrations rather than guards — worth converting when their own sections are reviewed, not before.
 
 ---
 

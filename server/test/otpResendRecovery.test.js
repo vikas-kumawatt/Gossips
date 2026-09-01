@@ -1,224 +1,214 @@
 import assert from "node:assert/strict";
-import test from "node:test";
-import { generateOtp, hashOtp, otpMatches } from "../utils/otp.js";
-
-const OTP_TTL_MS = 10 * 60 * 1000;
-const OTP_RESEND_COOLDOWN_MS = 60 * 1000;
-const OTP_MAX_SENDS = 5;
-const OTP_MAX_ATTEMPTS = 5;
-const SECRET = "test-secret";
+import test, { before, beforeEach } from "node:test";
+import {
+  loadAuth,
+  db,
+  resetDb,
+  makeRes,
+  makeReq,
+  mailedCode,
+  mailTransport,
+} from "./authHarness.mjs";
 
 /**
- * Mirrors `reissueOtp` and the dead-end branches around it, in the simulation
- * style the other controller suites in this directory use. The OTP hashing is
- * the real imported implementation; only Mongo and the mail transport stand in.
+ * Resend, its budgets and its failure recovery, against the real handlers.
  *
- * The behaviour under test is what happens to the row when the *mail* fails
- * after the row has already been written — the resend path committed the new
- * code before sending and had no rollback, so a transient mail outage
- * invalidated a code the user already held.
+ * The previous version simulated `reissueOtp` locally, so the rollback it was
+ * written to prove could have been deleted from the controller without any
+ * failure. The rollback is the whole point: the new code is written *before*
+ * the mail is sent, so a delivery failure without one leaves the row holding a
+ * code nobody received and invalidates the one already in the user's inbox.
  */
-const simulateReissueOtp = ({
-  row,
-  now = Date.now(),
-  deliver = () => true,
-  // Stands in for a concurrent resend that landed while this one's mail hung:
-  // it replaces the row's codeHash, so the rollback's filter must miss.
-  concurrentWriteDuringSend = null,
-}) => {
-  const sinceLast = now - new Date(row.lastSentAt).getTime();
-  if (sinceLast < OTP_RESEND_COOLDOWN_MS) {
-    return {
-      ok: false,
-      reason: "cooldown",
-      retryAfter: Math.ceil((OTP_RESEND_COOLDOWN_MS - sinceLast) / 1000),
-      row,
-    };
-  }
-  if (row.resendCount >= OTP_MAX_SENDS) {
-    return { ok: false, reason: "exhausted", row };
-  }
-  if (row.attempts >= OTP_MAX_ATTEMPTS) {
-    return { ok: false, reason: "locked", row };
-  }
 
-  const code = generateOtp();
+let auth;
+before(async () => {
+  auth = await loadAuth();
+});
+beforeEach(() => {
+  resetDb();
+  mailTransport.fail = false;
+  mailTransport.failNext = false;
+});
 
-  // The write lands before the send, as in the controller.
-  const written = {
-    ...row,
-    codeHash: hashOtp(SECRET, row._id, code),
-    lastSentAt: new Date(now),
-    expiresAt: new Date(now + OTP_TTL_MS),
-    resendCount: row.resendCount + 1,
-  };
+const OTP_MAX_ATTEMPTS = 5;
+const OTP_MAX_SENDS = 5;
+const COOLDOWN_MS = 60 * 1000;
 
-  // Whatever is in the row by the time the send settles.
-  const inDb = concurrentWriteDuringSend
-    ? { ...written, ...concurrentWriteDuringSend }
-    : written;
-
-  if (!deliver(code)) {
-    /*
-     * Rollback, filtered on the hash we wrote — so it no-ops if someone else's
-     * resend has since landed, leaving their deliverable code in place.
-     */
-    const rolledBack =
-      inDb.codeHash === written.codeHash
-        ? {
-            ...inDb,
-            codeHash: row.codeHash,
-            lastSentAt: row.lastSentAt,
-            expiresAt: row.expiresAt,
-            resendCount: row.resendCount,
-          }
-        : inDb;
-    return {
-      ok: false,
-      reason: "delivery_failed",
-      retryAfter: 5,
-      retryable: true,
-      row: rolledBack,
-      rolledBack: rolledBack !== inDb,
-    };
-  }
-
-  return { ok: true, row: written, code };
+/** Start a signup and return its ticket plus the code that was mailed. */
+const startSignup = async (email = "alex@example.com") => {
+  const res = makeRes();
+  await auth.signupUser(makeReq({ name: "Alex Smith", email, password: "Password123" }), res);
+  assert.equal(res.body.requiresVerification, true, "signup should have started");
+  return { token: res.body.verificationToken, code: mailedCode(), row: db.pending.at(-1) };
 };
 
-const makeRow = (overrides = {}) => {
-  const _id = "65f000000000000000000001";
-  const originalCode = generateOtp();
-  return {
-    originalCode,
-    row: {
-      _id,
-      email: "alex@example.com",
-      codeHash: hashOtp(SECRET, _id, originalCode),
-      attempts: 0,
-      resendCount: 1,
-      lastSentAt: new Date(Date.now() - 2 * OTP_RESEND_COOLDOWN_MS),
-      expiresAt: new Date(Date.now() + OTP_TTL_MS),
-      ...overrides,
-    },
-  };
+/** Move a row past its resend cooldown. */
+const clearCooldown = (row) => {
+  row.lastSentAt = new Date(Date.now() - COOLDOWN_MS - 1000);
 };
 
-test("resend: a delivered code replaces the old one and consumes a send", () => {
-  const { row, originalCode } = makeRow();
-  const result = simulateReissueOtp({ row });
+const resend = async (token) => {
+  const res = makeRes();
+  await auth.resendOtp(makeReq({ token }), res);
+  return res;
+};
 
-  assert.equal(result.ok, true);
-  assert.equal(result.row.resendCount, 2);
+const verify = async (token, code) => {
+  const res = makeRes();
+  await auth.verifyOtp(makeReq({ token, code }), res);
+  return res;
+};
+
+// ── Ordinary resend ──────────────────────────────────────────────────────────
+
+test("resend: mails a new code, supersedes the old one, and spends a send", async () => {
+  const { token, code, row } = await startSignup();
+  clearCooldown(row);
+
+  const res = await resend(token);
+  assert.equal(res.statusCode, 200);
+  assert.equal(row.resendCount, 2);
+
+  const fresh = mailedCode();
+  assert.notEqual(fresh, code);
+  assert.equal((await verify(token, code)).statusCode, 400, "the superseded code stops working");
+  assert.equal((await verify(res.body.verificationToken, fresh)).statusCode, 201);
+});
+
+test("resend: refused inside the cooldown, and says how long is left", async () => {
+  const { token } = await startSignup();
+
+  const res = await resend(token);
+  assert.equal(res.statusCode, 429);
+  assert.ok(res.body.retryAfter > 0 && res.body.retryAfter <= 60);
+});
+
+test("resend: refused once the send cap is reached", async () => {
+  const { token, row } = await startSignup();
+  row.resendCount = OTP_MAX_SENDS;
+  clearCooldown(row);
+
+  const res = await resend(token);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.exhausted, true);
+});
+
+// ── Delivery failure ─────────────────────────────────────────────────────────
+
+test("resend: a mail failure leaves the code already in the inbox still valid", async () => {
+  const { token, code, row } = await startSignup();
+  clearCooldown(row);
+  mailTransport.failNext = true;
+
+  const res = await resend(token);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.retryable, true);
+  assert.equal(res.headers["Retry-After"], "5");
+
   assert.equal(
-    otpMatches(result.row.codeHash, hashOtp(SECRET, row._id, result.code)),
-    true,
-  );
-  assert.equal(
-    otpMatches(result.row.codeHash, hashOtp(SECRET, row._id, originalCode)),
-    false,
-    "the superseded code must stop working",
-  );
-});
-
-test("resend: a mail failure leaves the previously mailed code still valid", () => {
-  const { row, originalCode } = makeRow();
-  const result = simulateReissueOtp({ row, deliver: () => false });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "delivery_failed");
-  assert.equal(
-    otpMatches(result.row.codeHash, hashOtp(SECRET, row._id, originalCode)),
-    true,
-    "the code the user already has in their inbox must survive a mail outage",
-  );
-});
-
-test("resend: a mail failure spends neither a send nor the cooldown nor the expiry", () => {
-  const { row } = makeRow();
-  const result = simulateReissueOtp({ row, deliver: () => false });
-
-  assert.equal(result.row.resendCount, row.resendCount);
-  assert.deepEqual(result.row.lastSentAt, row.lastSentAt);
-  assert.deepEqual(result.row.expiresAt, row.expiresAt);
-});
-
-test("resend: a mail failure is reported as retryable with a Retry-After", () => {
-  const { row } = makeRow();
-  const result = simulateReissueOtp({ row, deliver: () => false });
-
-  assert.equal(result.retryable, true);
-  assert.equal(typeof result.retryAfter, "number");
-  assert.ok(result.retryAfter > 0);
-});
-
-test("resend: refused once the guess budget is spent, rather than mailing an unusable code", () => {
-  const { row } = makeRow({ attempts: OTP_MAX_ATTEMPTS });
-  let mailed = 0;
-
-  const result = simulateReissueOtp({
-    row,
-    deliver: () => {
-      mailed += 1;
-      return true;
-    },
-  });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "locked");
-  assert.equal(mailed, 0, "no email should be sent for a code that cannot be entered");
-  assert.equal(result.row.resendCount, row.resendCount);
-});
-
-test("resend: refused once the send cap is reached", () => {
-  const { row } = makeRow({ resendCount: OTP_MAX_SENDS });
-  const result = simulateReissueOtp({ row });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "exhausted");
-});
-
-test("resend: still refused inside the cooldown, and reports how long is left", () => {
-  const { row } = makeRow({ lastSentAt: new Date(Date.now() - 10_000) });
-  const result = simulateReissueOtp({ row });
-
-  assert.equal(result.ok, false);
-  assert.equal(result.reason, "cooldown");
-  assert.ok(result.retryAfter > 0 && result.retryAfter <= 60);
-});
-
-test("resend: a rollback does not clobber a concurrent resend that did deliver", () => {
-  const { row } = makeRow();
-  const rivalCode = generateOtp();
-  const rivalHash = hashOtp(SECRET, row._id, rivalCode);
-
-  const result = simulateReissueOtp({
-    row,
-    deliver: () => false,
-    concurrentWriteDuringSend: { codeHash: rivalHash, resendCount: 3 },
-  });
-
-  assert.equal(result.rolledBack, false);
-  assert.equal(
-    otpMatches(result.row.codeHash, hashOtp(SECRET, row._id, rivalCode)),
-    true,
-    "the code that actually reached someone's inbox must win",
+    (await verify(token, code)).statusCode,
+    201,
+    "a transient SMTP outage must not invalidate a code the user is holding",
   );
 });
 
-test("verify: a spent guess budget is a dead end, and says so", () => {
-  // Both the claimAttempt miss and the last wrong guess answer with `locked`,
-  // which is the single flag the client renders its dead-end state from. The
-  // wording must not send anyone to Resend: `reissueOtp` does not refill
-  // `attempts`, so that loop cannot terminate.
-  const lockedResponses = [
-    { status: 429, error: "Too many incorrect codes. Please start over.", locked: true },
-    { status: 400, error: "Too many incorrect codes. Please start over.", locked: true },
-  ];
+test("resend: a mail failure spends neither a send, the cooldown, nor the expiry", async () => {
+  const { token, row } = await startSignup();
+  clearCooldown(row);
+  const before = {
+    resendCount: row.resendCount,
+    lastSentAt: row.lastSentAt,
+    expiresAt: row.expiresAt,
+  };
 
-  for (const response of lockedResponses) {
-    assert.equal(response.locked, true);
-    assert.doesNotMatch(response.error, /request a new one/i);
-    assert.match(response.error, /start over/i);
+  mailTransport.failNext = true;
+  await resend(token);
+
+  assert.equal(row.resendCount, before.resendCount);
+  assert.deepEqual(row.lastSentAt, before.lastSentAt);
+  assert.deepEqual(row.expiresAt, before.expiresAt);
+});
+
+// ── Dead ends ────────────────────────────────────────────────────────────────
+
+test("verify: the guess budget is spent after five wrong codes and says to start over", async () => {
+  const { token, code } = await startSignup();
+  const wrong = String((Number(code) + 1) % 1000000).padStart(6, "0");
+
+  for (let attempt = 1; attempt < OTP_MAX_ATTEMPTS; attempt++) {
+    const res = await verify(token, wrong);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.attemptsLeft, OTP_MAX_ATTEMPTS - attempt);
+  }
+
+  const spent = await verify(token, wrong);
+  assert.equal(spent.body.locked, true);
+  assert.match(spent.body.error, /start over/i);
+  assert.doesNotMatch(
+    spent.body.error,
+    /request a new one/i,
+    "a resend cannot refill the guess budget, so that instruction is a loop with no exit",
+  );
+});
+
+test("verify: even the correct code is refused once the budget is spent", async () => {
+  const { token, code, row } = await startSignup();
+  row.attempts = OTP_MAX_ATTEMPTS;
+
+  const res = await verify(token, code);
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.locked, true);
+});
+
+test("resend: refused once the guess budget is spent, rather than mailing a dead code", async () => {
+  const { token, row } = await startSignup();
+  row.attempts = OTP_MAX_ATTEMPTS;
+  clearCooldown(row);
+  const mailedBefore = db.mail.length;
+
+  const res = await resend(token);
+
+  assert.equal(res.statusCode, 429);
+  assert.equal(res.body.locked, true);
+  assert.equal(db.mail.length, mailedBefore, "no email for a code that could never be entered");
+});
+
+test("resend: does not reset the guess counter", async () => {
+  // Otherwise the budget is OTP_MAX_ATTEMPTS × OTP_MAX_SENDS, with the attacker
+  // choosing when to resend.
+  const { token, row } = await startSignup();
+  row.attempts = 3;
+  clearCooldown(row);
+
+  await resend(token);
+  assert.equal(row.attempts, 3);
+});
+
+// ── Ticket lifetime ──────────────────────────────────────────────────────────
+
+test("ticket: survives a resend whose response never reached the client", async () => {
+  /*
+   * A resend renews the row for another OTP window. A ticket scoped to one
+   * window expired while its row was still alive whenever the client missed the
+   * fresh ticket, discarding a live signup with a valid code in the inbox.
+   */
+  const { token: originalTicket, row } = await startSignup();
+
+  clearCooldown(row);
+  const renewed = await resend(originalTicket);
+  assert.equal(renewed.statusCode, 200);
+
+  // The client never saw `renewed.body.verificationToken`; it still holds the
+  // original. It must still name the row.
+  const res = await verify(originalTicket, mailedCode());
+  assert.equal(res.statusCode, 201);
+  assert.ok(res.body.token, "the signup completes on the stale ticket");
+});
+
+test("ticket: a garbage ticket is refused without touching anything", async () => {
+  for (const bad of ["", "not-a-jwt", null, 12345]) {
+    const res = await verify(bad, "123456");
+    assert.equal(res.statusCode, 401);
+    assert.equal(res.body.expired, true);
   }
 });

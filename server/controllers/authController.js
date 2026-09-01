@@ -194,13 +194,35 @@ const getRefreshTokenCookieOptions = () => ({
 
 // Different token types use distinct derived secrets (cryptographic domain separation)
 // so a signature from one type cannot verify against another.
+/*
+ * Every token carries a nonce, so no two are ever byte-identical.
+ *
+ * Without `jti` the payload is `{ id, typ, iat, exp }` — entirely determined by
+ * the user and the current *second*. Two tokens minted for one account inside
+ * the same second were therefore the same string, which broke two things:
+ *
+ *   1. `UserSession.refreshTokenHash` is uniquely indexed. Signing in on a
+ *      second device within a second of the first produced the same hash and
+ *      the upsert failed with a duplicate key — so "sign in on my phone and my
+ *      laptop at once" was a 500.
+ *
+ *   2. Rotation inside that second was a no-op: the "new" refresh token equalled
+ *      the old one, leaving `refreshTokenHash === previousRefreshTokenHash`. A
+ *      replayed token then still matched the *current* hash, so reuse detection
+ *      could not fire — precisely in the window where a thief is racing the
+ *      legitimate client.
+ *
+ * 16 random bytes, because the value only has to be unique, never guessed.
+ */
+const tokenNonce = () => crypto.randomBytes(16).toString("hex");
+
 const createAccessToken = (userId) =>
-  jwt.sign({ id: userId, typ: "access" }, getAccessTokenSecret(), {
+  jwt.sign({ id: userId, typ: "access", jti: tokenNonce() }, getAccessTokenSecret(), {
     expiresIn: ACCESS_TOKEN_EXPIRY,
   });
 
 const createRefreshToken = (userId) =>
-  jwt.sign({ id: userId, typ: "refresh" }, getRefreshTokenSecret(), {
+  jwt.sign({ id: userId, typ: "refresh", jti: tokenNonce() }, getRefreshTokenSecret(), {
     expiresIn: `${REFRESH_TOKEN_EXPIRY_DAYS}d`,
   });
 

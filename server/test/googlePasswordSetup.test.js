@@ -1,175 +1,436 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { mock, before, beforeEach } from "node:test";
 import mongoose from "mongoose";
-import bcrypt from "bcrypt";
-const PASSWORD_RE = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/;
-const PASSWORD_MSG =
-  "Password must be 6–20 characters and contain at least one digit, one uppercase, and one lowercase letter";
 
 /**
- * Dedicated test suite for adding a password to a Google-only account.
+ * Adding a password to a Google-only account — against the real handlers.
  *
- * Validates:
- * 1. loginUser detects googleId && !password and demands password setup (needPasswordSetup: true).
- * 2. signupUser routes Google-only users through the OTP verification flow with pending.user set.
- * 3. Bot accounts sharing the owner email are excluded by HUMAN_ACCOUNT filter.
- * 4. verifyOtp applies password only via guarded update { password: { $exists: false } }, prevents overwriting,
- *    and rejects deleted/deactivated accounts.
+ * ── Why this file imports `authController` ──────────────────────────────────
+ *
+ * It used to be four `simulate*` helpers defined in this file, each a local
+ * re-implementation of a branch, asserted against itself. `authController` was
+ * never imported and neither were the models, so *every case passed no matter
+ * what the controller did*. Change `signupUser` to write the password straight
+ * onto the Google account — the exact unauthenticated takeover this design
+ * exists to prevent — and the suite stayed green.
+ *
+ * That is worse than having no test here. The risk this path carries is a
+ * silent regression, and a suite that cannot fail is precisely what makes a
+ * regression silent: it turns "untested" into "believed tested".
+ *
+ * So the handlers under test are the shipped ones. Everything they touch that
+ * isn't logic — Mongo, bcrypt, SMTP, Firebase — is mocked, which also keeps the
+ * suite hermetic and off the native bcrypt binding.
+ *
+ * ── What is actually asserted ───────────────────────────────────────────────
+ *
+ *   1. `loginUser` refuses a Google-only account with `needPasswordSetup`.
+ *   2. `signupUser` routes it through OTP and writes *no password anywhere*.
+ *   3. A bot row sharing the owner's address is never the account attached to.
+ *   4. `verifyOtp` applies the password under a guard, and refuses when the
+ *      account gained one in the meantime or is no longer available.
  */
 
 const oid = () => new mongoose.Types.ObjectId();
 
-test("loginUser: detects Google-only account and returns needPasswordSetup: true", () => {
-  const googleUser = {
-    _id: oid(),
-    email: "alex@example.com",
-    googleId: "google-uid-12345",
-    password: null,
-  };
+// ── Fakes ────────────────────────────────────────────────────────────────────
 
-  const checkLoginRequirement = (user) => {
-    if (user.googleId && !user.password) {
-      return {
-        status: 400,
-        body: { error: "Please set up a password first", needPasswordSetup: true },
-      };
-    }
-    return { status: 200 };
-  };
+/** Every write any model receives, so a test can assert one did *not* happen. */
+let writes = [];
+/** Rows the fake `User` collection will match on. */
+let userRows = [];
+/** Rows created in `PendingSignup`. */
+let pendingRows = [];
+let sentMail = [];
 
-  const res = checkLoginRequirement(googleUser);
-  assert.equal(res.status, 400);
-  assert.equal(res.body.needPasswordSetup, true);
-  assert.equal(res.body.error, "Please set up a password first");
-});
-
-test("signupUser: routes Google-only account into pending signup with user reference", () => {
-  const existingGoogleUser = {
-    _id: oid(),
-    name: "Alex G",
-    email: "alex@example.com",
-    googleId: "google-uid-12345",
-    password: null,
-    isBot: false,
-  };
-
-  const simulateSignup = ({ existingUser, password }) => {
-    if (existingUser) {
-      if (existingUser.googleId && !existingUser.password) {
-        if (!password || !/^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/.test(password)) {
-          return { status: 400, body: { message: "Password must be 6–20 characters and contain at least one digit, one uppercase, and one lowercase letter" } };
-        }
-        return {
-          status: 200,
-          pendingSignup: {
-            user: existingUser._id,
-            name: existingUser.name,
-            email: existingUser.email,
-            passwordHash: "bcrypt_hash_placeholder",
-          },
-        };
+/*
+ * Enough of Mongo's filter language for the queries these handlers issue.
+ *
+ * `$ne` matters especially: `HUMAN_ACCOUNT` is `{ isBot: { $ne: true } }` and
+ * not `{ isBot: false }`, because rows predating the field have no `isBot` at
+ * all. A fake that only did equality would quietly fail every lookup and make
+ * these tests pass for the wrong reason.
+ */
+const matches = (row, filter) =>
+  Object.entries(filter).every(([key, value]) => {
+    if (key === "_id") return String(row._id) === String(value);
+    if (value && typeof value === "object" && !(value instanceof Date)) {
+      if ("$exists" in value) {
+        return (row[key] !== undefined && row[key] !== null) === value.$exists;
       }
-      return { status: 400, body: { message: "User already exists" } };
+      if ("$ne" in value) return row[key] !== value.$ne;
+      if ("$gt" in value) return row[key] > value.$gt;
+      if ("$lt" in value) return row[key] < value.$lt;
     }
-    return { status: 201, pendingSignup: { user: null } };
+    return row[key] === value;
+  });
+
+const makeQuery = (result) => {
+  const query = {
+    select: () => query,
+    sort: () => query,
+    limit: () => query,
+    lean: () => Promise.resolve(result),
+    then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
   };
+  return query;
+};
 
-  // Valid password
-  const res = simulateSignup({ existingUser: existingGoogleUser, password: "Password123" });
-  assert.equal(res.status, 200);
-  assert.equal(String(res.pendingSignup.user), String(existingGoogleUser._id));
-  assert.equal(res.pendingSignup.email, existingGoogleUser.email);
+const fakeUserModel = {
+  findOne: (filter) => makeQuery(userRows.find((row) => matches(row, filter)) ?? null),
+  findById: (id) => makeQuery(userRows.find((row) => String(row._id) === String(id)) ?? null),
+  updateOne: async (filter, update) => {
+    writes.push({ model: "User", filter, update });
+    const row = userRows.find((candidate) => matches(candidate, filter));
+    if (!row) return { matchedCount: 0, modifiedCount: 0 };
+    Object.assign(row, update.$set || {});
+    return { matchedCount: 1, modifiedCount: 1 };
+  },
+  create: async (doc) => {
+    writes.push({ model: "User", create: doc });
+    const row = { _id: oid(), ...doc };
+    userRows.push(row);
+    return row;
+  },
+  exists: async (filter) => userRows.some((row) => matches(row, filter)),
+};
 
-  // Invalid password rejected
-  const badRes = simulateSignup({ existingUser: existingGoogleUser, password: "weak" });
-  assert.equal(badRes.status, 400);
-  assert.match(badRes.body.message, /Password must be/);
+const fakePendingModel = {
+  find: (filter) => makeQuery(pendingRows.filter((row) => matches(row, filter))),
+  findOne: (filter) => makeQuery(pendingRows.find((row) => matches(row, filter)) ?? null),
+  create: async (doc) => {
+    writes.push({ model: "PendingSignup", create: doc });
+    const row = { ...doc, resendCount: doc.resendCount ?? 1, attempts: 0, lastSentAt: new Date() };
+    pendingRows.push(row);
+    return row;
+  },
+  deleteOne: async () => ({ deletedCount: 1 }),
+  deleteMany: async () => ({ deletedCount: 0 }),
+  findOneAndDelete: async (filter) => {
+    const index = pendingRows.findIndex((row) => matches(row, filter));
+    if (index === -1) return null;
+    return pendingRows.splice(index, 1)[0];
+  },
+  findOneAndUpdate: async (filter) => pendingRows.find((row) => matches(row, filter)) ?? null,
+  exists: async (filter) => pendingRows.some((row) => matches(row, filter)),
+};
 
-  // Existing user WITH password rejected
-  const standardUser = { ...existingGoogleUser, password: "hashed_password" };
-  const rejectedRes = simulateSignup({ existingUser: standardUser, password: "Password123" });
-  assert.equal(rejectedRes.status, 400);
-  assert.equal(rejectedRes.body.message, "User already exists");
+const noopModel = {
+  findOne: () => makeQuery(null),
+  find: () => makeQuery([]),
+  create: async (doc) => doc,
+  updateOne: async () => ({ matchedCount: 0 }),
+  updateMany: async () => ({ matchedCount: 0 }),
+  deleteMany: async () => ({ deletedCount: 0 }),
+  countDocuments: async () => 0,
+  findOneAndUpdate: async () => null,
+};
+
+/** Minimal express `res`, recording what the handler answered. */
+const makeRes = () => {
+  const res = {
+    statusCode: null,
+    body: null,
+    headers: {},
+    cookies: {},
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload) {
+      this.body = payload;
+      return this;
+    },
+    set(key, value) {
+      this.headers[key] = value;
+      return this;
+    },
+    cookie(name, value) {
+      this.cookies[name] = value;
+      return this;
+    },
+    clearCookie() {
+      return this;
+    },
+  };
+  return res;
+};
+
+let authController;
+
+before(async () => {
+  process.env.JWT_SECRET = "test-secret-for-google-password-setup";
+  /*
+   * Set before the import, because `authController` decides at module scope
+   * whether mail is configured and swaps in a transporter that always throws if
+   * not — which would make every signup here a 502 rather than exercising the
+   * path under test.
+   */
+  process.env.BREVO_EMAIL = "no-reply@gossips.test";
+  process.env.BREVO_SMTP_KEY = "test-key";
+  process.env.SMTP_USER = "test-user";
+
+  mock.module("bcrypt", {
+    defaultExport: {
+      hash: async (plain) => `hashed:${plain}`,
+      compare: async (plain, hash) => hash === `hashed:${plain}`,
+    },
+  });
+  mock.module("nodemailer", {
+    defaultExport: {
+      createTransport: () => ({
+        sendMail: async (message) => {
+          sentMail.push(message);
+          return { messageId: "test" };
+        },
+        verify: () => {},
+      }),
+    },
+  });
+  mock.module("firebase-admin", {
+    defaultExport: {
+      apps: [],
+      app: () => {
+        throw new Error("no app");
+      },
+      credential: { cert: () => ({}) },
+      initializeApp: () => {},
+      auth: () => ({ verifyIdToken: async () => ({}) }),
+    },
+  });
+
+  mock.module("../models/User.js", { defaultExport: fakeUserModel });
+  mock.module("../models/PendingSignup.js", { defaultExport: fakePendingModel });
+  mock.module("../models/UserSession.js", { defaultExport: noopModel });
+  mock.module("../models/UserSettings.js", { defaultExport: noopModel });
+  mock.module("../controllers/notificationController.js", {
+    namedExports: { sendWelcomeNotification: async () => {} },
+  });
+  mock.module("../utils/geo.js", { namedExports: { countryUpdate: async () => {} } });
+  mock.module("../utils/username.js", {
+    namedExports: { generateAvailableUsername: async () => "alex_g" },
+  });
+  mock.module("../utils/tokenRevocation.js", {
+    namedExports: { revokeAccessToken: async () => {} },
+  });
+
+  authController = await import("../controllers/authController.js");
 });
 
-test("HUMAN_ACCOUNT gate: bot accounts sharing email cannot be hijacked via Google password setup", () => {
-  const botRow = {
+beforeEach(() => {
+  writes = [];
+  userRows = [];
+  pendingRows = [];
+  sentMail = [];
+});
+
+const googleOnlyUser = () => ({
+  _id: oid(),
+  name: "Alex G",
+  email: "alex@example.com",
+  username: "alexg",
+  googleId: "google-uid-12345",
+  password: undefined,
+  isBot: false,
+  accountStatus: "active",
+  comparePassword: async () => false,
+});
+
+// ── 1. loginUser ─────────────────────────────────────────────────────────────
+
+test("loginUser: a Google-only account is told to set a password, not signed in", async () => {
+  userRows.push(googleOnlyUser());
+  const res = makeRes();
+
+  await authController.loginUser(
+    { body: { email: "alex@example.com", password: "Password123" }, get: () => undefined, headers: {} },
+    res,
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.needPasswordSetup, true);
+  assert.equal(res.body.token, undefined, "no session may be issued");
+});
+
+// ── 2. signupUser ────────────────────────────────────────────────────────────
+
+test("signupUser: routes a Google-only account through OTP and writes no password", async () => {
+  const user = googleOnlyUser();
+  userRows.push(user);
+  const res = makeRes();
+
+  await authController.signupUser(
+    { body: { name: "Alex G", email: "alex@example.com", password: "Password123" }, get: () => undefined, headers: {} },
+    res,
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.requiresVerification, true);
+  assert.ok(res.body.verificationToken, "a ticket, not a session");
+  assert.equal(res.body.token, undefined, "no session may be issued before the code");
+
+  // The pending row names the account to attach to.
+  assert.equal(pendingRows.length, 1);
+  assert.equal(String(pendingRows[0].user), String(user._id));
+  assert.notEqual(pendingRows[0].passwordHash, "Password123", "stored hashed, never plaintext");
+
+  /*
+   * The assertion this whole file exists for. Signing up must not put a
+   * password on the account — that was an unauthenticated takeover of any
+   * Google-only user whose address you could guess, in one request.
+   */
+  const passwordWrites = writes.filter(
+    (write) => write.model === "User" && write.update?.$set && "password" in write.update.$set,
+  );
+  assert.equal(passwordWrites.length, 0, "signup must never write a password to a User row");
+  assert.equal(user.password, undefined);
+});
+
+test("signupUser: an account that already has a password is refused outright", async () => {
+  const user = { ...googleOnlyUser(), password: "hashed:Existing123" };
+  userRows.push(user);
+  const res = makeRes();
+
+  await authController.signupUser(
+    { body: { name: "Someone Else", email: "alex@example.com", password: "Password123" }, get: () => undefined, headers: {} },
+    res,
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.message, "User already exists");
+  assert.equal(pendingRows.length, 0, "no pending row for an account that cannot be claimed");
+  assert.equal(user.password, "hashed:Existing123", "the existing password is untouched");
+});
+
+test("signupUser: a weak password is rejected before any row is written", async () => {
+  userRows.push(googleOnlyUser());
+  const res = makeRes();
+
+  await authController.signupUser(
+    { body: { name: "Alex G", email: "alex@example.com", password: "weak" }, get: () => undefined, headers: {} },
+    res,
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.match(res.body.message, /password/i);
+  assert.equal(pendingRows.length, 0);
+  assert.equal(sentMail.length, 0);
+});
+
+// ── 3. Bot exclusion ─────────────────────────────────────────────────────────
+
+test("signupUser: a bot row sharing the owner's address is never attached to", async () => {
+  /*
+   * Bots carry their owner's email. Without the HUMAN_ACCOUNT filter this
+   * lookup returns the bot, and a path that attaches credentials to a
+   * passwordless row would be attaching them to somebody's bot — handing the
+   * persona's identity to whoever controls the mailbox.
+   */
+  const bot = {
     _id: oid(),
     email: "owner@example.com",
     name: "Persona Bot",
     isBot: true,
-    googleId: null,
-    password: null,
+    googleId: undefined,
+    password: undefined,
+    accountStatus: "active",
   };
+  userRows.push(bot);
+  const res = makeRes();
 
-  const HUMAN_ACCOUNT = { isBot: false };
+  await authController.signupUser(
+    { body: { name: "Owner", email: "owner@example.com", password: "Password123" }, get: () => undefined, headers: {} },
+    res,
+  );
 
-  // Query filter simulation: findOne({ email: "owner@example.com", ...HUMAN_ACCOUNT })
-  const findHumanUser = (user, filter) => {
-    if (user.email === filter.email && user.isBot === filter.isBot) {
-      return user;
-    }
-    return null;
-  };
-
-  const matched = findHumanUser(botRow, { email: "owner@example.com", ...HUMAN_ACCOUNT });
-  assert.equal(matched, null, "Bot account must NOT match human account query filter");
+  // Treated as a brand-new signup: a pending row with no account to attach to.
+  assert.equal(res.body.requiresVerification, true);
+  assert.equal(pendingRows.length, 1);
+  assert.equal(pendingRows[0].user, null, "must not name the bot row");
+  assert.notEqual(String(pendingRows[0].user ?? ""), String(bot._id));
 });
 
-test("verifyOtp: applies password with guarded query and rejects concurrent password overwrites", () => {
-  const pendingRow = {
-    _id: oid(),
-    user: oid(),
-    name: "Alex",
-    email: "alex@example.com",
-    passwordHash: "$2b$10$testhash",
-  };
+// ── 4. verifyOtp ─────────────────────────────────────────────────────────────
 
-  // 1. Target user exists without password -> success
-  let targetUser = {
-    _id: pendingRow.user,
-    accountStatus: "active",
-    password: null,
-  };
+/** Drive signup, then read the code out of the mailed message. */
+const startPasswordSetup = async (user) => {
+  userRows.push(user);
+  const res = makeRes();
+  await authController.signupUser(
+    { body: { name: user.name, email: user.email, password: "Password123" }, get: () => undefined, headers: {} },
+    res,
+  );
+  const code = sentMail.at(-1)?.subject?.match(/\d{6}/)?.[0];
+  assert.ok(code, "the mailed subject carries the code");
+  return { token: res.body.verificationToken, code };
+};
 
-  const simulateOtpVerification = (pending, user) => {
-    if (pending.user) {
-      if (!user || ["deleted", "deactivated"].includes(user.accountStatus)) {
-        return { status: 410, error: "That account is no longer available.", expired: true };
-      }
-      if (user.password) {
-        return { status: 409, error: "That account already has a password. Please log in.", alreadyVerified: true };
-      }
-      // Guarded update: { _id: user._id, password: { $exists: false } }
-      user.password = pending.passwordHash;
-      user.isEmailVerified = true;
-      return { status: 201, message: "Email verified", user };
-    }
-    return { status: 201, newUserCreated: true };
-  };
+test("verifyOtp: applies the password to the named account and verifies the address", async () => {
+  const user = googleOnlyUser();
+  const { token, code } = await startPasswordSetup(user);
+  const res = makeRes();
 
-  const successRes = simulateOtpVerification(pendingRow, targetUser);
-  assert.equal(successRes.status, 201);
-  assert.equal(targetUser.password, pendingRow.passwordHash);
-  assert.equal(targetUser.isEmailVerified, true);
+  await authController.verifyOtp({ body: { token, code }, get: () => undefined, headers: {} }, res);
 
-  // 2. Target user already has password -> 409 conflict
-  const alreadyHasPasswordUser = {
-    _id: pendingRow.user,
-    accountStatus: "active",
-    password: "$2b$10$existingpasswordhash",
-  };
-  const conflictRes = simulateOtpVerification(pendingRow, alreadyHasPasswordUser);
-  assert.equal(conflictRes.status, 409);
-  assert.equal(conflictRes.alreadyVerified, true);
+  const guarded = writes.find(
+    (write) => write.model === "User" && write.update?.$set && "password" in write.update.$set,
+  );
+  assert.ok(guarded, "the password is applied on verification, not before");
+  assert.deepEqual(
+    guarded.filter.password,
+    { $exists: false },
+    "applied under a guard, so a password gained in the meantime is not overwritten",
+  );
+  assert.equal(guarded.update.$set.isEmailVerified, true);
+});
 
-  // 3. Target user deleted/deactivated -> 410 gone
-  const deletedUser = {
-    _id: pendingRow.user,
-    accountStatus: "deleted",
-    password: null,
-  };
-  const deletedRes = simulateOtpVerification(pendingRow, deletedUser);
-  assert.equal(deletedRes.status, 410);
-  assert.equal(deletedRes.expired, true);
+test("verifyOtp: refuses when the account gained a password while the code was in flight", async () => {
+  const user = googleOnlyUser();
+  const { token, code } = await startPasswordSetup(user);
+
+  // Ten minutes is long enough for the account to have set one another way.
+  user.password = "hashed:SetByAnotherRoute1";
+
+  const res = makeRes();
+  await authController.verifyOtp({ body: { token, code }, get: () => undefined, headers: {} }, res);
+
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.body.alreadyVerified, true);
+  assert.equal(user.password, "hashed:SetByAnotherRoute1", "must not be overwritten");
+});
+
+test("verifyOtp: refuses when the account is no longer available", async () => {
+  for (const status of ["deleted", "deactivated"]) {
+    writes = [];
+    userRows = [];
+    pendingRows = [];
+    sentMail = [];
+
+    const user = googleOnlyUser();
+    const { token, code } = await startPasswordSetup(user);
+    user.accountStatus = status;
+
+    const res = makeRes();
+    await authController.verifyOtp({ body: { token, code }, get: () => undefined, headers: {} }, res);
+
+    assert.equal(res.statusCode, 410, `${status} account must be refused`);
+    assert.equal(res.body.expired, true);
+    assert.equal(user.password, undefined, `${status}: no password may be applied`);
+  }
+});
+
+test("verifyOtp: a wrong code applies nothing", async () => {
+  const user = googleOnlyUser();
+  const { token, code } = await startPasswordSetup(user);
+  const wrong = String((Number(code) + 1) % 1000000).padStart(6, "0");
+
+  const res = makeRes();
+  await authController.verifyOtp({ body: { token, code: wrong }, get: () => undefined, headers: {} }, res);
+
+  assert.equal(res.statusCode, 400);
+  assert.equal(user.password, undefined);
+  const passwordWrites = writes.filter(
+    (write) => write.model === "User" && write.update?.$set && "password" in write.update.$set,
+  );
+  assert.equal(passwordWrites.length, 0);
 });

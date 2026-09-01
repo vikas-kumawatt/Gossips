@@ -1,183 +1,236 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { before, beforeEach } from "node:test";
+import {
+  loadAuth,
+  db,
+  resetDb,
+  makeRes,
+  makeReq,
+  makeUser,
+  makeSession,
+
+} from "./authHarness.mjs";
 import {
   generateTotpSecret,
   generateTotpCode,
   generateBackupCodes,
-  verifyTotpCode,
-  verifyBackupCode,
 } from "../utils/twoFactor.js";
 
-const MAX_FAILED_LOGIN_ATTEMPTS = 5;
-
 /**
- * Mirrors the second-factor gate in authController (`passesTwoFactor` plus the
- * `rejectFailedAttempt` it calls), the way the other controller suites in this
- * directory mirror their handlers. The TOTP and backup-code checks are the real
- * imported ones — only the persistence and the response object are stood in for.
+ * The second factor and trusted devices, against the real `loginUser`.
  *
- * Covers:
- * 1. No code supplied on a 2FA account: 200 needTwoFactor, no token.
- * 2. A wrong code counts against the same lockout counter a wrong password does.
- * 3. A valid TOTP code or an unused backup code passes; a used one does not.
- * 4. Accounts without 2FA are untouched.
+ * Previously a `simulateTwoFactorGate` helper asserted against itself, so
+ * deleting the gate from the controller failed nothing. The TOTP and
+ * backup-code primitives were real even then; what was missing was any check
+ * that the handler *uses* them.
  */
-const simulateTwoFactorGate = ({ user, submittedCode }) => {
-  if (!user.twoFactorEnabled) return { passed: true, user };
 
-  if (!submittedCode) {
-    return {
-      passed: false,
-      status: 200,
-      body: { needTwoFactor: true },
-      user,
-    };
-  }
+let auth;
+let TRUSTED_DEVICE_DURATION_MS;
+before(async () => {
+  auth = await loadAuth();
+  /*
+   * Imported here, not at the top of the file. `trustedDevices.js` imports
+   * `UserSession`, and a static import would run before `loadAuth()` registers
+   * the mocks — binding the real model, so `trustDevice` would try to reach an
+   * actual Mongo and time out. Any module that touches a model has to be pulled
+   * in after the mocks, which is why the harness owns the import order.
+   */
+  ({ TRUSTED_DEVICE_DURATION_MS } = await import("../utils/trustedDevices.js"));
+});
+beforeEach(resetDb);
 
-  let valid = verifyTotpCode(submittedCode, user.twoFactorSecret);
-  let nextUser = user;
-
-  if (!valid) {
-    const backupResult = verifyBackupCode(submittedCode, user.twoFactorBackupCodes || []);
-    if (backupResult.valid) {
-      valid = true;
-      nextUser = {
-        ...user,
-        twoFactorBackupCodes: user.twoFactorBackupCodes.map((code, i) =>
-          i === backupResult.index ? { ...code, used: true } : code
-        ),
-      };
-    }
-  }
-
-  if (!valid) {
-    const attempts = (user.failedLoginAttempts || 0) + 1;
-    if (attempts >= MAX_FAILED_LOGIN_ATTEMPTS) {
-      return {
-        passed: false,
-        status: 429,
-        body: { locked: true, retryAfter: 900 },
-        user: { ...user, failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS, lockoutUntil: new Date() },
-      };
-    }
-    return {
-      passed: false,
-      status: 400,
-      body: {
-        error: "Invalid two-factor authentication code",
-        attemptsLeft: MAX_FAILED_LOGIN_ATTEMPTS - attempts,
-      },
-      user: { ...user, failedLoginAttempts: attempts },
-    };
-  }
-
-  return { passed: true, user: nextUser };
-};
-
-const makeTwoFactorUser = (overrides = {}) => {
+const twoFactorUser = (overrides = {}) => {
   const secret = generateTotpSecret();
   const { plainCodes, hashedCodes } = generateBackupCodes();
-  return {
-    user: {
-      twoFactorEnabled: true,
-      twoFactorSecret: secret,
-      twoFactorBackupCodes: hashedCodes,
-      failedLoginAttempts: 0,
-      lockoutUntil: null,
-      ...overrides,
-    },
-    secret,
-    plainCodes,
-  };
+  const user = makeUser({
+    twoFactorEnabled: true,
+    twoFactorSecret: secret,
+    twoFactorBackupCodes: hashedCodes,
+    ...overrides,
+  });
+  db.users.push(user);
+  return { user, secret, plainCodes };
 };
 
-test("2FA gate: account without 2FA passes straight through", () => {
-  const result = simulateTwoFactorGate({
-    user: { twoFactorEnabled: false },
-    submittedCode: undefined,
-  });
-  assert.equal(result.passed, true);
+const login = async (body, options) => {
+  const res = makeRes();
+  await auth.loginUser(makeReq({ email: "alex@example.com", password: "Password123", ...body }, options), res);
+  return res;
+};
+
+// ── The gate ─────────────────────────────────────────────────────────────────
+
+test("2FA: an account without it signs straight in", async () => {
+  db.users.push(makeUser());
+  const res = await login({});
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.token);
 });
 
-test("2FA gate: no code supplied answers needTwoFactor without issuing a session", () => {
-  const { user } = makeTwoFactorUser();
-  const result = simulateTwoFactorGate({ user, submittedCode: undefined });
+test("2FA: no code supplied asks for one and issues no session", async () => {
+  twoFactorUser();
+  const res = await login({});
 
-  assert.equal(result.passed, false);
-  assert.equal(result.status, 200);
-  assert.equal(result.body.needTwoFactor, true);
-  assert.equal(result.body.token, undefined);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.needTwoFactor, true);
+  assert.equal(res.body.token, undefined, "a correct password alone must not sign anyone in");
+  assert.equal(db.sessions.length, 0);
 });
 
-test("2FA gate: a current TOTP code passes", () => {
-  const { user, secret } = makeTwoFactorUser();
-  const result = simulateTwoFactorGate({
-    user,
-    submittedCode: generateTotpCode(secret),
-  });
+test("2FA: a current TOTP code signs in", async () => {
+  const { secret } = twoFactorUser();
+  const res = await login({ twoFactorCode: generateTotpCode(secret) });
 
-  assert.equal(result.passed, true);
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.token);
 });
 
-test("2FA gate: an unused backup code passes and is consumed; replaying it fails", () => {
-  const { user, plainCodes } = makeTwoFactorUser();
+test("2FA: a wrong code is refused with no session", async () => {
+  twoFactorUser();
+  const res = await login({ twoFactorCode: "000000" });
 
-  const first = simulateTwoFactorGate({ user, submittedCode: plainCodes[0] });
-  assert.equal(first.passed, true);
-  assert.equal(first.user.twoFactorBackupCodes[0].used, true);
-
-  const replay = simulateTwoFactorGate({
-    user: first.user,
-    submittedCode: plainCodes[0],
-  });
-  assert.equal(replay.passed, false);
-  assert.equal(replay.status, 400);
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "Invalid two-factor authentication code");
+  assert.equal(res.body.token, undefined);
 });
 
-test("2FA gate: backup codes are accepted case-insensitively", () => {
-  const { user, plainCodes } = makeTwoFactorUser();
-  const result = simulateTwoFactorGate({
-    user,
-    submittedCode: plainCodes[0].toLowerCase(),
-  });
+test("2FA: an unused backup code signs in and is consumed", async () => {
+  const { user, plainCodes } = twoFactorUser();
 
-  assert.equal(result.passed, true);
+  const first = await login({ twoFactorCode: plainCodes[0] });
+  assert.equal(first.statusCode, 200);
+  assert.ok(first.body.token);
+  assert.equal(user.twoFactorBackupCodes[0].used, true, "single use");
+
+  const replay = await login({ twoFactorCode: plainCodes[0] });
+  assert.equal(replay.statusCode, 400, "a spent backup code must not work twice");
 });
 
-test("2FA gate: wrong codes increment the shared lockout counter and lock on the 5th", () => {
-  let user = makeTwoFactorUser().user;
+test("2FA: backup codes are accepted case-insensitively", async () => {
+  const { plainCodes } = twoFactorUser();
+  const res = await login({ twoFactorCode: plainCodes[0].toLowerCase() });
+  assert.equal(res.statusCode, 200);
+});
 
-  for (let i = 1; i <= 4; i++) {
-    const result = simulateTwoFactorGate({ user, submittedCode: "000000" });
-    assert.equal(result.passed, false);
-    assert.equal(result.status, 400);
-    assert.equal(result.body.attemptsLeft, MAX_FAILED_LOGIN_ATTEMPTS - i);
-    user = result.user;
-    assert.equal(user.failedLoginAttempts, i);
+test("2FA: malformed codes are refused, not thrown on", async () => {
+  for (const bad of ["12345", "1234567", "notacode", "  ", "12 34 56", 123456, null, {}]) {
+    // A fresh account per value: these share the lockout budget, so reusing one
+    // would start returning 429 after five and stop testing the code path.
+    resetDb();
+    twoFactorUser();
+
+    const res = await login({ twoFactorCode: bad });
+    assert.ok(
+      res.statusCode === 400 || res.body?.needTwoFactor === true,
+      `${JSON.stringify(bad)} must be refused, got ${res.statusCode}`,
+    );
+    assert.equal(res.body.token, undefined);
   }
-
-  const locked = simulateTwoFactorGate({ user, submittedCode: "000000" });
-  assert.equal(locked.passed, false);
-  assert.equal(locked.status, 429);
-  assert.equal(locked.body.locked, true);
-  assert.equal(locked.user.failedLoginAttempts, MAX_FAILED_LOGIN_ATTEMPTS);
 });
 
-test("2FA gate: failed password attempts carry into the code step", () => {
-  // The counter reset moved to *after* the gate precisely so this holds: a
-  // password-guessing run does not get its budget refilled by reaching 2FA.
-  const { user } = makeTwoFactorUser({ failedLoginAttempts: 4 });
-  const result = simulateTwoFactorGate({ user, submittedCode: "000000" });
+test("2FA: the gate runs after the password, not instead of it", async () => {
+  twoFactorUser();
+  const res = await login({ password: "Wrong9999", twoFactorCode: "000000" });
 
-  assert.equal(result.status, 429);
-  assert.equal(result.body.locked, true);
+  assert.equal(res.statusCode, 400);
+  assert.equal(res.body.error, "Invalid credentials", "a wrong password never reaches the code step");
 });
 
-test("2FA gate: malformed code inputs are rejected, not thrown on", () => {
-  const { user } = makeTwoFactorUser();
+// ── Trusted devices ──────────────────────────────────────────────────────────
 
-  for (const bad of ["", "12345", "1234567", "notacode", "  ", "12 34 56"]) {
-    const result = simulateTwoFactorGate({ user, submittedCode: bad });
-    assert.equal(result.passed, false, `expected ${JSON.stringify(bad)} to be refused`);
-  }
+const trustedFor = (userId, deviceId, ms = TRUSTED_DEVICE_DURATION_MS) =>
+  makeSession(userId, deviceId, {
+    isTrusted: true,
+    trustedAt: new Date(),
+    trustedUntil: new Date(Date.now() + ms),
+  });
+
+test("trusted device: skips the challenge", async () => {
+  const { user } = twoFactorUser();
+  db.sessions.push(trustedFor(user._id, "laptop-device-01"));
+
+  const res = await login({}, { deviceId: "laptop-device-01" });
+
+  assert.equal(res.statusCode, 200);
+  assert.ok(res.body.token);
+  assert.equal(res.body.isTrustedDevice, true);
+});
+
+test("trusted device: trust is scoped to that device", async () => {
+  const { user } = twoFactorUser();
+  db.sessions.push(trustedFor(user._id, "laptop-device-01"));
+
+  const res = await login({}, { deviceId: "phone-device-02" });
+
+  assert.equal(res.body.needTwoFactor, true, "another device must still be challenged");
+});
+
+test("trusted device: lapsed trust is challenged again", async () => {
+  const { user } = twoFactorUser();
+  db.sessions.push(trustedFor(user._id, "laptop-device-01", -1000));
+
+  const res = await login({}, { deviceId: "laptop-device-01" });
+  assert.equal(res.body.needTwoFactor, true);
+});
+
+test("trusted device: a revoked session is not a trusted device", async () => {
+  const { user } = twoFactorUser();
+  const session = trustedFor(user._id, "laptop-device-01");
+  session.revokedAt = new Date();
+  db.sessions.push(session);
+
+  const res = await login({}, { deviceId: "laptop-device-01" });
+  assert.equal(res.body.needTwoFactor, true, "logging a device out withdraws its trust");
+});
+
+test("trusted device: granted by passing a challenge and asking, not by asking", async () => {
+  const { user, secret } = twoFactorUser();
+  db.sessions.push(makeSession(user._id, "laptop-device-01"));
+
+  // Asking without a code is still just a challenge.
+  await login({ rememberDevice: true }, { deviceId: "laptop-device-01" });
+  assert.equal(db.sessions[0].isTrusted, false);
+
+  // A wrong code grants nothing.
+  await login({ twoFactorCode: "000000", rememberDevice: true }, { deviceId: "laptop-device-01" });
+  assert.equal(db.sessions[0].isTrusted, false);
+
+  // A correct code plus the request does.
+  const res = await login(
+    { twoFactorCode: generateTotpCode(secret), rememberDevice: true },
+    { deviceId: "laptop-device-01" },
+  );
+  assert.equal(res.statusCode, 200);
+  assert.equal(db.sessions[0].isTrusted, true);
+  assert.ok(db.sessions[0].trustedUntil > new Date());
+});
+
+test("trusted device: passing a challenge without asking grants nothing", async () => {
+  const { user, secret } = twoFactorUser();
+  db.sessions.push(makeSession(user._id, "laptop-device-01"));
+
+  const res = await login({ twoFactorCode: generateTotpCode(secret) }, { deviceId: "laptop-device-01" });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(db.sessions[0].isTrusted, false, "opt-in, never a default");
+  assert.equal(res.body.isTrustedDevice, false);
+});
+
+test("trusted device: an account without 2FA cannot bank trust", async () => {
+  /*
+   * Otherwise trust collected while 2FA was off would be honoured the moment it
+   * was switched on, and the first login after enabling it would skip the very
+   * challenge just set up.
+   */
+  const user = makeUser();
+  db.users.push(user);
+  db.sessions.push(makeSession(user._id, "laptop-device-01"));
+
+  const res = await login({ rememberDevice: true }, { deviceId: "laptop-device-01" });
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(db.sessions[0].isTrusted, false);
+  assert.equal(res.body.isTrustedDevice, false);
 });
