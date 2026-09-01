@@ -880,6 +880,101 @@ export const signupUser = async (req, res) => {
   }
 };
 
+/**
+ * Answers with a 429 if the account is inside its lockout window.
+ *
+ * Returns true when it has answered, meaning the caller must return.
+ */
+const rejectIfLockedOut = (user, res) => {
+  if (!user.lockoutUntil || user.lockoutUntil <= new Date()) return false;
+
+  const remainingSeconds = Math.max(1, Math.ceil((user.lockoutUntil.getTime() - Date.now()) / 1000));
+  res.set("Retry-After", String(remainingSeconds));
+  res.status(429).json({
+    error: `Account temporarily locked due to repeated failed login attempts. Please try again in ${Math.ceil(remainingSeconds / 60)} minute(s) or reset your password.`,
+    retryAfter: remainingSeconds,
+    locked: true,
+  });
+  return true;
+};
+
+/**
+ * Records one failed authentication attempt and answers with the refusal.
+ *
+ * Both the password check and the second-factor check feed this one counter.
+ * They have to: a correct password plus an unmetered code prompt is 10^6
+ * guesses against six digits, which is not a second factor. Sharing the
+ * counter also means an attacker who has the password cannot use the code
+ * step as a lockout-free oracle.
+ */
+const rejectFailedAttempt = async (user, res, message) => {
+  const attempts = (user.failedLoginAttempts || 0) + 1;
+
+  if (attempts >= MAX_FAILED_LOGIN_ATTEMPTS) {
+    const lockoutUntil = new Date(Date.now() + ACCOUNT_LOCKOUT_DURATION_MS);
+    await User.updateOne(
+      { _id: user._id },
+      { $set: { failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS, lockoutUntil } }
+    );
+    const retryAfter = Math.ceil(ACCOUNT_LOCKOUT_DURATION_MS / 1000);
+    res.set("Retry-After", String(retryAfter));
+    return res.status(429).json({
+      error: "Too many failed login attempts. Account temporarily locked for 15 minutes. Please try again later or reset your password.",
+      retryAfter,
+      locked: true,
+    });
+  }
+
+  await User.updateOne({ _id: user._id }, { $set: { failedLoginAttempts: attempts } });
+  return res.status(400).json({
+    error: message,
+    attemptsLeft: MAX_FAILED_LOGIN_ATTEMPTS - attempts,
+  });
+};
+
+/**
+ * The second factor, for every path that issues a session.
+ *
+ * Returns true when the request may proceed. When it returns false it has
+ * already answered — either a 200 `needTwoFactor` asking the client for a
+ * code, or a refusal that counted against the lockout.
+ *
+ * `user` must have been selected with +twoFactorSecret +twoFactorBackupCodes
+ * +failedLoginAttempts +lockoutUntil — all four are select:false on the model.
+ * (`twoFactorEnabled` is not, so an unselected user silently skips the gate.)
+ */
+const passesTwoFactor = async (user, submittedCode, res) => {
+  if (!user.twoFactorEnabled) return true;
+
+  if (!submittedCode) {
+    res.status(200).json({
+      needTwoFactor: true,
+      message: "Please enter your two-factor authentication code or backup code.",
+    });
+    return false;
+  }
+
+  let valid = verifyTotpCode(submittedCode, user.twoFactorSecret);
+  if (!valid) {
+    const backupResult = verifyBackupCode(submittedCode, user.twoFactorBackupCodes || []);
+    if (backupResult.valid) {
+      valid = true;
+      // Mark backup code as used
+      await User.updateOne(
+        { _id: user._id, "twoFactorBackupCodes.codeHash": user.twoFactorBackupCodes[backupResult.index].codeHash },
+        { $set: { "twoFactorBackupCodes.$.used": true } }
+      );
+    }
+  }
+
+  if (!valid) {
+    await rejectFailedAttempt(user, res, "Invalid two-factor authentication code");
+    return false;
+  }
+
+  return true;
+};
+
 export const loginUser = async (req, res) => {
   try {
     const { email, username, password } = req.body;
@@ -926,48 +1021,11 @@ export const loginUser = async (req, res) => {
     }
 
     // Per-account lockout check: stops distributed credential stuffing across rotating IPs
-    if (user.lockoutUntil && user.lockoutUntil > new Date()) {
-      const remainingSeconds = Math.max(1, Math.ceil((user.lockoutUntil.getTime() - Date.now()) / 1000));
-      res.set("Retry-After", String(remainingSeconds));
-      return res.status(429).json({
-        error: `Account temporarily locked due to repeated failed login attempts. Please try again in ${Math.ceil(remainingSeconds / 60)} minute(s) or reset your password.`,
-        retryAfter: remainingSeconds,
-        locked: true,
-      });
-    }
+    if (rejectIfLockedOut(user, res)) return;
 
     const isMatch = await user.comparePassword(password);
     if (!isMatch) {
-      const attempts = (user.failedLoginAttempts || 0) + 1;
-      if (attempts >= MAX_FAILED_LOGIN_ATTEMPTS) {
-        const lockoutUntil = new Date(Date.now() + ACCOUNT_LOCKOUT_DURATION_MS);
-        await User.updateOne(
-          { _id: user._id },
-          { $set: { failedLoginAttempts: MAX_FAILED_LOGIN_ATTEMPTS, lockoutUntil } }
-        );
-        const retryAfter = Math.ceil(ACCOUNT_LOCKOUT_DURATION_MS / 1000);
-        res.set("Retry-After", String(retryAfter));
-        return res.status(429).json({
-          error: "Too many failed login attempts. Account temporarily locked for 15 minutes. Please try again later or reset your password.",
-          retryAfter,
-          locked: true,
-        });
-      }
-
-      await User.updateOne({ _id: user._id }, { $set: { failedLoginAttempts: attempts } });
-      const attemptsLeft = MAX_FAILED_LOGIN_ATTEMPTS - attempts;
-      return res.status(400).json({
-        error: "Invalid credentials",
-        attemptsLeft,
-      });
-    }
-
-    // Password matched: clear any lingering failed attempt count or lockout
-    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
-      await User.updateOne(
-        { _id: user._id },
-        { $set: { failedLoginAttempts: 0, lockoutUntil: null } }
-      );
+      return rejectFailedAttempt(user, res, "Invalid credentials");
     }
 
     if (user.accountStatus === "deleted") {
@@ -992,31 +1050,20 @@ export const loginUser = async (req, res) => {
     }
 
     // Two-Factor Authentication gate
-    if (user.twoFactorEnabled) {
-      const { twoFactorCode } = req.body || {};
-      if (!twoFactorCode) {
-        return res.status(200).json({
-          needTwoFactor: true,
-          message: "Please enter your two-factor authentication code or backup code.",
-        });
-      }
+    if (!(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
 
-      let valid2FA = verifyTotpCode(twoFactorCode, user.twoFactorSecret);
-      if (!valid2FA) {
-        const backupResult = verifyBackupCode(twoFactorCode, user.twoFactorBackupCodes || []);
-        if (backupResult.valid) {
-          valid2FA = true;
-          // Mark backup code as used
-          await User.updateOne(
-            { _id: user._id, "twoFactorBackupCodes.codeHash": user.twoFactorBackupCodes[backupResult.index].codeHash },
-            { $set: { "twoFactorBackupCodes.$.used": true } }
-          );
-        }
-      }
-
-      if (!valid2FA) {
-        return res.status(400).json({ error: "Invalid two-factor authentication code" });
-      }
+    /*
+     * Both factors are in: clear any lingering failed attempt count or lockout.
+     *
+     * This used to run the moment the password matched, which handed the code
+     * step a counter that was always zero — the reset has to be the last thing
+     * before a session is issued, not the first thing after the first factor.
+     */
+    if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+      await User.updateOne(
+        { _id: user._id },
+        { $set: { failedLoginAttempts: 0, lockoutUntil: null } }
+      );
     }
 
     recordSignInCountry(req, user._id);
@@ -1106,7 +1153,8 @@ export const googleLogin = async (req, res) => {
      * controls the mailbox. The filter makes it a miss, so the branch below creates a
      * separate human account instead.
      */
-    let user = await User.findOne({ email, ...HUMAN_ACCOUNT }).select("+googleId");
+    let user = await User.findOne({ email, ...HUMAN_ACCOUNT })
+      .select("+googleId +failedLoginAttempts +lockoutUntil +twoFactorSecret +twoFactorBackupCodes");
     let newUser = false;
 
     if (!user) {
@@ -1154,6 +1202,26 @@ export const googleLogin = async (req, res) => {
         updateData.accountStatus = "active";
         updateData.deactivatedAt = null;
         user.accountStatus = "active";
+      }
+
+      /*
+       * The second factor applies here too.
+       *
+       * This path used to issue a session on a Google token alone, so any
+       * account with 2FA on that also had a linked Google address could be
+       * signed into with the first factor only — the second factor was one
+       * "Continue with Google" click away from not existing. Whoever controls
+       * the mailbox is exactly who 2FA is meant to stop short.
+       *
+       * Gated before the write below, so a refused attempt persists nothing:
+       * every mutation above this point is in-memory or in `updateData`.
+       */
+      if (rejectIfLockedOut(user, res)) return;
+      if (!(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
+
+      if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
+        updateData.failedLoginAttempts = 0;
+        updateData.lockoutUntil = null;
       }
 
       await User.updateOne(

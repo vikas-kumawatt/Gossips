@@ -58,6 +58,18 @@ const UserAuthForm = ({ type }) => {
   const forgotPasswordFormRef = useRef(null);
 
   /*
+   * The request held between the two halves of a 2FA login.
+   *
+   * The first factor and the code check are one request on the server: it
+   * re-verifies the password (or the Google token) every time, so the second
+   * submit resends the same route and body plus `twoFactorCode`. Both login
+   * routes can ask for a code, hence carrying the route rather than assuming
+   * it. Non-null means "show the code step".
+   */
+  const [pendingTwoFactor, setPendingTwoFactor] = useState(null);
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+
+  /*
    * Hand an unfinished signup to the OTP screen.
    *
    * `data` carries no token: signup now answers with a verification ticket and
@@ -96,6 +108,18 @@ const UserAuthForm = ({ type }) => {
        */
       if (data.requiresVerification) {
         goVerifyEmail(data);
+        return;
+      }
+
+      /*
+       * Password was right, but the account has 2FA on. Same shape of trap as
+       * the branch above — a 200 with no token — so it has to be caught before
+       * `persistUser`, which would otherwise write a tokenless user and sign
+       * out whoever is currently signed in.
+       */
+      if (data.needTwoFactor) {
+        setPendingTwoFactor({ route: serverRoute, payload: formData });
+        setTwoFactorCode("");
         return;
       }
 
@@ -139,7 +163,24 @@ const UserAuthForm = ({ type }) => {
         },
       });
     } catch (error) {
-      toast.error(error.response?.data?.error || "Authentication failed");
+      const failure = error.response?.data;
+      const message = failure?.error || "Authentication failed";
+      /*
+       * A wrong code now counts toward the same lockout a wrong password does,
+       * so the count has to be visible here — otherwise the fifth typo locks
+       * the account with no warning that a limit existed.
+       *
+       * Only here. The password step has always had `attemptsLeft` in the
+       * response and has always ignored it; that is its own call, not one to
+       * change on the way past. `formData` is the submitted body, so the
+       * presence of a code is what tells the two steps apart.
+       */
+      const isTwoFactorStep = Boolean(formData.twoFactorCode);
+      toast.error(
+        isTwoFactorStep && typeof failure?.attemptsLeft === "number"
+          ? `${message} — ${failure.attemptsLeft} attempt(s) left before lockout`
+          : message
+      );
     } finally {
       setLoading(false);
     }
@@ -186,6 +227,26 @@ const UserAuthForm = ({ type }) => {
     }
 
     userAuthThroughServer(serverRoute, formData);
+  };
+
+  const handleTwoFactorSubmit = (e) => {
+    e.preventDefault();
+
+    const code = twoFactorCode.trim().toUpperCase();
+    // 6 digits from an authenticator app, or an 8-character backup code.
+    if (!code) {
+      return toast.error("Enter your authentication code");
+    }
+
+    userAuthThroughServer(pendingTwoFactor.route, {
+      ...pendingTwoFactor.payload,
+      twoFactorCode: code,
+    });
+  };
+
+  const cancelTwoFactor = () => {
+    setPendingTwoFactor(null);
+    setTwoFactorCode("");
   };
 
   const handleGoogleAuth = async (e) => {
@@ -242,7 +303,58 @@ const UserAuthForm = ({ type }) => {
   return (
     <section className="w-full h-screen flex justify-center items-center bg-neutral-950 relative">
       <Toaster />
-      {isForgotPassword ? (
+      {pendingTwoFactor ? (
+        <form
+          onSubmit={handleTwoFactorSubmit}
+          className="w-[80%] max-w-[400px] flex flex-col items-center"
+        >
+          <Icons.logo className="w-20 h-20 mb-4 mx-auto" />
+          <h1 className="text-white font-bold mb-2 text-center">
+            Two-factor authentication
+          </h1>
+          <p className="text-neutral-400 text-sm text-center mb-4">
+            Enter the 6-digit code from your authenticator app, or one of your
+            backup codes.
+          </p>
+
+          <div className="relative w-[100%] mb-4">
+            <input
+              name="twoFactorCode"
+              type="text"
+              placeholder="Authentication code"
+              value={twoFactorCode}
+              onChange={(e) => setTwoFactorCode(e.target.value)}
+              autoFocus
+              autoComplete="one-time-code"
+              maxLength={8}
+              className="input-box tracking-[0.3em] text-center"
+            />
+          </div>
+
+          <button
+            type="submit"
+            className="w-[100%] rounded-xl p-4 text-black font-medium bg-white border border-transparent cursor-pointer flex items-center justify-center gap-2"
+            disabled={loading}
+          >
+            {loading ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Verifying...
+              </>
+            ) : (
+              "Verify"
+            )}
+          </button>
+
+          <button
+            type="button"
+            className="text-neutral-500 text-center pt-4"
+            onClick={cancelTwoFactor}
+          >
+            Back to Login
+          </button>
+        </form>
+      ) : isForgotPassword ? (
         <form
           ref={forgotPasswordFormRef}
           className="w-[80%] max-w-[400px] flex flex-col items-center"

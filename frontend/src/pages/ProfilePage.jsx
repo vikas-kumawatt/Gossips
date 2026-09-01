@@ -63,7 +63,58 @@ const ProfilePage = () => {
   const { isMuted, mute: muteAccount, unmute: unmuteAccount } = useMute();
   const { isBlocked, requestBlock, unblock: unblockAccount } = useBlock();
   const { openReport } = useReport();
+  const navigate = useNavigate();
+
+  const [profile, setProfile] = useState(profileDataStructure);
+  const [isShareProfileOpen, setIsShareProfileOpen] = useState(false);
+  const [isAboutOpen, setIsAboutOpen] = useState(false);
+  const [posts, setPosts] = useState([]);
+  const [replies, setReplies] = useState([]);
+  const [reposts, setReposts] = useState([]);
+  const [profileLoaded, setProfileLoaded] = useState("");
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [isFollowersModalOpen, setIsFollowersModalOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [notFound, setNotFound] = useState(false);
+  const [repliesLoading, setRepliesLoading] = useState(false);
+  const [repostsLoading, setRepostsLoading] = useState(false);
+  const [isPostsFetchingMore, setIsPostsFetchingMore] = useState(false);
+  const [isRepliesFetchingMore, setIsRepliesFetchingMore] = useState(false);
+  const [isRepostsFetchingMore, setIsRepostsFetchingMore] = useState(false);
+  const [postsCursor, setPostsCursor] = useState(null);
+  const [repliesCursor, setRepliesCursor] = useState(null);
+  const [repostsCursor, setRepostsCursor] = useState(null);
+  const [hasMore, setHasMore] = useState(true);
+  const [hasMoreReplies, setHasMoreReplies] = useState(true);
+  const [hasMoreReposts, setHasMoreReposts] = useState(true);
+  const [postsLoadTrigger, setPostsLoadTrigger] = useState(0);
+  const [repliesLoadTrigger, setRepliesLoadTrigger] = useState(0);
+  const [repostsLoadTrigger, setRepostsLoadTrigger] = useState(0);
+  const [initialLoad, setInitialLoad] = useState(true);
+  const [initialRepliesLoad, setInitialRepliesLoad] = useState(true);
+  const [initialRepostsLoad, setInitialRepostsLoad] = useState(true);
+  const [canViewPosts, setCanViewPosts] = useState(false);
+  const [activeTab, setActiveTab] = useState(0);
+
+  const observer = useRef();
+  const repliesObserver = useRef();
+  const repostsObserver = useRef();
+
   const profileMuted = isMuted(profileId);
+
+  /*
+   * Declared after `profile`, because it reads it during render.
+   *
+   * The block index is keyed by account id as well as handle, and the id is the half
+   * that survives the account renaming itself — so pass the id whenever the profile
+   * has loaded, and fall back to the route's handle before that.
+   */
+  const blockIdentity = profile?._id
+    ? { _id: profile._id, username: profileId }
+    : profileId;
+  const profileBlocked = isBlocked(blockIdentity);
+  const isRestricted = Boolean(profile?.relationship?.youRestricted);
 
   const handleToggleMuteProfile = async () => {
     try {
@@ -88,8 +139,6 @@ const ProfilePage = () => {
       requestBlock({ _id: profile?._id, username: profileId, name: profile?.name });
     }
   };
-
-  const isRestricted = Boolean(profile?.relationship?.youRestricted);
 
   const handleToggleRestrictProfile = async () => {
     const next = !isRestricted;
@@ -139,57 +188,6 @@ const ProfilePage = () => {
       toast.error("Couldn't copy the link");
     }
   };
-
-  const [profile, setProfile] = useState(profileDataStructure);
-
-  /*
-   * Declared after `profile`, because it reads it during render.
-   *
-   * The block index is keyed by account id as well as handle, and the id is the half
-   * that survives the account renaming itself — so pass the id whenever the profile
-   * has loaded, and fall back to the route's handle before that.
-   */
-  const blockIdentity = profile?._id
-    ? { _id: profile._id, username: profileId }
-    : profileId;
-  const profileBlocked = isBlocked(blockIdentity);
-
-  const [isShareProfileOpen, setIsShareProfileOpen] = useState(false);
-  const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [posts, setPosts] = useState([]);
-  const [replies, setReplies] = useState([]);
-  const [reposts, setReposts] = useState([]);
-  const [profileLoaded, setProfileLoaded] = useState("");
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isFollowersModalOpen, setIsFollowersModalOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [profileLoading, setProfileLoading] = useState(true);
-  const [notFound, setNotFound] = useState(false);
-  const [repliesLoading, setRepliesLoading] = useState(false);
-  const [repostsLoading, setRepostsLoading] = useState(false);
-  const [isPostsFetchingMore, setIsPostsFetchingMore] = useState(false);
-  const [isRepliesFetchingMore, setIsRepliesFetchingMore] = useState(false);
-  const [isRepostsFetchingMore, setIsRepostsFetchingMore] = useState(false);
-  const [postsCursor, setPostsCursor] = useState(null);
-  const [repliesCursor, setRepliesCursor] = useState(null);
-  const [repostsCursor, setRepostsCursor] = useState(null);
-  const [hasMore, setHasMore] = useState(true);
-  const [hasMoreReplies, setHasMoreReplies] = useState(true);
-  const [hasMoreReposts, setHasMoreReposts] = useState(true);
-  const [postsLoadTrigger, setPostsLoadTrigger] = useState(0);
-  const [repliesLoadTrigger, setRepliesLoadTrigger] = useState(0);
-  const [repostsLoadTrigger, setRepostsLoadTrigger] = useState(0);
-  const [initialLoad, setInitialLoad] = useState(true);
-  const [initialRepliesLoad, setInitialRepliesLoad] = useState(true);
-  const [initialRepostsLoad, setInitialRepostsLoad] = useState(true);
-  const [canViewPosts, setCanViewPosts] = useState(false);
-  const [activeTab, setActiveTab] = useState(0);
-
-  const observer = useRef();
-  const repliesObserver = useRef();
-  const repostsObserver = useRef();
-
-  const navigate = useNavigate();
 
   const openCreateModal = () => setIsCreateModalOpen(true);
   const closeCreateModal = () => setIsCreateModalOpen(false);

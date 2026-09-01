@@ -51,9 +51,12 @@ const QuotedPreview = ({ content, author }) => {
         />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1">
-            <p className="text-white font-medium text-sm truncate">{author.username}</p>
+            <p className="text-white font-medium text-sm truncate">
+              {author.username}
+            </p>
             {(author.isVerified ||
-              (author.verificationBadge && author.verificationBadge !== "none")) && (
+              (author.verificationBadge &&
+                author.verificationBadge !== "none")) && (
               <span className="inline-flex shrink-0 items-center">
                 <Icons.verified />
               </span>
@@ -74,7 +77,9 @@ const QuotedPreview = ({ content, author }) => {
           )}
 
           {content.content && (
-            <p className="text-gray-300 text-sm break-words">{content.content}</p>
+            <p className="text-gray-300 text-sm break-words">
+              {content.content}
+            </p>
           )}
 
           {/* A poll can't be voted on from here, so it's shown as a summary
@@ -97,7 +102,9 @@ const QuotedPreview = ({ content, author }) => {
               <Mic className="h-3.5 w-3.5 shrink-0" />
               Audio clip
               {Number.isFinite(audio.duration) && (
-                <span className="text-neutral-500">{formatDuration(audio.duration)}</span>
+                <span className="text-neutral-500">
+                  {formatDuration(audio.duration)}
+                </span>
               )}
             </p>
           )}
@@ -107,7 +114,10 @@ const QuotedPreview = ({ content, author }) => {
               {visuals.map((item) => (
                 <div key={item.url} className="relative flex-shrink-0">
                   {item.type === "video" ? (
-                    <video src={item.url} className="w-24 h-24 rounded-lg object-cover" />
+                    <video
+                      src={item.url}
+                      className="w-24 h-24 rounded-lg object-cover"
+                    />
                   ) : (
                     <img
                       src={item.url}
@@ -203,7 +213,11 @@ const CreatePost = ({
       )
         return;
       if (cardRef.current && !cardRef.current.contains(event.target)) {
-        if (content.trim() || mediaFiles.length > 0 || attachments.hasAttachment) {
+        if (
+          content.trim() ||
+          mediaFiles.length > 0 ||
+          attachments.hasAttachment
+        ) {
           setShowSaveDraftDialog(true);
         } else {
           onClose();
@@ -230,7 +244,16 @@ const CreatePost = ({
     return () => {
       document.removeEventListener("mousedown", handleOutsideClick);
     };
-  }, [onClose, content, mediaFiles, isSchedulePickerOpen, attachments.hasAttachment, attachments.openSheet, isMoreDropdownOpen, isReplyDropdownOpen]);
+  }, [
+    onClose,
+    content,
+    mediaFiles,
+    isSchedulePickerOpen,
+    attachments.hasAttachment,
+    attachments.openSheet,
+    isMoreDropdownOpen,
+    isReplyDropdownOpen,
+  ]);
 
   useEffect(() => {
     if (isOpen) {
@@ -245,7 +268,7 @@ const CreatePost = ({
     if (showDraftPostsDialog) {
       fetchDrafts();
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [showDraftPostsDialog, draftsLoadTrigger]);
 
   useEffect(() => {
@@ -289,11 +312,11 @@ const CreatePost = ({
             cursor: draftsCursor,
             limit: 10,
           },
-        }
+        },
       );
 
       const newDrafts = response.data.drafts.filter(
-        (draft) => !drafts.some((d) => d._id === draft._id)
+        (draft) => !drafts.some((d) => d._id === draft._id),
       );
 
       setDrafts((prevDrafts) => [...prevDrafts, ...newDrafts]);
@@ -317,12 +340,12 @@ const CreatePost = ({
             setDraftsLoadTrigger((prev) => prev + 1);
           }
         },
-        { threshold: 0.5 }
+        { threshold: 0.5 },
       );
 
       if (node) observer.current.observe(node);
     },
-    [isDraftsLoading, hasMoreDrafts]
+    [isDraftsLoading, hasMoreDrafts],
   );
 
   if (!isOpen && !showDraftPostsDialog) return null;
@@ -341,7 +364,8 @@ const CreatePost = ({
       return;
     }
     const validFiles = files.filter(
-      (file) => file.type.startsWith("image/") || file.type.startsWith("video/")
+      (file) =>
+        file.type.startsWith("image/") || file.type.startsWith("video/"),
     );
     if (validFiles.length !== files.length) {
       setError("Only images and videos are allowed");
@@ -389,7 +413,10 @@ const CreatePost = ({
       attachments.appendTo(formData);
       if (sourceDraftMedia) {
         formData.append("sourceDraftId", sourceDraftMedia.id);
-        formData.append("sourceDraftMedia", JSON.stringify(sourceDraftMedia.urls));
+        formData.append(
+          "sourceDraftMedia",
+          JSON.stringify(sourceDraftMedia.urls),
+        );
       }
       if (scheduledFor) {
         formData.append("scheduledFor", scheduledFor.toISOString());
@@ -402,9 +429,11 @@ const CreatePost = ({
         formData.append("quotedComment", quotedComment._id);
         formData.append("isQuoteComment", true);
       }
-      mediaFiles.filter((file) => !file.existing).forEach((file) => {
-        formData.append("media", file);
-      });
+      mediaFiles
+        .filter((file) => !file.existing)
+        .forEach((file) => {
+          formData.append("media", file);
+        });
       const response = await axios.post(
         import.meta.env.VITE_SERVER + "/posts/create",
         formData,
@@ -413,7 +442,7 @@ const CreatePost = ({
             Authorization: `Bearer ${token}`,
             "Content-Type": "multipart/form-data",
           },
-        }
+        },
       );
       if (response.status === 201) {
         if (response.data.scheduled) {
@@ -461,7 +490,10 @@ const CreatePost = ({
       attachments.appendTo(formData);
       if (sourceDraftMedia) {
         formData.append("sourceDraftId", sourceDraftMedia.id);
-        formData.append("sourceDraftMedia", JSON.stringify(sourceDraftMedia.urls));
+        formData.append(
+          "sourceDraftMedia",
+          JSON.stringify(sourceDraftMedia.urls),
+        );
       }
       if (quotedPost) {
         formData.append("quotedPost", quotedPost._id);
@@ -471,9 +503,11 @@ const CreatePost = ({
         formData.append("quotedComment", quotedComment._id);
         formData.append("isQuoteComment", true);
       }
-      mediaFiles.filter((file) => !file.existing).forEach((file) => {
-        formData.append("media", file);
-      });
+      mediaFiles
+        .filter((file) => !file.existing)
+        .forEach((file) => {
+          formData.append("media", file);
+        });
       await axios.post(
         import.meta.env.VITE_SERVER + "/posts/save-draft",
         formData,
@@ -482,7 +516,7 @@ const CreatePost = ({
             Authorization: `Bearer ${token}`,
             "Content-Type": "multipart/form-data",
           },
-        }
+        },
       );
       toast.success("Saved to drafts");
       resetForm();
@@ -507,7 +541,7 @@ const CreatePost = ({
             quotedComment: draft.quotedComment || null,
             author: restoredQuote.author || null,
           }
-        : null
+        : null,
     );
     attachments.reset();
     const restoredMedia = normalizeMedia(draft.media);
@@ -518,7 +552,10 @@ const CreatePost = ({
       setMediaFiles(restoredMedia.map((item) => ({ ...item, existing: true })));
     }
     if (restoredMedia.length) {
-      setSourceDraftMedia({ id: draft._id, urls: restoredMedia.map((item) => item.url) });
+      setSourceDraftMedia({
+        id: draft._id,
+        urls: restoredMedia.map((item) => item.url),
+      });
     }
     if (draft.poll?.question) {
       attachments.choosePoll({
@@ -535,8 +572,6 @@ const CreatePost = ({
     fileInputRef.current.click();
   };
 
-
-
   if (showSaveDraftDialog) {
     return (
       <div className="fixed inset-0 z-[200] bg-black/70 flex items-center justify-center px-4">
@@ -550,7 +585,8 @@ const CreatePost = ({
                 time the user picked without a word. */}
             {scheduledFor && (
               <span className="mt-2 block text-[13px] text-neutral-500">
-                The time you picked won't be kept — schedule it again from drafts.
+                The time you picked won't be kept — schedule it again from
+                drafts.
               </span>
             )}
           </p>
@@ -594,46 +630,46 @@ const CreatePost = ({
         }}
       >
         <div className="pt-4">
-            {drafts.length > 0 ? (
-              drafts.map((draft, index) => {
-                const isLastDraft = index === drafts.length - 1;
-                return (
-                  <div
-                    key={draft._id}
-                    ref={isLastDraft ? lastDraftRef : null}
-                    onClick={() => handleLoadDraft(draft._id)}
-                    className="cursor-pointer mb-4 border-b border-neutral-700 px-4"
-                  >
-                    <PostCard
-                      item={draft}
-                      author={userAuth}
-                      hideActionsHeader={false}
-                      hideActions={true}
-                      isDraft={true}
-                      onDelete={(id) => {
-                        setDrafts(drafts.filter((d) => d._id !== id));
-                        fetchDrafts();
-                      }}
-                      onCancel={() => {
-                        setShowDraftPostsDialog(true);
-                      }}
-                    />
-                  </div>
-                );
-              })
-            ) : (
-              <div className="text-center py-10 text-neutral-400">
-                {isDraftsLoading ? (
-                  <Icons.spinner className="animate-spin mx-auto h-8 w-8" />
-                ) : (
-                  <div>
-                    <Icons.draft className="h-16 w-16 mx-auto mb-2" />
-                    <p className="font-medium">No drafts yet</p>
-                    <p className="text-sm">Your drafts will appear here.</p>
-                     </div>
-                )}
-              </div>
-            )}
+          {drafts.length > 0 ? (
+            drafts.map((draft, index) => {
+              const isLastDraft = index === drafts.length - 1;
+              return (
+                <div
+                  key={draft._id}
+                  ref={isLastDraft ? lastDraftRef : null}
+                  onClick={() => handleLoadDraft(draft._id)}
+                  className="cursor-pointer mb-4 border-b border-neutral-700 px-4"
+                >
+                  <PostCard
+                    item={draft}
+                    author={userAuth}
+                    hideActionsHeader={false}
+                    hideActions={true}
+                    isDraft={true}
+                    onDelete={(id) => {
+                      setDrafts(drafts.filter((d) => d._id !== id));
+                      fetchDrafts();
+                    }}
+                    onCancel={() => {
+                      setShowDraftPostsDialog(true);
+                    }}
+                  />
+                </div>
+              );
+            })
+          ) : (
+            <div className="text-center py-10 text-neutral-400">
+              {isDraftsLoading ? (
+                <Icons.spinner className="animate-spin mx-auto h-8 w-8" />
+              ) : (
+                <div>
+                  <Icons.draft className="h-16 w-16 mx-auto mb-2" />
+                  <p className="font-medium">No drafts yet</p>
+                  <p className="text-sm">Your drafts will appear here.</p>
+                </div>
+              )}
+            </div>
+          )}
           {isDraftsLoading && drafts.length > 0 && (
             <div className="flex justify-center py-4">
               <Icons.spinner className="animate-spin h-8 w-8 text-neutral-400" />
@@ -653,7 +689,11 @@ const CreatePost = ({
         <div className="flex items-center justify-between p-4">
           <button
             onClick={() => {
-              if (content.trim() || mediaFiles.length > 0 || attachments.hasAttachment) {
+              if (
+                content.trim() ||
+                mediaFiles.length > 0 ||
+                attachments.hasAttachment
+              ) {
                 setShowSaveDraftDialog(true);
               } else {
                 onClose();
@@ -665,7 +705,11 @@ const CreatePost = ({
             Cancel
           </button>
           <p className="font-medium text-lg">
-            {quotedPost ? "Quote Post" : quotedComment ? "Quote Comment" : "New gossip"}
+            {quotedPost
+              ? "Quote Post"
+              : quotedComment
+                ? "Quote Comment"
+                : "New gossip"}
           </p>
           <div className="flex gap-4">
             <button
@@ -683,45 +727,53 @@ const CreatePost = ({
                 <Icons.more className="h-6 w-6" />
               </button>
               <ResponsiveMenu
-                  open={isMoreDropdownOpen}
-                  onClose={() => setIsMoreDropdownOpen(false)}
-                  title="Options"
-                  className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
-                >
-                  <div className="p-2">
-                    <button
-                      className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                      onClick={() => {
-                        setIsAiGenerated((v) => !v);
-                        setIsMoreDropdownOpen(false);
-                      }}
-                    >
-                      <span>{isAiGenerated ? "Remove AI label" : "Add AI label"}</span>
-                      {isAiGenerated ? <Check className="w-5 h-5" /> : <Icons.ai />}
-                    </button>
-                    <hr className="my-1 -mx-2 border-neutral-800" />
-                    <button
-                      className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                      onClick={() => {
-                        setIsMoreDropdownOpen(false);
-                        setIsSchedulePickerOpen(true);
-                      }}
-                    >
-                      <span>{scheduledFor ? "Change schedule" : "Schedule..."}</span>
-                      <Icons.schedule />
-                    </button>
-                    <button
-                      className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                      onClick={() => {
-                        setIsMoreDropdownOpen(false);
-                        navigate("/scheduled");
-                      }}
-                    >
-                      <span>Scheduled posts</span>
-                      <Icons.chevronRight />
-                    </button>
-                  </div>
-                </ResponsiveMenu>
+                open={isMoreDropdownOpen}
+                onClose={() => setIsMoreDropdownOpen(false)}
+                title="Options"
+                className="absolute right-0 mt-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+              >
+                <div className="p-2">
+                  <button
+                    className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                    onClick={() => {
+                      setIsAiGenerated((v) => !v);
+                      setIsMoreDropdownOpen(false);
+                    }}
+                  >
+                    <span>
+                      {isAiGenerated ? "Remove AI label" : "Add AI label"}
+                    </span>
+                    {isAiGenerated ? (
+                      <Check className="w-5 h-5" />
+                    ) : (
+                      <Icons.ai />
+                    )}
+                  </button>
+                  <hr className="my-1 -mx-2 border-neutral-800" />
+                  <button
+                    className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                    onClick={() => {
+                      setIsMoreDropdownOpen(false);
+                      setIsSchedulePickerOpen(true);
+                    }}
+                  >
+                    <span>
+                      {scheduledFor ? "Change schedule" : "Schedule..."}
+                    </span>
+                    <Icons.schedule />
+                  </button>
+                  <button
+                    className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                    onClick={() => {
+                      setIsMoreDropdownOpen(false);
+                      navigate("/scheduled");
+                    }}
+                  >
+                    <span>Scheduled posts</span>
+                    <Icons.chevronRight />
+                  </button>
+                </div>
+              </ResponsiveMenu>
             </div>
           </div>
         </div>
@@ -737,7 +789,11 @@ const CreatePost = ({
               <p className="text-white font-medium">{userAuth.username}</p>
               <textarea
                 ref={textareaRef}
-                placeholder={quotedPost || quotedComment ? "Add your comment..." : "What's new?"}
+                placeholder={
+                  quotedPost || quotedComment
+                    ? "Add your comment..."
+                    : "What's new?"
+                }
                 className="w-full bg-transparent text-gray-300 placeholder-gray-500 outline-none resize-none mt-1"
                 value={content}
                 onChange={handleContentChange}
@@ -757,17 +813,13 @@ const CreatePost = ({
                     <div key={index} className="relative flex-shrink-0 group">
                       {file.type && file.type.startsWith("image/") ? (
                         <img
-                          src={
-                            file.url ? file.url : URL.createObjectURL(file)
-                          }
+                          src={file.url ? file.url : URL.createObjectURL(file)}
                           alt="Preview"
                           className="w-24 h-24 object-cover rounded-lg"
                         />
                       ) : file.type && file.type.startsWith("video/") ? (
                         <video
-                          src={
-                            file.url ? file.url : URL.createObjectURL(file)
-                          }
+                          src={file.url ? file.url : URL.createObjectURL(file)}
                           controls
                           className="w-24 h-24 object-cover rounded-lg"
                         />
@@ -840,29 +892,29 @@ const CreatePost = ({
                     {getReplyTriggerText(whoCanReply)}
                   </p>
                   <ResponsiveMenu
-                      open={isReplyDropdownOpen}
-                      onClose={() => setIsReplyDropdownOpen(false)}
-                      title="Who can reply & quote"
-                      className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
-                    >
-                      <div className="p-2">
-                        {REPLY_AUDIENCE_OPTIONS.map((option) => (
-                          <button
-                            key={option.value}
-                            className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
-                            onClick={() => {
-                              setWhoCanReply(option.value);
-                              setIsReplyDropdownOpen(false);
-                            }}
-                          >
-                            <span>{option.label}</span>
-                            {whoCanReply === option.value && (
-                              <Check className="h-4 w-4 text-white" />
-                            )}
-                          </button>
-                        ))}
-                      </div>
-                    </ResponsiveMenu>
+                    open={isReplyDropdownOpen}
+                    onClose={() => setIsReplyDropdownOpen(false)}
+                    title="Who can reply & quote"
+                    className="absolute left-0 bottom-[100%] mb-1 w-[250px] bg-[#181818] rounded-2xl border border-neutral-700 shadow-xl z-[999]"
+                  >
+                    <div className="p-2">
+                      {REPLY_AUDIENCE_OPTIONS.map((option) => (
+                        <button
+                          key={option.value}
+                          className="w-full flex justify-between items-center p-3 tracking-normal select-none font-semibold text-[15px] text-white hover:bg-neutral-800 hover:rounded-xl outline-none"
+                          onClick={() => {
+                            setWhoCanReply(option.value);
+                            setIsReplyDropdownOpen(false);
+                          }}
+                        >
+                          <span>{option.label}</span>
+                          {whoCanReply === option.value && (
+                            <Check className="h-4 w-4 text-white" />
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </ResponsiveMenu>
                 </div>
                 <button
                   className={`px-4 py-1.5 rounded-2xl font-medium ${
