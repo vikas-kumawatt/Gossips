@@ -100,10 +100,6 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `UserAuthForm.jsx` posts name/email/password to `POST /auth/signup`. The server validates format (name ≤200 chars, `EMAIL_RE`, `PASSWORD_RE`), then `startPendingSignup()` bcrypt-hashes the password (cost 10) and writes a `PendingSignup` row holding an HMAC'd OTP (`hashOtp`, keyed on `JWT_SECRET`), mails the code via Brevo/Nodemailer, and returns a `verificationToken` (a `typ:"verify"` JWT naming the pending row) instead of a session. `VerifyOtpPage.jsx` keeps that ticket in `sessionStorage` and posts the code to `POST /auth/verify-otp`, which deletes the pending row, creates `User` + `UserSettings`, sends a welcome notification, and calls `issueAuthTokens`. Signup is rate-limited to 5/hour/IP.
 
-**Improvements:** No CAPTCHA, so the IP limiter is the only brake on bulk account creation.
-
-**Improved:** No CAPTCHA, so the IP limiter is the only brake on bulk account creation. Verification ticket expiration matches the 10-minute OTP lifetime (and is renewed on resend) to prevent stale tickets. Email delivery failures return HTTP 502 with Retry-After header and retry guidance.
-
 ### OTP resend & attempt limits
 
 **What it does:** Lets a user request a new code, while bounding how many codes and guesses one signup can burn.

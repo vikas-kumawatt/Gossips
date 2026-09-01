@@ -97,6 +97,22 @@ const VerifyOtpPage = () => {
   const [now, setNow] = useState(Date.now());
 
   /*
+   * When the resend button unlocks — tracked separately from `sentAt`.
+   *
+   * These used to be one value: a 429 rewound `sentAt` so the button would
+   * unlock exactly when the server said. That worked only while every
+   * `retryAfter` was the 60s per-row cooldown. The per-address send cap answers
+   * with the time until a row expires, which is minutes — and rewinding
+   * `sentAt` by minutes would have inflated the *code expiry* countdown drawn
+   * from the same origin, promising a code far more life than it has.
+   *
+   * Null means "derive it from `sentAt`", which is the ordinary case; it cannot
+   * be computed here because `resendAfterSeconds` is not destructured until
+   * after the guard below.
+   */
+  const [resendReadyAt, setResendReadyAt] = useState(session?.resendReadyAt ?? null);
+
+  /*
    * This signup cannot be finished from this screen any more.
    *
    * Set when the server reports the guess budget spent (`locked`) or the send
@@ -157,7 +173,8 @@ const VerifyOtpPage = () => {
     from = null,
   } = session;
 
-  const resendIn = Math.max(0, Math.ceil((sentAt + resendAfterSeconds * 1000 - now) / 1000));
+  const resendUnlocksAt = resendReadyAt ?? sentAt + resendAfterSeconds * 1000;
+  const resendIn = Math.max(0, Math.ceil((resendUnlocksAt - now) / 1000));
   const codeExpiresIn = Math.max(0, Math.ceil((sentAt + expiresInSeconds * 1000 - now) / 1000));
 
   /*
@@ -286,10 +303,16 @@ const VerifyOtpPage = () => {
        * response rather than leaving the values captured at signup in place.
        */
       const freshlySentAt = Date.now();
+      const nextResendAfter =
+        typeof data?.resendAfterSeconds === "number" ? data.resendAfterSeconds : resendAfterSeconds;
+      const nextResendReadyAt = freshlySentAt + nextResendAfter * 1000;
+
       setSentAt(freshlySentAt);
+      setResendReadyAt(nextResendReadyAt);
       const nextSession = {
         ...session,
         sentAt: freshlySentAt,
+        resendReadyAt: nextResendReadyAt,
         ...(data?.verificationToken ? { verificationToken: data.verificationToken } : {}),
         ...(typeof data?.expiresInSeconds === "number"
           ? { expiresInSeconds: data.expiresInSeconds }
@@ -329,15 +352,22 @@ const VerifyOtpPage = () => {
       /*
        * The server's cooldown is the real one — ours is a countdown drawn from
        * when *this tab* last sent. They disagree after a reload, or when the
-       * same signup is open twice. Rewinding the origin so the button unlocks
-       * exactly when the server says is simpler than tracking both, and it is
-       * persisted so a reload doesn't restore the optimistic value and earn
+       * same signup is open twice, and now also when the refusal is the
+       * per-address send cap rather than the per-row cooldown: that one waits
+       * for a row to expire, so it is measured in minutes.
+       *
+       * Only the resend clock moves. `sentAt` stays where it is, because the
+       * code already in the user's inbox expires when it always was going to —
+       * pushing that origin forward to satisfy this deadline is how a wait of
+       * minutes would have started claiming the code had longer to live.
+       *
+       * Persisted so a reload doesn't restore the optimistic value and earn
        * another 429.
        */
       if (typeof data?.retryAfter === "number") {
-        const corrected = Date.now() - (resendAfterSeconds - data.retryAfter) * 1000;
-        setSentAt(corrected);
-        const nextSession = { ...session, sentAt: corrected };
+        const corrected = Date.now() + data.retryAfter * 1000;
+        setResendReadyAt(corrected);
+        const nextSession = { ...session, resendReadyAt: corrected };
         setSession(nextSession);
         writeStored(nextSession);
       }
@@ -497,7 +527,10 @@ const VerifyOtpPage = () => {
                     {resending
                       ? "Sending..."
                       : resendIn > 0
-                        ? `Resend code in ${resendIn}s`
+                        ? // The per-address cap waits for a row to expire, so this
+                          // is minutes rather than seconds and "in 412s" reads as
+                          // a bug. Short cooldowns stay in plain seconds.
+                          `Resend code in ${resendIn >= 60 ? mmss(resendIn) : `${resendIn}s`}`
                         : "Resend code"}
                   </button>
 

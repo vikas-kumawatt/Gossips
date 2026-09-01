@@ -415,6 +415,24 @@ const OTP_MAX_SENDS = 5;
  * many IPs cannot do together what one cannot do alone.
  */
 const MAX_PENDING_PER_EMAIL = 5;
+/*
+ * Verification emails one address may receive while its rows are in flight.
+ *
+ * `MAX_PENDING_PER_EMAIL` counts *rows*, and a row is worth up to
+ * `OTP_MAX_SENDS` emails — so five rows resent to their caps is 25 messages in
+ * somebody's inbox, and each resend pushes its row's life out another
+ * `OTP_TTL_MS`. Capping rows without capping sends leaves five sixths of an
+ * inbox-flooding attack on the table.
+ *
+ * Counted from `resendCount` summed across an address's live rows, so it needs
+ * no new state and, unlike an in-memory route limiter, it is shared by every
+ * server instance and survives a restart.
+ *
+ * Deliberately above what one real person reaches: an ordinary signup sends
+ * one, and someone stuck retrying — a typo'd address, a code that never
+ * arrived — has three full attempts at the per-row cap before meeting this.
+ */
+const MAX_SENDS_PER_EMAIL = 15;
 /** Maximum active device sessions allowed per user account before LRU eviction. */
 const MAX_SESSIONS_PER_USER = 10;
 /** Maximum consecutive failed password attempts before temporary account lockout. */
@@ -594,6 +612,39 @@ const verificationPending = (pending) => ({
 });
 
 /**
+ * What one address currently has in flight.
+ *
+ * Both budgets are per address rather than per row, and both are read from the
+ * same snapshot so they cannot disagree with each other.
+ *
+ * @returns {Promise<{rows: number, sends: number, earliestExpiry: Date|null}>}
+ */
+const censusForAddress = async (address) => {
+  const live = await PendingSignup.find({ email: address, expiresAt: { $gt: new Date() } })
+    .sort({ expiresAt: 1 })
+    .select("_id expiresAt resendCount")
+    .lean();
+
+  return {
+    rows: live.length,
+    sends: live.reduce((total, row) => total + (row.resendCount || 0), 0),
+    earliestExpiry: live[0]?.expiresAt ? new Date(live[0].expiresAt) : null,
+  };
+};
+
+/**
+ * How long until an address gets a slot back, in seconds.
+ *
+ * A row expiring is the only thing that frees either budget, so both refusals
+ * can quote the same deadline.
+ */
+const secondsUntilRelief = (earliestExpiry) =>
+  Math.max(
+    1,
+    Math.ceil(((earliestExpiry ? earliestExpiry.getTime() : Date.now() + OTP_TTL_MS) - Date.now()) / 1000),
+  );
+
+/**
  * Take one guess off a pending signup's budget, atomically.
  *
  * The filter is the check. Reading `attempts` and then comparing it would leave the
@@ -620,7 +671,7 @@ const claimAttempt = async (pendingId) => {
  * Throttling is reported rather than thrown so the caller can decide; `sendOtpEmail`
  * still throws, because a code that was never delivered is a failure and not a state.
  *
- * @returns {Promise<{ok: true} | {ok: false, reason: "cooldown"|"exhausted"|"locked"|"delivery_failed", retryAfter?: number}>}
+ * @returns {Promise<{ok: true} | {ok: false, reason: "cooldown"|"exhausted"|"locked"|"address_exhausted"|"delivery_failed", retryAfter?: number}>}
  */
 const reissueOtp = async (pending) => {
   const sinceLast = Date.now() - new Date(pending.lastSentAt).getTime();
@@ -643,6 +694,24 @@ const reissueOtp = async (pending) => {
    */
   if (pending.attempts >= OTP_MAX_ATTEMPTS) {
     return { ok: false, reason: "locked" };
+  }
+
+  /*
+   * The address's own budget, not this row's.
+   *
+   * Every other limit here is per row, and this is the endpoint that makes that
+   * a problem: five rows each resending to their per-row cap is 25 messages to
+   * one inbox, and nothing in the per-row counters can see the other four rows.
+   * `MAX_PENDING_PER_EMAIL` cannot cover it either — it counts rows, and no new
+   * row is created here.
+   */
+  const census = await censusForAddress(pending.email);
+  if (census.sends >= MAX_SENDS_PER_EMAIL) {
+    return {
+      ok: false,
+      reason: "address_exhausted",
+      retryAfter: secondsUntilRelief(census.earliestExpiry),
+    };
   }
 
   const code = generateOtp();
@@ -742,27 +811,34 @@ const startPendingSignup = async ({ name, email, password, user = null }) => {
   const address = String(email).toLowerCase();
 
   /*
-   * Bound the codes in flight for one address — each is somebody's inbox getting
+   * Bound what one address has in flight — each row is somebody's inbox getting
    * mail they may not have asked for.
    *
-   * When an email address already has MAX_PENDING_PER_EMAIL active pending rows,
-   * new signup attempts for that email are rejected with a 429 rather than
-   * evicting existing rows. This prevents an attacker from cycling and spamming
-   * a victim's inbox indefinitely or invalidating their live verification codes.
+   * Rejecting rather than evicting is the point: evicting the oldest row would
+   * let an attacker who can pay the IP limit cycle a victim's inbox forever and
+   * invalidate the victim's live code every time round.
+   *
+   * This first look is only a fast path — it saves a bcrypt hash and a write in
+   * the common case. It is *not* the limit; see the re-check after the insert.
    */
-  const live = await PendingSignup.find({ email: address, expiresAt: { $gt: new Date() } })
-    .sort({ expiresAt: 1 })
-    .select("_id expiresAt")
-    .lean();
+  const before = await censusForAddress(address);
 
-  if (live.length >= MAX_PENDING_PER_EMAIL) {
-    const earliestExpiry = live[0]?.expiresAt ? new Date(live[0].expiresAt).getTime() : Date.now() + OTP_TTL_MS;
-    const retryAfter = Math.max(1, Math.ceil((earliestExpiry - Date.now()) / 1000));
+  if (before.rows >= MAX_PENDING_PER_EMAIL) {
     return {
       ok: false,
       status: 429,
       error: "Too many pending verification attempts for this email. Please check your inbox or try again in a few minutes.",
-      retryAfter,
+      retryAfter: secondsUntilRelief(before.earliestExpiry),
+      retryable: false,
+    };
+  }
+
+  if (before.sends >= MAX_SENDS_PER_EMAIL) {
+    return {
+      ok: false,
+      status: 429,
+      error: "Too many verification emails have been sent to this address. Please check your inbox or try again in a few minutes.",
+      retryAfter: secondsUntilRelief(before.earliestExpiry),
       retryable: false,
     };
   }
@@ -793,6 +869,67 @@ const startPendingSignup = async ({ name, email, password, user = null }) => {
     expiresAt: new Date(Date.now() + OTP_TTL_MS),
     resendCount: 1,
   });
+
+  /*
+   * Re-count now that the row exists, and drop our own if it is the excess one.
+   *
+   * The check above cannot be the limit. It read a count and then wrote, with a
+   * bcrypt hash in between — a window of order 100ms — so requests arriving
+   * together all read the same number, all decide they are under the cap, and
+   * the cap becomes "five, plus however many fit in one round trip". That is
+   * the same flaw `claimAttempt` documents and closes for the guess budget, and
+   * it defeats exactly the attacker this cap names: many IPs doing together
+   * what one cannot do alone.
+   *
+   * Ranking by `_id` and trimming from the end is what makes concurrent racers
+   * agree. ObjectIds are a total order every racer computes identically, and
+   * each deletes only its own row, so the rows that survive are the first
+   * `MAX_PENDING_PER_EMAIL` by creation — no eviction of anybody's live code,
+   * which is the property this whole cap exists for. `expiresAt` could not be
+   * used for the ranking: a resend rewrites it.
+   *
+   * Done before the email, so a rejected attempt sends no mail.
+   *
+   * ── What this still does not guarantee ──────────────────────────────────
+   *
+   * A racer whose read lands before another racer's insert undercounts and
+   * keeps itself, so the cap can be overshot by however many inserts fit
+   * inside one read. That residue is deliberate, not overlooked.
+   *
+   * Closing it properly needs the one primitive Mongo has for "at most N per
+   * key": a bounded slot with a unique index on `(email, slot)`. Slots have to
+   * be *reused* to stay bounded, and reuse means writing a new signup's
+   * credentials into an existing row — which breaks the binding this model
+   * exists to protect. `hashOtp` is keyed on `_id` and the verification ticket
+   * names a row by `_id`, so a reused row lets a ticket someone still holds
+   * name a signup that is now somebody else's, applying their password. That
+   * is the pre-hijack described at the top of PendingSignup.js, reintroduced
+   * by the mechanism meant to tighten a counter. Avoiding it means a fresh
+   * `_id` per claim, which means delete-then-insert, which is not atomic —
+   * back where we started.
+   *
+   * So the row cap is best-effort by design, and `MAX_SENDS_PER_EMAIL` is what
+   * actually bounds the inbox: it is checked on every send rather than every
+   * row, its own overshoot is bounded by the live row count, and an extra row
+   * buys an attacker one extra email against that budget rather than five.
+   */
+  const contenders = await PendingSignup.find({ email: address, expiresAt: { $gt: new Date() } })
+    .sort({ _id: 1 })
+    .select("_id")
+    .lean();
+  const rank = contenders.findIndex((candidate) => String(candidate._id) === String(_id));
+
+  if (rank >= MAX_PENDING_PER_EMAIL) {
+    await PendingSignup.deleteOne({ _id });
+    const census = await censusForAddress(address);
+    return {
+      ok: false,
+      status: 429,
+      error: "Too many pending verification attempts for this email. Please check your inbox or try again in a few minutes.",
+      retryAfter: secondsUntilRelief(census.earliestExpiry),
+      retryable: false,
+    };
+  }
 
   try {
     await sendOtpEmail(address, code);
@@ -1598,6 +1735,21 @@ export const resendOtp = async (req, res) => {
         return res.status(429).json({
           error: "Too many incorrect codes. Please start over.",
           locked: true,
+        });
+      }
+      /*
+       * The address is out of emails, not this row. Answered as a cooldown
+       * rather than a dead end: a row expiring frees the budget, and quoting
+       * `retryAfter` lets the client's resend countdown correct itself to that
+       * deadline the same way it does for the per-row cooldown.
+       */
+      if (sent.reason === "address_exhausted") {
+        if (sent.retryAfter) {
+          res.set("Retry-After", String(sent.retryAfter));
+        }
+        return res.status(429).json({
+          error: "Too many verification emails have been sent to this address. Please check your inbox and try again in a few minutes.",
+          retryAfter: sent.retryAfter,
         });
       }
       return res.status(429).json({
