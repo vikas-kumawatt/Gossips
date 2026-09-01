@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
 import UserSession from "../models/UserSession.js";
+import { resolveFirebaseCredential } from "./firebaseAdmin.js";
 
 /**
  * Push delivery.
@@ -28,7 +28,7 @@ let warned = false;
 /**
  * Get the Messaging client, initialising firebase-admin if nobody else has.
  *
- * Three sources, in this order, because the app already had credentials in the second
+ * Two sources, in this order, because the app already had credentials in the second
  * form and this used to ignore them:
  *
  *   1. **An app somebody else already initialised.** `controllers/authController.js`
@@ -36,13 +36,12 @@ let warned = false;
  *      using the same service account. This function used to `return null` on a
  *      missing `FIREBASE_SERVICE_ACCOUNT` *before* looking — so push reported itself
  *      disabled while a fully credentialed default app sat in the same process.
- *   2. **`FIREBASE_PROJECT_ID` / `FIREBASE_PRIVATE_KEY` / `FIREBASE_CLIENT_EMAIL`** —
- *      the decomposed form, which is the three fields `cert()` actually consumes and
- *      what every platform's env-var UI recommends, because a one-line JSON blob's
- *      `\n` escapes get mangled in transit.
- *   3. **`FIREBASE_SERVICE_ACCOUNT`** — the whole JSON, or a path to a file holding it.
+ *   2. **`resolveFirebaseCredential()`**, which understands every env shape the
+ *      project accepts. It lives in utils/firebaseAdmin.js rather than here
+ *      because auth needs the same answer, and the copy it kept instead
+ *      recognised fewer shapes — reproducing the bug in (1) in reverse.
  *
- * Any one of them is enough.
+ * Either is enough.
  */
 const init = async () => {
   if (initialised) return messaging;
@@ -66,7 +65,7 @@ const init = async () => {
       return messaging;
     }
 
-    const credential = resolveCredential();
+    const credential = resolveFirebaseCredential();
     if (!credential) return null;
 
     admin.initializeApp({ credential: admin.credential.cert(credential) });
@@ -78,40 +77,12 @@ const init = async () => {
   return messaging;
 };
 
-/** The credential object, from whichever env shape is present, or null. */
-const resolveCredential = () => {
-  const { FIREBASE_PROJECT_ID, FIREBASE_PRIVATE_KEY, FIREBASE_CLIENT_EMAIL } = process.env;
-  if (FIREBASE_PROJECT_ID && FIREBASE_PRIVATE_KEY && FIREBASE_CLIENT_EMAIL) {
-    return {
-      projectId: FIREBASE_PROJECT_ID,
-      /*
-       * `\n` un-escaped, matching what authController does. A private key stored in an
-       * env var almost always arrives with literal backslash-n rather than real
-       * newlines, and `cert()` rejects it with an opaque PEM error.
-       */
-      privateKey: FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-      clientEmail: FIREBASE_CLIENT_EMAIL,
-    };
-  }
-
-  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
-  if (!raw) return null;
-  try {
-    return raw.trim().startsWith("{") ? JSON.parse(raw) : readCredentialFile(raw);
-  } catch (error) {
-    console.error("Push: FIREBASE_SERVICE_ACCOUNT could not be read:", error.message);
-    return null;
-  }
-};
-
-/**
- * Read the JSON from a path.
- *
- * `readFileSync` rather than a dynamic `import(… { type: "json" })`: the import
- * assertion form needs a file URL, breaks on a Windows path, and would make
- * `resolveCredential` async for one of its three branches.
+/*
+ * `resolveCredential` used to live here, and was the only place that understood
+ * all three env shapes — `authController` had its own narrower copy, so the two
+ * disagreed about whether Firebase was configured. Both now read the shared
+ * resolver in utils/firebaseAdmin.js.
  */
-const readCredentialFile = (path) => JSON.parse(readFileSync(path, "utf8"));
 
 /**
  * Live push tokens for a user, split by platform.

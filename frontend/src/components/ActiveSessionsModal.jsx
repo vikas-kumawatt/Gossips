@@ -164,6 +164,15 @@ const ActiveSessionsModal = ({ isOpen, onClose }) => {
                             <CheckCircle className="w-3 h-3" /> Current Device
                           </span>
                         )}
+                        {/* Only shown when it means something: the server now
+                            sends this only for a device that passed a 2FA
+                            challenge and was remembered, and only while that
+                            is still in date. */}
+                        {s.isTrusted && (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full">
+                            <Shield className="w-3 h-3" /> Trusted
+                          </span>
+                        )}
                       </div>
                       <div className="text-xs text-neutral-400 mt-0.5 space-y-0.5">
                         {s.ipAddress && (
@@ -172,6 +181,9 @@ const ActiveSessionsModal = ({ isOpen, onClose }) => {
                           </p>
                         )}
                         <p>Last active: {formatTime(s.lastActiveAt)}</p>
+                        {s.isTrusted && s.trustedUntil && (
+                          <p>Skips 2FA until {formatTime(s.trustedUntil)}</p>
+                        )}
                       </div>
                     </div>
                   </div>

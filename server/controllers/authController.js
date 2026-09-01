@@ -31,6 +31,8 @@ import {
 } from "../config/jwt.js";
 import { revokeAccessToken } from "../utils/tokenRevocation.js";
 import { verifyTotpCode, verifyBackupCode } from "../utils/twoFactor.js";
+import { deviceIsTrusted, trustDevice } from "../utils/trustedDevices.js";
+import { resolveFirebaseCredential, describeMissingFirebaseConfig } from "../utils/firebaseAdmin.js";
 
 /**
  * Outbound email, and why a missing configuration is no longer fatal.
@@ -105,34 +107,48 @@ if (!mailConfigured) {
   });
 }
 
-const MISSING_FIREBASE_VARS = [
-  !process.env.FIREBASE_PROJECT_ID && "FIREBASE_PROJECT_ID",
-  !process.env.FIREBASE_PRIVATE_KEY && "FIREBASE_PRIVATE_KEY",
-  !process.env.FIREBASE_CLIENT_EMAIL && "FIREBASE_CLIENT_EMAIL",
-].filter(Boolean);
+/*
+ * Credential resolution is shared with push notifications rather than repeated
+ * here — see utils/firebaseAdmin.js for why the two disagreeing was a bug and
+ * not a detail. This module only decides what to do about the answer.
+ */
+const firebaseCredential = resolveFirebaseCredential();
 
-export const firebaseConfigured = MISSING_FIREBASE_VARS.length === 0;
+export const firebaseConfigured = Boolean(firebaseCredential);
 
 if (firebaseConfigured) {
   try {
-    const serviceAccountKey = {
-      projectId: process.env.FIREBASE_PROJECT_ID,
-      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, "\n"),
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    };
     if (admin.apps.length === 0) {
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccountKey),
-      });
+      admin.initializeApp({ credential: admin.credential.cert(firebaseCredential) });
     }
   } catch (error) {
     console.error("Firebase admin initialization failed:", error?.message);
   }
 } else {
   console.warn(
-    `Firebase disabled: missing ${MISSING_FIREBASE_VARS.join(", ")}. Google sign-in will fail; other auth routes run.`
+    `Firebase disabled: ${describeMissingFirebaseConfig()}. Google sign-in will fail; other auth routes run.`
   );
 }
+
+/**
+ * Is there a Firebase app to verify an ID token with, right now?
+ *
+ * Asked per request rather than read off `firebaseConfigured`, because the app
+ * may have been initialised *after* this module loaded: push notifications
+ * initialise lazily on the first send, from the same credentials. Refusing
+ * Google sign-in in that state would be reporting a configuration problem that
+ * the process has already disproved.
+ *
+ * `admin.app()` throws when there is no default app, which is the documented
+ * way to ask and is stable across firebase-admin majors, unlike `admin.apps`.
+ */
+const firebaseAppReady = () => {
+  try {
+    return Boolean(admin.app());
+  } catch {
+    return false;
+  }
+};
 
 const ACCESS_TOKEN_EXPIRY = "15m";
 const REFRESH_TOKEN_EXPIRY_DAYS = 7;
@@ -243,9 +259,15 @@ const storeRefreshToken = async (userId, refreshToken, deviceId) => {
         refreshTokenExpiresAt: expiresAt,
         lastActiveAt: new Date(),
         isCurrent: true,
-        isTrusted: true,
-        trustedAt: new Date(),
         revokedAt: null,
+        /*
+         * `isTrusted` deliberately absent. It used to be set to `true` here,
+         * which meant every refresh and every account switch re-granted trust
+         * and no device could ever be untrusted. Trust is granted in one place
+         * only — `trustDevice`, after a passed two-factor challenge — and
+         * leaving the fields unmentioned is what lets this upsert keep existing
+         * trust without being able to invent any.
+         */
       },
     },
     { upsert: true, new: true },
@@ -1240,8 +1262,31 @@ export const loginUser = async (req, res) => {
       user.accountStatus = "active";
     }
 
-    // Two-Factor Authentication gate
-    if (!(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
+    /*
+     * Which device this is, read before the second factor rather than after,
+     * because whether it is trusted decides whether there is one.
+     */
+    const deviceId = requestDeviceId(req);
+    const existingSession = await UserSession.findOne({
+      user: user._id,
+      deviceId,
+      revokedAt: null,
+      refreshTokenExpiresAt: { $gt: new Date() },
+    }).lean();
+    const trustedDevice = deviceIsTrusted(existingSession);
+
+    /*
+     * Two-Factor Authentication gate, skipped on a device that has already
+     * passed one and been remembered.
+     *
+     * This is the trade the feature makes and it is worth stating plainly: for
+     * `TRUSTED_DEVICE_DURATION_MS`, the password plus this device is enough,
+     * and the second factor is not asked for. It is the behaviour every large
+     * social app offers, and the exposure is bounded by the person's own
+     * ability to end it — logging the device out from Active Sessions, or a
+     * password reset, deletes the session row and with it the trust.
+     */
+    if (!trustedDevice && !(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
 
     /*
      * Both factors are in: clear any lingering failed attempt count or lockout.
@@ -1259,18 +1304,30 @@ export const loginUser = async (req, res) => {
 
     recordSignInCountry(req, user._id);
 
-    const deviceId = requestDeviceId(req);
-    const existingSession = await UserSession.findOne({
-      user: user._id,
-      deviceId,
-      revokedAt: null,
-      refreshTokenExpiresAt: { $gt: new Date() },
-    }).lean();
-    const isTrustedDevice = Boolean(existingSession?.isTrusted);
-
     const token = await issueAuthTokens(user._id, res, {
       deviceId,
     });
+
+    /*
+     * Remember this device, if a challenge was actually passed just now and the
+     * person asked for it.
+     *
+     * After `issueAuthTokens`, because on a first sign-in from a new device the
+     * session row this writes to does not exist until then.
+     *
+     * `user.twoFactorEnabled && !trustedDevice` is what proves a challenge
+     * happened in *this* request: reaching here with both true means the gate
+     * above ran `passesTwoFactor` and it returned true. Trust is meaningless
+     * without 2FA — there would be nothing to skip — so an account with it off
+     * cannot accumulate trusted devices and then have them honoured if it is
+     * later turned on.
+     */
+    const rememberDevice = req.body?.rememberDevice === true;
+    const deviceNowTrusted =
+      trustedDevice || (user.twoFactorEnabled && rememberDevice);
+    if (user.twoFactorEnabled && !trustedDevice && rememberDevice) {
+      await trustDevice(user._id, deviceId);
+    }
 
     res.status(200).json({
       message: "Login successful",
@@ -1285,7 +1342,7 @@ export const loginUser = async (req, res) => {
       isVerified: user.isVerified,
       role: user.role,
       counts: user.counts,
-      isTrustedDevice,
+      isTrustedDevice: deviceNowTrusted,
       token,
     });
   } catch (error) {
@@ -1296,7 +1353,7 @@ export const loginUser = async (req, res) => {
 
 export const googleLogin = async (req, res) => {
   try {
-    if (!firebaseConfigured || admin.apps.length === 0) {
+    if (!firebaseAppReady()) {
       return res.status(503).json({
         error: "Google sign-in is not configured on this server.",
       });
@@ -1307,6 +1364,7 @@ export const googleLogin = async (req, res) => {
     }
     const decodedToken = await admin.auth().verifyIdToken(idToken);
     let { email, name, picture } = decodedToken;
+    const deviceId = requestDeviceId(req);
 
     /*
      * Google says it verified this address, not merely that it issued a token.
@@ -1347,6 +1405,10 @@ export const googleLogin = async (req, res) => {
     let user = await User.findOne({ email, ...HUMAN_ACCOUNT })
       .select("+googleId +failedLoginAttempts +lockoutUntil +twoFactorSecret +twoFactorBackupCodes");
     let newUser = false;
+    // Both stay false for a brand-new account: it has no 2FA to challenge and
+    // so no trust to grant or honour.
+    let trustedDevice = false;
+    let challengePassed = false;
 
     if (!user) {
       newUser = true;
@@ -1408,7 +1470,19 @@ export const googleLogin = async (req, res) => {
        * every mutation above this point is in-memory or in `updateData`.
        */
       if (rejectIfLockedOut(user, res)) return;
-      if (!(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
+
+      // Same trusted-device skip as the password path — a device the person has
+      // already challenged and remembered is trusted whichever way they sign in.
+      const existingSession = await UserSession.findOne({
+        user: user._id,
+        deviceId,
+        revokedAt: null,
+        refreshTokenExpiresAt: { $gt: new Date() },
+      }).lean();
+      trustedDevice = deviceIsTrusted(existingSession);
+
+      if (!trustedDevice && !(await passesTwoFactor(user, req.body?.twoFactorCode, res))) return;
+      challengePassed = user.twoFactorEnabled && !trustedDevice;
 
       if (user.failedLoginAttempts > 0 || user.lockoutUntil) {
         updateData.failedLoginAttempts = 0;
@@ -1431,9 +1505,11 @@ export const googleLogin = async (req, res) => {
 
     recordSignInCountry(req, user._id);
 
-    const token = await issueAuthTokens(user._id, res, {
-      deviceId: requestDeviceId(req),
-    });
+    const token = await issueAuthTokens(user._id, res, { deviceId });
+
+    if (challengePassed && req.body?.rememberDevice === true) {
+      await trustDevice(user._id, deviceId);
+    }
 
     res.status(200).json({
       message: "Login successful",
@@ -2389,7 +2465,7 @@ export const listSessions = async (req, res) => {
       revokedAt: null,
     })
       .sort({ lastActiveAt: -1, createdAt: -1 })
-      .select("deviceId deviceType os browser appVersion ipAddress userAgent isTrusted trustedAt lastActiveAt createdAt")
+      .select("deviceId deviceType os browser appVersion ipAddress userAgent isTrusted trustedAt trustedUntil lastActiveAt createdAt")
       .lean();
 
     const mapped = sessions.map((s) => ({
@@ -2400,8 +2476,15 @@ export const listSessions = async (req, res) => {
       browser: s.browser || "Browser",
       ipAddress: s.ipAddress || "",
       userAgent: s.userAgent || "",
-      isTrusted: Boolean(s.isTrusted),
-      trustedAt: s.trustedAt,
+      /*
+       * Expiry applied here, not just stored. This is the row a person reads
+       * when deciding whether a device is theirs, so it must not describe a
+       * device as trusted once the window has closed — and until now it
+       * described every device that way unconditionally.
+       */
+      isTrusted: deviceIsTrusted(s),
+      trustedAt: deviceIsTrusted(s) ? s.trustedAt : null,
+      trustedUntil: deviceIsTrusted(s) ? s.trustedUntil : null,
       lastActiveAt: s.lastActiveAt,
       createdAt: s.createdAt,
       isCurrent: s.deviceId === currentDeviceId,

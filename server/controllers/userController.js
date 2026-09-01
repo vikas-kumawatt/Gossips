@@ -13,6 +13,7 @@ import UserSettings from "../models/UserSettings.js";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { revokeAccessToken } from "../utils/tokenRevocation.js";
+import { untrustAllDevices } from "../utils/trustedDevices.js";
 import {
   generateTotpSecret,
   verifyTotpCode,
@@ -2014,6 +2015,17 @@ export const enableTwoFactor = async (req, res) => {
       }
     );
 
+    /*
+     * Start from no trusted devices, whatever came before.
+     *
+     * A trusted device skips the second factor, so trust granted under a
+     * previous secret must not carry over into this one — otherwise turning 2FA
+     * off and back on (the obvious move after a suspected compromise) would
+     * protect nothing on exactly the devices an attacker had already used. The
+     * person re-earns trust the next time they sign in and are challenged.
+     */
+    await untrustAllDevices(req.user._id);
+
     return res.status(200).json({
       message: "Two-factor authentication enabled successfully",
       twoFactorEnabled: true,
@@ -2053,6 +2065,11 @@ export const disableTwoFactor = async (req, res) => {
         },
       }
     );
+
+    // Trust only ever meant "has passed a challenge for this secret", and there
+    // is no secret now. Leaving the flags set would show devices as trusted in
+    // Active Sessions with nothing behind the claim.
+    await untrustAllDevices(req.user._id);
 
     return res.status(200).json({
       message: "Two-factor authentication disabled",

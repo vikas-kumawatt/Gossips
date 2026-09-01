@@ -6,7 +6,7 @@ import { UserContext } from "../contexts/UserContext";
 import { Toaster, toast } from "react-hot-toast";
 import axios from "axios";
 import { persistUser } from "../services/authSession";
-import { authWithGoogle } from "../common/Firebase";
+import { authWithGoogle, isFirebaseConfigured } from "../common/Firebase";
 import { Loader2 } from "lucide-react";
 import { Icons } from "../components/icons";
 import DotQRCode from "../components/DotQRCode";
@@ -68,6 +68,27 @@ const UserAuthForm = ({ type }) => {
    */
   const [pendingTwoFactor, setPendingTwoFactor] = useState(null);
   const [twoFactorCode, setTwoFactorCode] = useState("");
+  /*
+   * "Don't ask again on this device" — sent only with the code, and only
+   * honoured by the server on a request that actually passed the challenge.
+   * Defaults off: skipping the second factor for 30 days is a choice the person
+   * should make deliberately, not one a pre-ticked box makes for them.
+   */
+  const [rememberDevice, setRememberDevice] = useState(false);
+
+  /*
+   * The server said it has no Firebase project, so stop offering Google.
+   *
+   * The client decides whether Google sign-in exists from `VITE_FIREBASE_*` and
+   * the server decides from its own credentials, and a deployment can have one
+   * without the other — in which case the popup completes, the token is minted,
+   * and `/auth/googlelogin` answers 503. Learned from that 503 rather than from
+   * a config endpoint on purpose: an endpoint would make every visitor wait on
+   * a request (or watch the button vanish) to spare a misconfigured deployment
+   * one wasted popup. Not persisted, so fixing the server config and reloading
+   * brings the button straight back.
+   */
+  const [googleUnavailable, setGoogleUnavailable] = useState(false);
 
   /*
    * Hand an unfinished signup to the OTP screen.
@@ -165,6 +186,12 @@ const UserAuthForm = ({ type }) => {
     } catch (error) {
       const failure = error.response?.data;
       const message = failure?.error || "Authentication failed";
+
+      // 503 from this route means the server has no Firebase credentials —
+      // a deployment fact, not something a retry can change.
+      if (error.response?.status === 503 && serverRoute === "/auth/googleLogin") {
+        setGoogleUnavailable(true);
+      }
       /*
        * A wrong code now counts toward the same lockout a wrong password does,
        * so the count has to be visible here — otherwise the fifth typo locks
@@ -241,12 +268,14 @@ const UserAuthForm = ({ type }) => {
     userAuthThroughServer(pendingTwoFactor.route, {
       ...pendingTwoFactor.payload,
       twoFactorCode: code,
+      rememberDevice,
     });
   };
 
   const cancelTwoFactor = () => {
     setPendingTwoFactor(null);
     setTwoFactorCode("");
+    setRememberDevice(false);
   };
 
   const handleGoogleAuth = async (e) => {
@@ -330,6 +359,23 @@ const UserAuthForm = ({ type }) => {
               className="input-box tracking-[0.3em] text-center"
             />
           </div>
+
+          <label className="mb-4 flex w-full cursor-pointer items-start gap-3 text-left text-sm text-neutral-400">
+            <input
+              type="checkbox"
+              name="rememberDevice"
+              checked={rememberDevice}
+              onChange={(e) => setRememberDevice(e.target.checked)}
+              className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer accent-white"
+            />
+            <span>
+              Trust this device for 30 days
+              <span className="block text-neutral-500">
+                We won't ask for a code here again. Don't tick this on a shared
+                computer.
+              </span>
+            </span>
+          </label>
 
           <button
             type="submit"
@@ -462,21 +508,35 @@ const UserAuthForm = ({ type }) => {
               : "Have an account? Log in"}
           </Link>
 
-          <div className="w-[80%] flex items-center justify-center my-4">
-            <hr className="w-[80%] border-neutral-500 my-4" />
-            <p className="text-neutral-500 text-center px-2">or</p>
-            <hr className="w-[80%] border-neutral-500 my-4" />
-          </div>
+          {/*
+            * Offered only where both halves of the deployment have Firebase.
+            *
+            * `isFirebaseConfigured` is what this build knows at load time;
+            * `googleUnavailable` is what the server told us by answering 503.
+            * Without either check the button is a control whose entire
+            * behaviour is an error toast — and the error reads as "Google
+            * rejected you" to anyone who doesn't know the deployment's env
+            * vars. Not rendering it is the honest version of the same check.
+            */}
+          {isFirebaseConfigured && !googleUnavailable && (
+            <>
+              <div className="w-[80%] flex items-center justify-center my-4">
+                <hr className="w-[80%] border-neutral-500 my-4" />
+                <p className="text-neutral-500 text-center px-2">or</p>
+                <hr className="w-[80%] border-neutral-500 my-4" />
+              </div>
 
-          <button
-            type="submit"
-            className="w-[100%] rounded-xl p-4 text-white font-medium bg-neutral-950 border border-neutral-800 cursor-pointer flex items-center justify-center gap-2"
-            onClick={handleGoogleAuth}
-            disabled={loading}
-          >
-           <Icons.google className="mr-2 h-4 w-4" />
-            Continue with Google
-          </button>
+              <button
+                type="submit"
+                className="w-[100%] rounded-xl p-4 text-white font-medium bg-neutral-950 border border-neutral-800 cursor-pointer flex items-center justify-center gap-2"
+                onClick={handleGoogleAuth}
+                disabled={loading}
+              >
+                <Icons.google className="mr-2 h-4 w-4" />
+                Continue with Google
+              </button>
+            </>
+          )}
         </form>
       )}
 
