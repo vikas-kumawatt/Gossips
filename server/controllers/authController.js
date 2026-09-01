@@ -435,12 +435,27 @@ const MAX_NAME_LENGTH = 200;
  */
 const SIGNUP_BCRYPT_COST = 10;
 /*
- * Matches `OTP_TTL_MS` (10 minutes). Each resend pushes the row's expiry out
- * another ten minutes and mints a fresh verification ticket, so the client and
- * database remain strictly synchronized and a user cannot sit on a stale ticket
- * after an OTP has expired.
+ * The longest a signup can legitimately stay open, not the life of one code.
+ *
+ * The row's `expiresAt` is the real deadline and every handler that reads a
+ * ticket checks it (with a 410 that tells the user to ask for a new code). The
+ * ticket's own `exp` is a backstop for a token whose row is already gone, where
+ * `sid` matches nothing and both handlers refuse anyway.
+ *
+ * It used to be `"10m"`, matched to `OTP_TTL_MS` — which sounds tighter and
+ * bought nothing the row check wasn't already doing, while breaking a case it
+ * created: a resend pushes the row out another ten minutes and mints a fresh
+ * ticket, so if that response never reaches the client (dropped connection,
+ * closed tab, flaky mobile network) the client keeps a ticket that expires
+ * while its row is still alive. The user then gets "please sign up again" and
+ * loses a live signup with a valid code sitting in their inbox.
+ *
+ * `OTP_MAX_SENDS` is what bounds this: the row is created with `resendCount: 1`
+ * and resends stop at the cap, so at most `OTP_MAX_SENDS` windows of
+ * `OTP_TTL_MS` can be chained. A ticket cannot outlive the last row it could
+ * possibly name.
  */
-const VERIFICATION_TICKET_EXPIRY = "10m";
+const VERIFICATION_TICKET_TTL_SECONDS = (OTP_TTL_MS / 1000) * OTP_MAX_SENDS;
 
 /*
  * Bound to `JWT_SECRET` here so `utils/otp.js` stays pure and testable — that
@@ -464,7 +479,7 @@ const hashOtp = (pendingId, code) => hashOtpWith(process.env.JWT_SECRET, pending
  */
 const createVerificationTicket = (pendingId, email) =>
   jwt.sign({ sid: String(pendingId), typ: "verify", email }, getVerificationTicketSecret(), {
-    expiresIn: VERIFICATION_TICKET_EXPIRY,
+    expiresIn: VERIFICATION_TICKET_TTL_SECONDS,
   });
 
 const readVerificationTicket = (token) => {
@@ -605,7 +620,7 @@ const claimAttempt = async (pendingId) => {
  * Throttling is reported rather than thrown so the caller can decide; `sendOtpEmail`
  * still throws, because a code that was never delivered is a failure and not a state.
  *
- * @returns {Promise<{ok: true} | {ok: false, reason: "cooldown"|"exhausted", retryAfter?: number}>}
+ * @returns {Promise<{ok: true} | {ok: false, reason: "cooldown"|"exhausted"|"locked"|"delivery_failed", retryAfter?: number}>}
  */
 const reissueOtp = async (pending) => {
   const sinceLast = Date.now() - new Date(pending.lastSentAt).getTime();
@@ -618,6 +633,16 @@ const reissueOtp = async (pending) => {
   }
   if (pending.resendCount >= OTP_MAX_SENDS) {
     return { ok: false, reason: "exhausted" };
+  }
+  /*
+   * The guess budget belongs to the row and a resend deliberately does not
+   * refill it (see below). So once it is spent, a new code is a code that
+   * cannot be entered — mailing one would spend a real email to walk the user
+   * into the same 429, which is why every "request a new one" message on this
+   * path had to become "start over". Refuse here instead.
+   */
+  if (pending.attempts >= OTP_MAX_ATTEMPTS) {
+    return { ok: false, reason: "locked" };
   }
 
   const code = generateOtp();
@@ -660,6 +685,35 @@ const reissueOtp = async (pending) => {
     await sendOtpEmail(updated.email, code);
   } catch (error) {
     console.error("reissueOtp: verification email failed:", error?.code ?? error?.name);
+
+    /*
+     * Put the row back the way it was, because the write above already happened.
+     *
+     * Without this, a mail failure leaves the row holding the hash of a code
+     * nobody received *and* having invalidated the code the user may already
+     * have in their inbox — so a transient Brevo blip locks a signup out of a
+     * perfectly good code, having also spent one of `OTP_MAX_SENDS` and reset
+     * the cooldown. `startPendingSignup` avoids this by deleting its row; that
+     * is not the answer here, where there is a live code worth preserving.
+     *
+     * Restoring exact prior values rather than `$inc: -1` keeps it idempotent.
+     * Filtering on the hash we just wrote means a concurrent resend that did
+     * deliver — possible if this send hung past the 60s cooldown — wins and
+     * this rollback no-ops, which is the right way round: the deliverable code
+     * is the one that should survive.
+     */
+    await PendingSignup.updateOne(
+      { _id: updated._id, codeHash: updated.codeHash },
+      {
+        $set: {
+          codeHash: pending.codeHash,
+          lastSentAt: pending.lastSentAt,
+          expiresAt: pending.expiresAt,
+          resendCount: pending.resendCount,
+        },
+      },
+    );
+
     return {
       ok: false,
       reason: "delivery_failed",
@@ -1307,7 +1361,13 @@ export const verifyOtp = async (req, res) => {
       const stillThere = await PendingSignup.exists({ _id: ticket.sid });
       return stillThere
         ? res.status(429).json({
-            error: "Too many incorrect codes. Request a new one.",
+            /*
+             * Not "request a new one". A resend does not reset `attempts` — on
+             * purpose, see `reissueOtp` — so the budget is spent for the life of
+             * the row and only a fresh signup can move this forward. Telling
+             * someone to resend here sent them round a loop that could not end.
+             */
+            error: "Too many incorrect codes. Please start over.",
             locked: true,
           })
         : res.status(410).json({
@@ -1341,7 +1401,7 @@ export const verifyOtp = async (req, res) => {
       return res.status(400).json({
         error: left
           ? `That code isn't right. ${left} attempt${left === 1 ? "" : "s"} left.`
-          : "Too many incorrect codes. Request a new one.",
+          : "Too many incorrect codes. Please start over.",
         attemptsLeft: left,
         locked: left === 0,
       });
@@ -1527,6 +1587,17 @@ export const resendOtp = async (req, res) => {
           error: sent.error,
           ...(sent.retryAfter ? { retryAfter: sent.retryAfter } : {}),
           ...(sent.retryable !== undefined ? { retryable: sent.retryable } : {}),
+        });
+      }
+      /*
+       * The guess budget is spent, so a new code could not be entered even if
+       * it arrived. Same flag the verify endpoint uses, so the client has one
+       * dead-end state to render rather than two.
+       */
+      if (sent.reason === "locked") {
+        return res.status(429).json({
+          error: "Too many incorrect codes. Please start over.",
+          locked: true,
         });
       }
       return res.status(429).json({

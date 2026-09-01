@@ -4,11 +4,19 @@ import jwt from "jsonwebtoken";
 import { JWT_VERIFY_OPTIONS } from "../config/jwt.js";
 
 const TEST_SECRET = "test-jwt-secret-key-123456";
-const VERIFICATION_TICKET_EXPIRY = "10m";
+const OTP_TTL_MS = 10 * 60 * 1000;
+const OTP_MAX_SENDS = 5;
+/*
+ * The longest a signup can stay open, not the life of one code — see the
+ * comment on the real constant. A ticket pinned to a single OTP window expired
+ * while its row was still alive whenever a resend response failed to arrive,
+ * discarding a signup the server was still happy to finish.
+ */
+const VERIFICATION_TICKET_TTL_SECONDS = (OTP_TTL_MS / 1000) * OTP_MAX_SENDS;
 
 const createVerificationTicket = (pendingId, email, secret = TEST_SECRET) =>
   jwt.sign({ sid: String(pendingId), typ: "verify", email }, secret, {
-    expiresIn: VERIFICATION_TICKET_EXPIRY,
+    expiresIn: VERIFICATION_TICKET_TTL_SECONDS,
   });
 
 const readVerificationTicket = (token, secret = TEST_SECRET) => {
@@ -24,7 +32,7 @@ const readVerificationTicket = (token, secret = TEST_SECRET) => {
   }
 };
 
-test("createVerificationTicket sets exactly 10-minute (600s) expiry", () => {
+test("createVerificationTicket covers the longest a signup can stay open", () => {
   const pendingId = "68b0f3c1a2d4e5f60718293a";
   const email = "user@example.com";
   const token = createVerificationTicket(pendingId, email);
@@ -34,10 +42,37 @@ test("createVerificationTicket sets exactly 10-minute (600s) expiry", () => {
   assert.equal(decoded.typ, "verify");
   assert.equal(decoded.sid, pendingId);
   assert.equal(decoded.email, email);
-  assert.equal(decoded.exp - decoded.iat, 600, "Verification ticket must expire in exactly 600 seconds (10 minutes)");
+  assert.equal(
+    decoded.exp - decoded.iat,
+    3000,
+    "Ticket must outlive every OTP window a row can chain (OTP_TTL_MS × OTP_MAX_SENDS)",
+  );
 });
 
-test("readVerificationTicket accepts a valid 10-minute ticket and rejects invalid tokens", () => {
+test("verification ticket: survives a resend whose response never reached the client", () => {
+  /*
+   * The row is renewed for another OTP_TTL_MS on each resend. A ticket scoped
+   * to one window expires mid-signup whenever the client misses the fresh one;
+   * a ticket scoped to the chain does not.
+   */
+  const issuedAt = 0;
+  const ticketExpiresAt = issuedAt + VERIFICATION_TICKET_TTL_SECONDS;
+
+  // Worst case: every resend fires at the last possible moment.
+  let rowExpiresAt = issuedAt + OTP_TTL_MS / 1000;
+  for (let resend = 1; resend < OTP_MAX_SENDS; resend++) {
+    rowExpiresAt = rowExpiresAt + OTP_TTL_MS / 1000;
+    assert.ok(
+      ticketExpiresAt >= rowExpiresAt,
+      `ticket must still be valid at resend ${resend} (row alive until ${rowExpiresAt}s)`,
+    );
+  }
+
+  // And it must not outlive the last row it could possibly name.
+  assert.equal(ticketExpiresAt, rowExpiresAt);
+});
+
+test("readVerificationTicket accepts a valid ticket and rejects invalid tokens", () => {
   const pendingId = "68b0f3c1a2d4e5f60718293a";
   const email = "user@example.com";
   const token = createVerificationTicket(pendingId, email);

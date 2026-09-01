@@ -97,6 +97,21 @@ const VerifyOtpPage = () => {
   const [now, setNow] = useState(Date.now());
 
   /*
+   * This signup cannot be finished from this screen any more.
+   *
+   * Set when the server reports the guess budget spent (`locked`) or the send
+   * cap reached (`exhausted`). Neither is recoverable by resending: a resend
+   * deliberately does not refill the guess budget, and the send cap is the
+   * limit on resending itself. The page used to render both as ordinary errors
+   * next to a live "Resend code" button, which is advice that cannot be taken —
+   * so this collapses them into one state whose only exit is starting over.
+   *
+   * Never cleared. Both conditions belong to the pending row, and the row does
+   * not come back.
+   */
+  const [deadEnd, setDeadEnd] = useState(false);
+
+  /*
    * Every timeout this page starts, so unmounting cancels them. The success path
    * navigates on a delay to let the animation finish, and a user who hits Back
    * in that second must not be yanked forward again.
@@ -144,6 +159,19 @@ const VerifyOtpPage = () => {
 
   const resendIn = Math.max(0, Math.ceil((sentAt + resendAfterSeconds * 1000 - now) / 1000));
   const codeExpiresIn = Math.max(0, Math.ceil((sentAt + expiresInSeconds * 1000 - now) / 1000));
+
+  /*
+   * A hint, not a verdict — deliberately not part of `deadEnd`.
+   *
+   * This countdown runs from when *this tab* last got a response, against the
+   * client's own clock. The row's `expiresAt` is the real deadline and only the
+   * server knows it: the two disagree by the email-send latency at best, and
+   * completely if a resend succeeded but its response never arrived. So zero
+   * here means "probably expired" and both actions stay live — the code may yet
+   * verify, and a resend either renews a row that was alive all along or gets
+   * the 410 that ends this properly.
+   */
+  const codeHasExpired = codeExpiresIn === 0 && status !== "success";
 
   const abandon = (text, to) => {
     clearStored();
@@ -221,6 +249,10 @@ const VerifyOtpPage = () => {
         return;
       }
 
+      // Out of guesses. The server's message already says to start over; this
+      // is what makes the screen agree with it.
+      if (data?.locked) setDeadEnd(true);
+
       setStatus("error");
       setErrorNonce((n) => n + 1);
       setMessage(data?.error || "Couldn't check that code. Please try again.");
@@ -234,7 +266,7 @@ const VerifyOtpPage = () => {
   };
 
   const handleResend = async () => {
-    if (resending || resendIn > 0 || status === "success") return;
+    if (resending || resendIn > 0 || status === "success" || deadEnd) return;
 
     setResending(true);
     try {
@@ -244,12 +276,27 @@ const VerifyOtpPage = () => {
         { withCredentials: true },
       );
 
+      /*
+       * This is also the recovery path for a resend whose response was lost:
+       * the previous attempt renewed the row server-side, this one renews it
+       * again and hands back a ticket and a fresh origin for both countdowns,
+       * so a client that had drifted out of sync is back in step.
+       *
+       * The two windows are echoed back by the server, so take them from the
+       * response rather than leaving the values captured at signup in place.
+       */
       const freshlySentAt = Date.now();
       setSentAt(freshlySentAt);
       const nextSession = {
         ...session,
         sentAt: freshlySentAt,
         ...(data?.verificationToken ? { verificationToken: data.verificationToken } : {}),
+        ...(typeof data?.expiresInSeconds === "number"
+          ? { expiresInSeconds: data.expiresInSeconds }
+          : {}),
+        ...(typeof data?.resendAfterSeconds === "number"
+          ? { resendAfterSeconds: data.resendAfterSeconds }
+          : {}),
       };
       setSession(nextSession);
       writeStored(nextSession);
@@ -267,6 +314,15 @@ const VerifyOtpPage = () => {
       }
       if (data?.alreadyVerified) {
         abandon(data.error || "This email is already verified.", "/login");
+        return;
+      }
+
+      // Out of guesses, or out of sends. Either way this row is finished.
+      if (data?.locked || data?.exhausted) {
+        setDeadEnd(true);
+        setStatus("error");
+        setMessage(data.error || "This signup can't continue. Please start over.");
+        toast.error(data.error || "This signup can't continue. Please start over.");
         return;
       }
 
@@ -291,8 +347,6 @@ const VerifyOtpPage = () => {
       setResending(false);
     }
   };
-
-  const codeHasExpired = codeExpiresIn === 0 && status !== "success";
 
   return (
     <section className="relative flex h-screen w-full items-center justify-center bg-neutral-950">
@@ -381,7 +435,7 @@ const VerifyOtpPage = () => {
                 }}
                 onComplete={handleVerify}
                 length={codeLength}
-                disabled={submitting}
+                disabled={submitting || deadEnd}
                 status={status}
                 errorNonce={errorNonce}
               />
@@ -392,7 +446,7 @@ const VerifyOtpPage = () => {
                 role="status"
                 aria-live="polite"
                 className={`mt-4 min-h-[20px] text-center text-sm ${
-                  status === "error" ? "text-red-400" : "text-neutral-500"
+                  status === "error" || deadEnd ? "text-red-400" : "text-neutral-500"
                 }`}
               >
                 {message ||
@@ -401,42 +455,61 @@ const VerifyOtpPage = () => {
                     : `Code expires in ${mmss(codeExpiresIn)}`)}
               </p>
 
-              <button
-                type="button"
-                onClick={() => handleVerify(code)}
-                disabled={submitting || code.length !== codeLength}
-                className="mt-4 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-transparent bg-white p-4 font-medium text-black disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {submitting ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Verifying...
-                  </>
-                ) : (
-                  "Verify email"
-                )}
-              </button>
+              {/*
+                * Once this signup is finished, "Start over" becomes the primary
+                * action and takes the white button — the same promotion the
+                * login form gives its one real next step. Leaving Verify and
+                * Resend on screen, live and useless, is what made this feel
+                * broken rather than merely over.
+                */}
+              {deadEnd ? (
+                <Link
+                  to="/signup"
+                  onClick={clearStored}
+                  className="mt-4 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-transparent bg-white p-4 font-medium text-black"
+                >
+                  Start over
+                </Link>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => handleVerify(code)}
+                    disabled={submitting || code.length !== codeLength}
+                    className="mt-4 flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-transparent bg-white p-4 font-medium text-black disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {submitting ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Verifying...
+                      </>
+                    ) : (
+                      "Verify email"
+                    )}
+                  </button>
 
-              <button
-                type="button"
-                onClick={handleResend}
-                disabled={resending || resendIn > 0}
-                className="cursor-pointer pt-4 text-neutral-500 disabled:cursor-not-allowed hover:text-neutral-300 disabled:hover:text-neutral-500"
-              >
-                {resending
-                  ? "Sending..."
-                  : resendIn > 0
-                    ? `Resend code in ${resendIn}s`
-                    : "Resend code"}
-              </button>
+                  <button
+                    type="button"
+                    onClick={handleResend}
+                    disabled={resending || resendIn > 0}
+                    className="cursor-pointer pt-4 text-neutral-500 disabled:cursor-not-allowed hover:text-neutral-300 disabled:hover:text-neutral-500"
+                  >
+                    {resending
+                      ? "Sending..."
+                      : resendIn > 0
+                        ? `Resend code in ${resendIn}s`
+                        : "Resend code"}
+                  </button>
 
-              <Link
-                to="/signup"
-                onClick={clearStored}
-                className="pt-4 text-sm text-white"
-              >
-                Wrong email? Start over
-              </Link>
+                  <Link
+                    to="/signup"
+                    onClick={clearStored}
+                    className="pt-4 text-sm text-white"
+                  >
+                    Wrong email? Start over
+                  </Link>
+                </>
+              )}
             </Motion.div>
           )}
         </AnimatePresence>
