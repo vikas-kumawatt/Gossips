@@ -198,7 +198,17 @@ There is no "change password while signed in" endpoint at all — the only route
 
 **How it works:** `attachAuthInterceptors` (`services/authSession.js`) adds an axios response interceptor: on a 401 that isn't the refresh call itself, it calls `POST /auth/refresh` with the account id and an `X-Device-Id` header, dedupes concurrent refreshes behind one shared promise, and retries the original request once. Server-side, `refreshAccessToken` verifies the cookie (account-scoped `rt_<id>` first, shared `refreshToken` as fallback), asserts the token belongs to the requested account, rotates the `UserSession` row, and only moves the "active account" pointer when the refresh came through the shared cookie — so a background account refreshing can't silently become the foreground one.
 
-**Improved:** Rotates refresh tokens atomically in place (`UserSession.findOneAndUpdate`), preventing crash-induced logouts. Implements OAuth 2.0 / RFC 6819 refresh-token reuse detection (`previousRefreshTokenHash`) that immediately revokes all active sessions for the account upon replay of an already-consumed token.
+**Rotation is atomic.** `UserSession.findOneAndUpdate` filters on `{ _id, refreshTokenHash }` and swaps in the new hash, so it is a compare-and-swap on the row rather than a delete followed by a create — a crash mid-rotation can no longer leave the account with no session. The loser of a genuine race gets a 401 "rotation conflict" rather than a corrupted row.
+
+**Reuse detection (OAuth 2.0 / RFC 6819).** Rotation records the consumed hash in `previousRefreshTokenHash`. Presenting it again means one of two holders is a thief and the server cannot tell which, so it deletes every `UserSession` for the account and — see *Forgot / reset password* — sets the `sessionsValidFrom` cutoff that voids the access tokens already issued, ending the intrusion now rather than in fifteen minutes.
+
+**Two tabs are not a breach.** The client dedupes concurrent refreshes behind one shared promise, but that promise is module state and therefore *per tab*: two tabs are two JS contexts sharing one cookie, and a reload racing an open tab does the same. Both present the same token, one wins and rotates, and the loser is left holding what has just become `previousRefreshTokenHash` — indistinguishable from a replay unless the age of the rotation is considered. So an ordinary multi-tab moment revoked every session on the account and voided every access token, for a user who did nothing wrong: a false positive whose blast radius is the whole account.
+
+A consumed token is therefore answered for `REFRESH_ROTATION_GRACE_MS` (15 seconds) after its rotation, and only treated as a replay beyond that. The grace is deliberately narrow — a second tab's refresh lands in milliseconds, and 15 seconds covers a backgrounded tab waking on a slow connection with an order of magnitude to spare. What it hands back is bounded too: the loser gets an access token and nothing else, with no rotation and no new refresh cookie, because the winner's response already set the shared cookie in the same browser. Rotating for the loser as well would consume the winner's token and leave the browser holding a refresh cookie no session recognises — a logout by a slightly longer route.
+
+**How it's verified.** `test/tokenRotation.test.js` drives the real `refreshAccessToken`: rotation, in-place row identity, the two-tab race, reuse detection before and after the grace window, and that an unknown token is *not* reported as a detected breach (nuking sessions on any unrecognised string would be a denial of service anyone could trigger). Mutations: removing the grace window fails the two-tab case, making it unbounded fails 3 reuse cases, and rotating on the grace path fails the two-tab case.
+
+**Known limit.** `previousRefreshTokenHash` holds one generation, so a replay is detectable only until the *next* rotation overwrites it. A thief who sits on a stolen token across two rotations of victim activity gets a generic 401 instead of triggering the breach response. Closing that needs a lineage claim in the token — all tokens in a session sharing a family id, so any non-current member of a live family is reuse regardless of age.
 
 ### Device identification
 
@@ -330,6 +340,9 @@ Four things the fakes must get right, each of which otherwise makes a suite pass
 | Password reset stops voiding issued access tokens | 2 |
 | `logout-all` stops voiding other devices' tokens | 1 |
 | Cutoff compares milliseconds against `iat` seconds | 1 |
+| Remove the rotation grace window | 1 |
+| Make the grace window unbounded | 3 |
+| Rotate on the grace path as well | 1 |
 
 The row-cap mutation is worth noting: it initially failed *nothing*, because every test reached the cap sequentially and was stopped by the cheap pre-insert count. The post-insert enforcement — the part that actually holds under concurrency — was untested until a `Promise.all` case was added. Without the trim that case now produces 12 live rows against a cap of 5.
 

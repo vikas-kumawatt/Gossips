@@ -485,6 +485,16 @@ const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 /** Duration of temporary lockout following repeated failed login attempts (15 minutes). */
 const ACCOUNT_LOCKOUT_DURATION_MS = 15 * 60 * 1000;
 /*
+ * How long after a rotation the consumed refresh token is still answered.
+ *
+ * This is the width of the only hole in reuse detection, so it is kept to what
+ * a duplicate request in flight actually needs. A second tab's refresh lands
+ * within milliseconds; fifteen seconds covers a backgrounded tab waking on a
+ * slow mobile connection with an order of magnitude to spare. Beyond it, a
+ * consumed token is a replay and the account is burned down.
+ */
+const REFRESH_ROTATION_GRACE_MS = 15 * 1000;
+/*
  * Matches `maxlength` on `User.name` and `PendingSignup.name`. Checked in the
  * handler so an over-long name is a 400 the user can act on rather than a
  * ValidationError surfacing as a 500.
@@ -2218,10 +2228,15 @@ export const refreshAccessToken = async (req, res) => {
     }
 
     const tokenHash = hashToken(refreshToken);
-    const session = await UserSession.findOne({
+    let session = await UserSession.findOne({
       refreshTokenHash: tokenHash,
       refreshTokenExpiresAt: { $gt: new Date() },
     });
+    /*
+     * True when this request is the loser of a harmless race rather than a
+     * replay — see the grace window below. It skips rotation at the end.
+     */
+    let withinRotationGrace = false;
 
     if (!session) {
       // Refresh token reuse detection (OAuth 2.0 / RFC 6819):
@@ -2231,7 +2246,34 @@ export const refreshAccessToken = async (req, res) => {
         previousRefreshTokenHash: tokenHash,
       });
 
-      if (reusedSession) {
+      /*
+       * A token consumed *just now* is a duplicate in flight, not a theft.
+       *
+       * The client single-flights refresh, but only per tab — two tabs are two
+       * JS contexts sharing one cookie, and a reload racing an open tab does
+       * the same. Both present the same token; one wins and rotates, and the
+       * loser is then holding what has become `previousRefreshTokenHash`.
+       * Without this window that ordinary moment was indistinguishable from a
+       * replay, so a multi-tab user had every session revoked and every access
+       * token voided for doing nothing wrong — a false positive whose blast
+       * radius is the entire account.
+       *
+       * The loser gets an access token and nothing else: no rotation, no new
+       * refresh cookie. It does not need one, because the winner's response
+       * already set the shared cookie in the same browser. So the grace admits
+       * a bounded amount — one access token's worth — rather than handing back
+       * persistence.
+       */
+      const rotatedAt = reusedSession?.rotatedAt ? new Date(reusedSession.rotatedAt).getTime() : 0;
+      const sessionStillLive =
+        reusedSession &&
+        !reusedSession.revokedAt &&
+        reusedSession.refreshTokenExpiresAt > new Date();
+
+      if (sessionStillLive && Date.now() - rotatedAt <= REFRESH_ROTATION_GRACE_MS) {
+        session = reusedSession;
+        withinRotationGrace = true;
+      } else if (reusedSession) {
         // Malicious token reuse detected: an old rotated token was presented again.
         // Revoke all sessions for this account immediately to terminate the breach.
         console.warn(
@@ -2266,15 +2308,31 @@ export const refreshAccessToken = async (req, res) => {
         });
       }
 
-      return res
-        .status(401)
-        .json({ message: "Refresh token expired or revoked" });
+      // Not the current token, not a live rotation we can forgive, and not a
+      // known replay either — so simply nothing this server recognises.
+      if (!withinRotationGrace) {
+        return res
+          .status(401)
+          .json({ message: "Refresh token expired or revoked" });
+      }
     }
 
     const user = await User.findById(decoded.id);
     if (!user || ["deleted", "deactivated"].includes(user.accountStatus)) {
       await UserSession.deleteOne({ _id: session._id });
       return res.status(401).json({ message: "User not found or unavailable" });
+    }
+
+    /*
+     * The losing half of a race: hand back an access token and stop.
+     *
+     * Rotating again here would consume the *winner's* token as well, leaving
+     * the browser holding a refresh cookie that no session recognises — which
+     * turns a harmless duplicate into a logout by a slightly longer route. The
+     * shared cookie is already correct from the winner's response.
+     */
+    if (withinRotationGrace) {
+      return res.status(200).json({ token: createAccessToken(user._id), accountId: user._id });
     }
 
     // Atomic in-place rotation: generate new token and update the existing session row

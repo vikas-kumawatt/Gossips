@@ -110,6 +110,12 @@ test("reuse detection: replaying a consumed token revokes every session for the 
   const legitimate = (await refresh(stolen)).cookies.refreshToken;
   assert.ok(legitimate);
 
+  /*
+   * Past the in-flight grace window, so this is a replay rather than a second
+   * tab losing a race — see the two tests below for that distinction.
+   */
+  for (const row of db.sessions) row.rotatedAt = new Date(Date.now() - 10 * 60 * 1000);
+
   // The thief presents the token they captured before the rotation.
   const replay = await refresh(stolen);
 
@@ -127,12 +133,64 @@ test("reuse detection: replaying a consumed token revokes every session for the 
   assert.equal(after.statusCode, 401);
 });
 
+test("two tabs refreshing at once is not treated as a breach", async () => {
+  /*
+   * The client single-flights refresh, but only within one tab: `refreshRequest`
+   * is module state, and two tabs are two JS contexts sharing one cookie. So
+   * both can present the same refresh token within milliseconds of each other —
+   * a page reload racing an open tab does it too.
+   *
+   * Whichever loses that race presents a token that has just become the
+   * *previous* one, which is indistinguishable from a replay unless the age of
+   * the rotation is taken into account. Without a grace window this ordinary
+   * multi-tab moment revoked every session on the account and voided every
+   * access token, for a user who did nothing wrong.
+   */
+  const user = makeUser();
+  db.users.push(user);
+  const { cookies } = await signIn(user, "device-abcdef01");
+  await signIn(user, "device-abcdef02");
+  const shared = cookies.refreshToken;
+
+  const tabA = await refresh(shared);
+  assert.equal(tabA.statusCode, 200, "the winner rotates");
+
+  const tabB = await refresh(shared);
+
+  assert.equal(tabB.statusCode, 200, "the loser must recover, not be treated as a thief");
+  assert.ok(tabB.body.token, "and must come away with a usable access token");
+  assert.notEqual(tabB.body.reuseDetected, true);
+  assert.equal(db.sessions.length, 2, "no session may be revoked");
+  assert.equal(user.sessionsValidFrom ?? null, null, "and no account-wide token cutoff");
+});
+
+test("reuse detection: still fires once the grace window has passed", async () => {
+  const user = makeUser();
+  db.users.push(user);
+  const { cookies } = await signIn(user);
+  const stolen = cookies.refreshToken;
+
+  await refresh(stolen);
+
+  // Age the rotation past the grace window: this is no longer an in-flight
+  // duplicate, it is somebody presenting a token that was consumed a while ago.
+  const session = db.sessions[0];
+  session.rotatedAt = new Date(Date.now() - 10 * 60 * 1000);
+
+  const replay = await refresh(stolen);
+
+  assert.equal(replay.statusCode, 401);
+  assert.equal(replay.body.reuseDetected, true);
+  assert.equal(db.sessions.length, 0);
+});
+
 test("reuse detection: the replay response clears the cookie it was sent", async () => {
   const user = makeUser();
   db.users.push(user);
   const { cookies } = await signIn(user);
   const stolen = cookies.refreshToken;
   await refresh(stolen);
+  for (const row of db.sessions) row.rotatedAt = new Date(Date.now() - 10 * 60 * 1000);
 
   const replay = await refresh(stolen);
   assert.equal(replay.body.reuseDetected, true);
