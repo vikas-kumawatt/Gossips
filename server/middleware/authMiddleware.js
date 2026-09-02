@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 import { JWT_VERIFY_OPTIONS, isAccessToken, getAccessTokenSecret } from "../config/jwt.js";
 import { isTokenRevoked } from "../utils/tokenRevocation.js";
+import { isTokenBeforeCutoff } from "../utils/tokenCutoff.js";
 
 // Attaches req.user if a valid Bearer token is present; otherwise continues unauthenticated.
 export const optionalProtect = async (req, res, next) => {
@@ -13,7 +14,9 @@ export const optionalProtect = async (req, res, next) => {
         const decoded = jwt.verify(token, getAccessTokenSecret(), JWT_VERIFY_OPTIONS);
         if (isAccessToken(decoded) && !(await isTokenRevoked(token))) {
           const user = await User.findById(decoded.id).select("-password");
-          if (user) req.user = user;
+          // The account-wide cutoff applies here too, or a signed-out token
+          // would still colour these responses as somebody.
+          if (user && !isTokenBeforeCutoff(decoded, user)) req.user = user;
         }
       } catch {
         // invalid/expired token — proceed as unauthenticated
@@ -60,6 +63,19 @@ export const protect = async (req, res, next) => {
     const user = await User.findById(decoded.id).select("-password");
     if (!user) {
       return res.status(401).json({ message: "Unauthorized: User not found" });
+    }
+
+    /*
+     * Account-wide cutoff: was this token issued before a password reset, a
+     * "log out everywhere", or a detected refresh-token reuse?
+     *
+     * The denylist above can only block a token somebody handed us. These three
+     * actions have to void tokens the server has never seen — which is the whole
+     * point of them, since they are what a person does on discovering a
+     * compromise. See utils/tokenCutoff.js.
+     */
+    if (isTokenBeforeCutoff(decoded, user)) {
+      return res.status(401).json({ message: "Unauthorized: Token has been revoked" });
     }
 
     // Deleted and deactivated accounts keep a valid token until it expires.

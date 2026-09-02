@@ -201,11 +201,44 @@ const SCHEMA_DEFAULTS = {
   }),
 };
 
+/**
+ * Give a returned copy the document behaviour those handlers use.
+ *
+ * `forgotPassword` and `resetPassword` are the only auth handlers that mutate a
+ * mongoose *document* and call `save()` rather than issuing an `updateOne`, so
+ * without this they threw a TypeError and every test blamed the controller.
+ *
+ * `save()` merges the copy back over the stored row, and reproduces the one
+ * pre-save hook that matters here: `User` hashes a password that has been
+ * changed. Leaving that out would let `resetPassword` appear to store a
+ * plaintext password, which is exactly the kind of thing this suite is for.
+ */
+const asDocument = (name, rows, document) => {
+  if (!document || typeof document !== "object") return document;
+  Object.defineProperty(document, "save", {
+    enumerable: false,
+    value: async () => {
+      if (name === "User" && typeof document.password === "string" && !document.password.startsWith("hashed:")) {
+        document.password = `hashed:${document.password}`;
+      }
+      db.writes.push({ model: name, save: true, _id: document._id });
+      const stored = rows().find((row) => String(row._id) === String(document._id));
+      if (stored) Object.assign(stored, document);
+      else rows().push({ ...document });
+      return document;
+    },
+  });
+  return document;
+};
+
 /** A model backed by one array in `db`, recording every write. */
 const makeModel = (name, rows) => ({
-  find: (filter = {}) => makeQuery(copy(rows().filter((row) => matches(row, filter)))),
-  findOne: (filter = {}) => makeQuery(copy(rows().find((row) => matches(row, filter)) ?? null)),
-  findById: (id) => makeQuery(copy(rows().find((row) => String(row._id) === String(id)) ?? null)),
+  find: (filter = {}) =>
+    makeQuery(copy(rows().filter((row) => matches(row, filter))).map((d) => asDocument(name, rows, d))),
+  findOne: (filter = {}) =>
+    makeQuery(asDocument(name, rows, copy(rows().find((row) => matches(row, filter)) ?? null))),
+  findById: (id) =>
+    makeQuery(asDocument(name, rows, copy(rows().find((row) => String(row._id) === String(id)) ?? null))),
   countDocuments: async (filter = {}) => rows().filter((row) => matches(row, filter)).length,
   exists: async (filter = {}) => rows().some((row) => matches(row, filter)),
 

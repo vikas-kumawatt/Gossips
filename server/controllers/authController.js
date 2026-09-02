@@ -33,6 +33,7 @@ import { revokeAccessToken } from "../utils/tokenRevocation.js";
 import { verifyTotpCode, verifyBackupCode } from "../utils/twoFactor.js";
 import { deviceIsTrusted, trustDevice } from "../utils/trustedDevices.js";
 import { resolveFirebaseCredential, describeMissingFirebaseConfig } from "../utils/firebaseAdmin.js";
+import { invalidateIssuedTokens } from "../utils/tokenCutoff.js";
 
 /**
  * Outbound email, and why a missing configuration is no longer fatal.
@@ -1924,7 +1925,17 @@ export const forgotPassword = async (req, res) => {
     }
 
     const resetUrl = `${process.env.FRONTEND_URL}/reset-password/${resetToken}`;
-    await transporter.sendMail({
+    /*
+     * A failed send must answer exactly like an unknown address.
+     *
+     * Every other branch here is careful to be indistinguishable — an address
+     * with no account gets the same 200 and the same wording. But the send was
+     * awaited bare, so a transport failure fell to the 500 below: during any
+     * SMTP outage, "500" meant the address is registered and "200" meant it is
+     * not. That turns a mail problem into an account-enumeration oracle for as
+     * long as it lasts.
+     */
+    const deliverResetEmail = () => transporter.sendMail({
       from: process.env.BREVO_EMAIL,
       to: email,
       subject: "Reset Your Gossips Password",
@@ -2020,6 +2031,13 @@ export const forgotPassword = async (req, res) => {
         </div>
       `,
     });
+
+    try {
+      await deliverResetEmail();
+    } catch (error) {
+      // Logged by shape, never by body: a transport error can echo the address.
+      console.error("forgotPassword: reset email failed:", error?.code ?? error?.name);
+    }
 
     res.status(200).json(genericResponse);
   } catch (error) {
@@ -2142,8 +2160,16 @@ export const resetPassword = async (req, res) => {
     user.lockoutUntil = null;
     await user.save();
 
-    // Revoke all existing sessions on password reset (security best practice)
+    /*
+     * Cut every device off, not just every refresh token.
+     *
+     * Deleting the sessions stops new access tokens being minted. The cutoff
+     * voids the ones already out there — without it, someone who reset their
+     * password *because* they had been compromised left the attacker with a
+     * working access token for the rest of its 15 minutes.
+     */
     await UserSession.deleteMany({ user: user._id });
+    await invalidateIssuedTokens(user._id);
 
     // Send security confirmation email asynchronously (do not fail reset if email transport fails)
     sendPasswordChangedEmail(user.email, user.name || user.username).catch((err) =>
@@ -2212,6 +2238,14 @@ export const refreshAccessToken = async (req, res) => {
           `Security Alert: Refresh token reuse detected for user ${decoded.id}. Revoking all sessions.`
         );
         await UserSession.deleteMany({ user: decoded.id });
+        /*
+         * A replayed refresh token means one of the two holders is a thief and
+         * we cannot tell which. Deleting the sessions stops both from getting
+         * *new* access tokens; the cutoff voids the ones they already hold,
+         * which is the half that actually ends the intrusion now rather than in
+         * fifteen minutes.
+         */
+        await invalidateIssuedTokens(decoded.id);
 
         const baseOptions = {
           httpOnly: true,
@@ -2578,6 +2612,13 @@ export const logoutOtherDevices = async (req, res) => {
 export const logoutAllDevices = async (req, res) => {
   try {
     await UserSession.deleteMany({ user: req.user._id });
+    /*
+     * "Everywhere" has to include the access tokens on the other devices. The
+     * denylist below can only reach the one token this request is holding, so
+     * without the cutoff every *other* device stayed authenticated for up to
+     * fifteen minutes after being told it was signed out.
+     */
+    await invalidateIssuedTokens(req.user._id);
 
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith("Bearer ")) {

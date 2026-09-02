@@ -100,6 +100,19 @@ const userSchema = new Schema(
     failedLoginAttempts: { type: Number, default: 0, select: false },
     lockoutUntil:        { type: Date, default: null, select: false },
 
+    /*
+     * Access tokens issued before this instant are void — see utils/tokenCutoff.js.
+     *
+     * Set by a password reset, "log out everywhere", and refresh-token reuse
+     * detection. Deleting `UserSession` rows only stops *refresh*; without this
+     * an access token already in an attacker's hands stayed good for the rest of
+     * its 15 minutes, which is exactly the window those three actions exist to
+     * close. Deliberately not `select: false`: `protect` reads it on every
+     * request and a field that is easy to forget to select is a check that will
+     * eventually be skipped.
+     */
+    sessionsValidFrom:   { type: Date, default: null },
+
     // ── Profile ───────────────────────────────────────────────
     bio:        { type: String, default: "", maxlength: 250 },
     /*

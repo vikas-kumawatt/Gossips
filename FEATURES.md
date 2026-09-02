@@ -154,9 +154,19 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **What it does:** Emails a reset link, and a successful reset signs the account out everywhere.
 
-**How it works:** `POST /auth/forgot-password` always returns the same generic message whether or not the email exists (scoped to human accounts), generates a 32-byte random token, stores only its SHA-256 hash with a 1-hour expiry, and emails the raw token. `ResetPassword.jsx` (`/reset-password/:token`) posts to `POST /auth/reset-password`, which re-hashes to match, validates the password, saves it (hashed by the pre-save hook), clears the reset fields, and **deletes every `UserSession` row for that user**. Both endpoints share a 5/hour limiter.
+**How it works:** `POST /auth/forgot-password` always returns the same generic message whether or not the email exists (scoped to human accounts), generates a 32-byte random token, stores only its SHA-256 hash with a 1-hour expiry, and emails the raw token. `ResetPassword.jsx` (`/reset-password/:token`) posts to `POST /auth/reset-password`, which re-hashes to match, validates the password, saves it (hashed by the pre-save hook), clears the reset fields and any lockout, and **deletes every `UserSession` row for that user**. Both endpoints share a 5/hour limiter. A "Your password was changed" notification is then sent asynchronously, with a `.catch` so a mail failure cannot fail a reset that has already happened.
 
-**Improved:** Sends an asynchronous "Your password was changed" security notification email to the user upon successful password reset, confirming session revocation and providing an immediate account recovery link.
+**The confirmation email's promise is now true.** It tells the user their sessions were revoked, and until recently that was only half accurate. Deleting `UserSession` rows stops new access tokens being minted; it does nothing to the 15-minute access tokens already on devices, which the server has never seen and cannot enumerate. So the person resetting their password *because* they had been compromised left the attacker a working token for the rest of its life — while being emailed a note saying otherwise.
+
+`utils/tokenCutoff.js` closes that with `User.sessionsValidFrom`, a per-account "everything issued before this instant is void" timestamp checked against each token's `iat` by `protect`, `optionalProtect` and the socket handshake. It is set by the three actions that mean *void everything*: a password reset, `POST /auth/logout-all`, and refresh-token reuse detection. The existing `RevokedToken` denylist stays for the case it fits — blocking one named token, which is what logout holds — but it cannot express "every token this account has anywhere", and those three paths are exactly that.
+
+The comparison is in whole seconds, flooring the cutoff rather than scaling `iat` up. `iat` has one-second granularity while the cutoff is milliseconds, so the naive comparison rejects the token issued by the very next sign-in and locks the user out of the account they just recovered. `logout-others` deliberately does *not* set the cutoff — one timestamp cannot say "all except mine" — so the other devices' access tokens there still lapse on their own within 15 minutes.
+
+**Mail failure is no longer an enumeration oracle.** Every other branch is careful to be indistinguishable: an unregistered address gets the same 200 and the same wording. But the send was awaited bare, so a transport failure fell through to the 500 handler — during any SMTP outage, "500" meant the address is registered and "200" meant it is not. The send is now caught and logged by error shape, and answers identically either way.
+
+**How it's verified.** `test/passwordReset.test.js` drives the real `forgotPassword` and `resetPassword`, extracting the reset token from the emailed link because that is the only place it exists in plaintext. Mutations: removing the reset's cutoff fails 2 cases, removing `logout-all`'s fails 1, and switching the cutoff comparison to milliseconds fails the boundary case.
+
+There is no "change password while signed in" endpoint at all — the only route to a new password is forgot/reset. Worth knowing, since it means this flow carries the whole weight of password change, and a logged-in change would need the same cutoff treatment.
 
 ### Show/hide password toggle
 
@@ -286,7 +296,7 @@ Auth is a hand-rolled JWT scheme (no Passport/NextAuth) with three token types s
 
 **How it works:** `test/authHarness.mjs` registers `mock.module` fakes and then dynamically imports `authController`, so the suites call the real `signupUser`, `verifyOtp`, `resendOtp` and `loginUser`. The fake models record every write, which is what lets a test assert something did *not* happen — usually the interesting assertion on these paths. Suites drive whole flows (sign up → read the code out of the mailed subject → verify) rather than poking at branches.
 
-Three things the fakes must get right, each of which otherwise makes a suite pass or fail for the wrong reason: the filter matcher needs `$ne`, because `HUMAN_ACCOUNT` is `{ isBot: { $ne: true } }` and an equality-only matcher would miss every row predating the field; reads must return copies, or `reissueOtp`'s rollback restores already-overwritten values over themselves and a correct controller looks broken; and `create` must apply schema defaults, since `claimAttempt` filters on `attempts: { $lt: 5 }` and an undefined field does not satisfy it. There is also one rule for suite authors, documented at the top of the harness: never statically import a module that touches a model, because the hoisted import binds the real model before the mocks register.
+Four things the fakes must get right, each of which otherwise makes a suite pass or fail for the wrong reason: the filter matcher needs `$ne`, because `HUMAN_ACCOUNT` is `{ isBot: { $ne: true } }` and an equality-only matcher would miss every row predating the field; reads must return copies, or `reissueOtp`'s rollback restores already-overwritten values over themselves and a correct controller looks broken; `create` must apply schema defaults, since `claimAttempt` filters on `attempts: { $lt: 5 }` and an undefined field does not satisfy it; and reads must carry a `save()` plus the `User` password pre-save hook, because `forgotPassword` and `resetPassword` are the only auth handlers that mutate a document rather than issuing an `updateOne` — without the hook, a correct reset appears to store a plaintext password. There is also one rule for suite authors, documented at the top of the harness: never statically import a module that touches a model, because the hoisted import binds the real model before the mocks register.
 
 **Why it was rewritten.** Every auth suite used to be `simulate*` helpers defined inside the test file — a local re-implementation of a branch, asserted against itself, with `authController` never imported. They could not fail. On paths whose failure mode is a silent takeover or a bypassed lockout, that is worse than no test: it converts "untested" into "believed tested".
 
@@ -311,6 +321,9 @@ Three things the fakes must get right, each of which otherwise makes a suite pas
 | `revokeSession` stops scoping to the caller | 1 |
 | `listSessions` reports trust without checking expiry | 1 |
 | `logout-others` also clears the current device | 1 |
+| Password reset stops voiding issued access tokens | 2 |
+| `logout-all` stops voiding other devices' tokens | 1 |
+| Cutoff compares milliseconds against `iat` seconds | 1 |
 
 The row-cap mutation is worth noting: it initially failed *nothing*, because every test reached the cap sequentially and was stopped by the cheap pre-insert count. The post-insert enforcement — the part that actually holds under concurrency — was untested until a `Promise.all` case was added. Without the trim that case now produces 12 live rows against a cap of 5.
 

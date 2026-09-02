@@ -12,6 +12,7 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { JWT_VERIFY_OPTIONS, isAccessToken, getAccessTokenSecret } from "./jwt.js";
 import { isTokenRevoked } from "../utils/tokenRevocation.js";
+import { isTokenBeforeCutoff } from "../utils/tokenCutoff.js";
 import { ALLOWED_ORIGINS } from "./origins.js";
 import { getSettings } from "../utils/settings.js";
 import { parseReactionEmoji, parseSkinTone } from "../utils/reactions.js";
@@ -410,11 +411,19 @@ export const initializeSocket = (server) => {
       }
 
       const user = await User.findById(decoded.id).select(
-        "username name profilePic accountStatus role"
+        "username name profilePic accountStatus role sessionsValidFrom"
       );
 
       if (!user) {
         return next(new Error("User not found"));
+      }
+      // Same reasoning as the revocation check above: a password reset or a
+      // "log out everywhere" must close the socket door too, and it voids
+      // tokens by issue time rather than by name. A connection opened before
+      // the cutoff would otherwise keep streaming messages in real time to
+      // someone the account has just locked out.
+      if (isTokenBeforeCutoff(decoded, user)) {
+        return next(new Error("Authentication error"));
       }
       if (user.accountStatus !== "active") {
         return next(new Error("Account unavailable"));
