@@ -1,4 +1,4 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 import { useNavigate, useParams, Link } from "react-router-dom";
 import InputBox from "../components/InputBox";
 import { Toaster, toast } from "react-hot-toast";
@@ -6,28 +6,39 @@ import axios from "axios";
 import { Loader2 } from "lucide-react";
 import { Icons } from "../components/icons";
 
+const PASSWORD_RULE =
+  "6-20 characters, with a lowercase letter, an uppercase letter and a number";
+const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/;
+
 const ResetPassword = () => {
   const { token } = useParams();
   const navigate = useNavigate();
-  const formRef = useRef(null);
   const [loading, setLoading] = useState(false);
+
+  /*
+   * Controlled, so the two fields can be compared while they are being typed.
+   *
+   * They were read out of `FormData` on submit, which meant a mismatch — the
+   * common failure on a screen with two adjacent password boxes — surfaced only
+   * as a toast, after the fact, pointing at neither field and then vanishing on
+   * its own. You were left looking at two identical-looking boxes with no idea
+   * which one to fix.
+   */
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  // Not while the confirm field is still empty: nobody wants to be told they
+  // got it wrong before they have finished the first keystroke.
+  const mismatch = confirmPassword.length > 0 && password !== confirmPassword;
 
   const handleResetPassword = async (e) => {
     e.preventDefault();
-
-    const passwordRegex = /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{6,20}$/;
-    const form = new FormData(formRef.current);
-    const formData = Object.fromEntries(form.entries());
-    const { password, confirmPassword } = formData;
 
     if (!password) {
       return toast.error("Please enter a new password");
     }
 
     if (!passwordRegex.test(password)) {
-      return toast.error(
-        "Your password must be 6-20 characters including a lowercase letter, an uppercase letter, and a number"
-      );
+      return toast.error(`Your password must be ${PASSWORD_RULE}`);
     }
 
     if (password !== confirmPassword) {
@@ -53,7 +64,6 @@ const ResetPassword = () => {
     <section className="w-full h-screen flex justify-center items-center bg-neutral-950 relative">
       <Toaster />
       <form
-        ref={formRef}
         onSubmit={handleResetPassword}
         className="w-[80%] max-w-[400px] flex flex-col items-center"
       >
@@ -66,7 +76,13 @@ const ResetPassword = () => {
           placeholder="New Password"
           icon="fi-rr-key"
           autoComplete="new-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
         />
+
+        {/* Stated up front. The rule was previously discoverable only by
+            breaking it and reading the toast. */}
+        <p className="w-full -mt-2 mb-4 text-xs text-neutral-500">{PASSWORD_RULE}</p>
 
         <InputBox
           name="confirmPassword"
@@ -74,6 +90,9 @@ const ResetPassword = () => {
           placeholder="Confirm Password"
           icon="fi-rr-key"
           autoComplete="new-password"
+          value={confirmPassword}
+          onChange={(e) => setConfirmPassword(e.target.value)}
+          error={mismatch ? "Passwords do not match" : undefined}
         />
 
         <button

@@ -172,9 +172,15 @@ There is no "change password while signed in" endpoint at all — the only route
 
 **What it does:** Reveals the password being typed.
 
-**How it works:** `InputBox.jsx` flips the input's `type` between `password` and `text` from local state.
+**How it works:** `InputBox.jsx` flips the input's `type` between `password` and `text` from local state, per instance — so the two adjacent fields on `ResetPassword.jsx` reveal independently. Both carry `autoComplete="new-password"` and a key icon.
 
-**Improved:** `ResetPassword.jsx` upgraded with individual show/hide eye toggles across both adjacent password inputs, proper `autoComplete="new-password"` attributes, key icons, empty input guarding, and standardized brand layout.
+**The toggle is a button.** It was an `<i onClick>`: no role, no accessible name, not in the tab order, no keyboard activation. So the one control whose entire job is "let me check what I typed" worked only for a mouse — roughly the population least likely to need it — and a screen reader saw nothing at all. It is now a `<button type="button">` with `aria-label`, `aria-pressed` for the toggle state, and the eye glyph marked `aria-hidden` so the name is not read twice. `type="button"` is load-bearing rather than tidiness: these sit inside forms, and a bare `<button>` defaults to `type="submit"`, so revealing your password would submit the form. Being in the shared `InputBox`, the fix covers login and signup as well as both reset fields.
+
+**Mismatch is shown on the field, not in a toast.** `ResetPassword.jsx` holds both values in state and compares them as they are typed, once the confirm field is non-empty. `InputBox` takes optional `onChange` and `error` props: the message is bound to its input by `aria-describedby` with `role="alert"`, and the border turns red. Previously the two fields were read out of `FormData` on submit, so the common failure on a screen with two identical-looking boxes surfaced as a transient toast that pointed at neither field and then disappeared. The password rule is also stated under the first field rather than being discoverable only by breaking it.
+
+`InputBox` stays uncontrolled unless `onChange` is passed. `UserAuthForm` supplies `value` purely to prefill and reads fields back through `FormData`, and giving React both `value` and `defaultValue` is an error — so the two modes are exclusive rather than merged.
+
+**How it's verified.** `frontend/test/passwordFields.test.mjs` mounts the real component through the jsdom harness in `test-support/helpers.mjs` and finds the control the way an assistive technology would — by role and accessible name — then asserts it is a button, is typed `button`, is tabbable, announces its state, actually unmasks the value, and that two fields on one screen get distinct `aria-describedby` targets.
 
 ### Access/refresh token issuance & rotation
 
