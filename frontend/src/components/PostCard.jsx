@@ -29,6 +29,7 @@ import { useReport } from "../contexts/ReportContext";
 import EditContentSheet from "./EditContentSheet";
 import EditHistorySheet from "./EditHistorySheet";
 import ShareSheet from "./ShareSheet";
+import { buildShareUrl } from "../lib/shareTargets";
 import { useFollow } from "../contexts/FollowContext";
 import { useChat } from "../contexts/ChatContext";
 import { REPLY_RESTRICTED_TEXT } from "../lib/replyAudience";
@@ -1035,12 +1036,54 @@ const PostCard = ({
       case "hide-count":
         handleToggleHideCount(e);
         break;
-      case "copy-link":
-        if (id)
-          navigator.clipboard.writeText(
-            `https://gossipsss.netlify.app/${isComment ? "comment" : "post"}/${id}`
-          );
+      case "copy-link": {
+        const targetPostId = isComment
+          ? propPostId || (typeof data?.post === "object" ? data?.post?._id : data?.post) || id
+          : id || propPostId;
+
+        if (!targetPostId) {
+          toast.error("Couldn't copy link: post ID is missing");
+          break;
+        }
+
+        const rawUsername =
+          author?.username ||
+          (typeof author === "string" ? author : null) ||
+          data?.author?.username ||
+          item?.author?.username ||
+          "user";
+
+        const shareUrl = buildShareUrl({
+          username: rawUsername,
+          postId: targetPostId,
+        });
+
+        if (navigator?.clipboard?.writeText) {
+          navigator.clipboard
+            .writeText(shareUrl)
+            .then(() => {
+              toast.success("Link copied");
+            })
+            .catch(() => {
+              toast.error("Couldn't copy link");
+            });
+        } else {
+          try {
+            const textarea = document.createElement("textarea");
+            textarea.value = shareUrl;
+            textarea.style.position = "fixed";
+            textarea.style.opacity = "0";
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand("copy");
+            document.body.removeChild(textarea);
+            toast.success("Link copied");
+          } catch {
+            toast.error("Couldn't copy link");
+          }
+        }
         break;
+      }
       case "toggle-favorite-chat":
         handleToggleFavoriteChat();
         break;

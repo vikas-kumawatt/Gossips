@@ -492,7 +492,7 @@ The social graph is a single `Follow` edge collection (`follower`, `following`, 
 
 **How it works:** `lib/profileLink.js#buildProfileUrl` builds `${window.location.origin}/${username}` from the runtime origin (not an env var), used by the profile dropdown and `ShareProfileSheet.jsx` via `navigator.clipboard.writeText` with toast feedback.
 
-**Improvements:** **`PostCard.jsx`'s copy-link action is broken** — it hardcodes `https://gossipsss.netlify.app/${isComment?"comment":"post"}/${id}`, a different domain from the dynamic-origin pattern and a path shape (`/post/:id`) that doesn't match the real route (`/:username/post/:postId`) used by `shareTargets.js#buildShareUrl`. Copied post links can 404. Fix by reusing the shared builder.
+**Improved:** Unified post and comment link copying in `PostCard.jsx` via `lib/shareTargets.js#buildShareUrl` using dynamic runtime origin (`window.location.origin`) and the canonical `/:username/post/:postId` route. Added clipboard error resilience with toast feedback and fallback for non-secure contexts.
 
 ### Share sheet
 

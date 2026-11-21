@@ -12,8 +12,19 @@
  * `/post/<id>` link 404s. Comments live on their parent post's page, so a
  * shared comment links to the post that contains it.
  */
-export const buildShareUrl = ({ username, postId }) =>
-  `${window.location.origin}/${username}/post/${postId}`;
+export const buildShareUrl = ({ username, postId }) => {
+  const origin =
+    typeof window !== "undefined" && window.location?.origin
+      ? window.location.origin.replace(/\/+$/, "")
+      : "";
+  const rawUser = username ? String(username).replace(/^@/, "").trim() : "";
+  const user = rawUser ? encodeURIComponent(rawUser) : "user";
+  const id =
+    typeof postId === "object" && postId !== null
+      ? postId._id || postId.toString()
+      : postId;
+  return `${origin}/${user}/post/${id}`;
+};
 
 export const EXTERNAL_TARGETS = [
   {
